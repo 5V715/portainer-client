@@ -93,4 +93,10 @@ class RegistriesApiTest {
         assertEquals(HttpMethod.Delete, req!!.method)
         assertEquals("/api/registries/7", req!!.url.encodedPath)
     }
+
+    @Test
+    fun inputToStringRedactsPassword() {
+        val s = RegistryInput("GH", RegistryType.GitHub, "ghcr.io", true, "me", "hunter2").toString()
+        assertFalse(s.contains("hunter2"))
+    }
 }

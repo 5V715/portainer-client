@@ -27,4 +27,8 @@ data class RegistryInput(
     val password: String?,
     val baseUrl: String? = null,
     val ecrRegion: String? = null,
-)
+) {
+    override fun toString(): String =
+        "RegistryInput(name=$name, type=$type, url=$url, authentication=$authentication, username=$username, " +
+            "password=${if (password == null) "null" else "***"}, baseUrl=$baseUrl, ecrRegion=$ecrRegion)"
+}

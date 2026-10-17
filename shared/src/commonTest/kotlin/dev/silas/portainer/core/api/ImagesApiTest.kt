@@ -105,4 +105,26 @@ class ImagesApiTest {
         assertNotNull(o)
         assertEquals("/api/endpoints/1/docker/images/abc/json", req!!.url.encodedPath)
     }
+
+    @Test
+    fun rbacForbiddenStaysUnauthorized() = runTest {
+        val c = client(HttpStatusCode.Forbidden, "{\"message\":\"Access denied to resource\"}")
+        assertFailsWith<PortainerException.Unauthorized> { c.pullImage(1, ImageRef.parse("nginx"), null) }
+    }
+
+    @Test
+    fun registryDenialOnNotFoundUsesDenialMessage() = runTest {
+        val c = client(HttpStatusCode.NotFound, "{\"message\":\"pull access denied for x, repository does not exist or may require 'docker login'\"}")
+        val e = assertFailsWith<PortainerException.Api> { c.pullImage(1, ImageRef.parse("x"), null) }
+        assertEquals(denial, e.message)
+        assertEquals(404, e.status)
+    }
+
+    @Test
+    fun tagAndDigestPullsByDigest() = runTest {
+        var req: HttpRequestData? = null
+        client(body = "{}") { req = it }.pullImage(1, ImageRef.parse("me/app:2@sha256:abc"), null)
+        assertEquals("me/app", req!!.url.parameters["fromImage"])
+        assertEquals("sha256:abc", req!!.url.parameters["tag"])
+    }
 }
