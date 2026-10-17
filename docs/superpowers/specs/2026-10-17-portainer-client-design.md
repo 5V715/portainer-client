@@ -23,7 +23,8 @@ If that loop is fast and safe on a phone, v1 is a success.
   multi-user features.
 - Portainer is reachable from the phone via the home network or a VPN. It is
   exposed but firewalled; the app never assumes public internet reachability.
-- Transport is **plain HTTP**. Authentication is a **Portainer API access
+- Transport is **HTTPS** with a publicly trusted Let's Encrypt certificate
+  (owner correction: "access to portainer is always via https"). Authentication is a **Portainer API access
   token** (sent as the `X-API-Key` header). No username/password login in v1.
 - Mostly Docker environments. Containers are a mix of standalone containers and
   containers belonging to compose stacks.
@@ -31,7 +32,7 @@ If that loop is fast and safe on a phone, v1 is a success.
 ## Goals (v1)
 
 1. **Servers**
-   - Add a Portainer server: display name, base URL (e.g. `http://192.168.1.10:9000`),
+   - Add a Portainer server: display name, base URL (e.g. `https://portainer.example.com`),
      API key. Validate on save by calling the API.
    - Save multiple servers; switch between them. Edit and delete servers.
    - After selecting a server, pick an environment (Portainer "endpoint").
@@ -126,15 +127,19 @@ even though only Docker is handled).
     `main`, version tags, and manual `workflow_dispatch`.
   - Signing, TestFlight, Play Store publishing are out of scope for v1. Making
     the repo public would make macOS runners free; that is the owner's call.
-- **Cleartext HTTP:** Android must allow cleartext traffic (network security
-  config); iOS must set ATS exceptions (`NSAllowsArbitraryLoads` or
-  `NSAllowsLocalNetworking`, whichever reliably covers LAN IPs and VPN hosts).
-- **Web build limitation (documented, not solved in v1):** a browser can only
-  call Portainer directly if Portainer returns CORS headers for the page's
-  origin, and an HTTPS-served page cannot call an HTTP API (mixed content). The
-  wasm build is therefore expected to work only when served over HTTP from an
-  origin Portainer accepts (or behind a reverse proxy the user sets up). The
-  README must say this plainly. No proxy server is built for v1.
+- **HTTPS only (designer's call):** no cleartext exceptions on Android or iOS;
+  default platform certificate validation (Let's Encrypt is trusted). `http://`
+  URLs are rejected in the add-server form with "Portainer must be reached over
+  HTTPS"; a URL without a scheme gets `https://`.
+- **Web build on GitHub Pages:** CI deploys the wasm build to GitHub Pages
+  (on pushes to `main`). This needs Pages enabled for the repo (public repo, or
+  a paid plan for a private one). For the app to work from Pages, Portainer
+  must answer CORS requests from the Pages origin (allow origin, the
+  `X-API-Key` and `Content-Type` headers, and the used methods). Whether
+  Portainer does this on its own is unverified; if not, the owner adds the
+  headers in a reverse proxy. The README documents both, with an example proxy
+  snippet. Chrome may ask once for local network permission when the Portainer
+  hostname resolves to a private IP.
 - **API key storage:** Android — encrypted with an Android Keystore-backed key;
   iOS — Keychain; wasm — browser `localStorage` (documented as not secure).
   Non-secret server metadata (name, URL, last environment) may use ordinary
@@ -224,7 +229,7 @@ unbounded memory growth on long follows.
   including rollback paths, and view-model state.
 - CI must be green on every push for Android + wasm; iOS on `main`.
 - README: what the app does, how to create a Portainer API key, how to build
-  each target, the HTTP/cleartext note, and the web build limitations.
+  each target, and the web build requirements (CORS, Pages).
 
 ## Left to the builder
 
