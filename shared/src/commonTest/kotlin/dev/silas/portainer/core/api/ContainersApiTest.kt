@@ -5,6 +5,8 @@ import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.Health
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
+import io.ktor.client.plugins.HttpTimeoutCapability
+import io.ktor.client.plugins.HttpTimeoutConfig
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -12,6 +14,7 @@ import io.ktor.http.headersOf
 import io.ktor.http.content.OutgoingContent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -164,7 +167,7 @@ class ContainersApiTest {
                 respond("", HttpStatusCode.OK)
             },
         )
-        val config = JsonObject(mapOf("Aliases" to kotlinx.serialization.json.JsonArray(listOf(JsonPrimitive("web")))))
+        val config = JsonObject(mapOf("Aliases" to JsonArray(listOf(JsonPrimitive("web")))))
         c.connectNetwork(1, "backend", "new123", config)
         assertEquals("https://h/api/endpoints/1/docker/networks/backend/connect", url)
         val sent = Json.parseToJsonElement(body!!).jsonObject
@@ -187,5 +190,25 @@ class ContainersApiTest {
         assertEquals("https://h/api/endpoints/1/docker/containers/abc/json", url)
         assertEquals("/web", obj["Name"]?.jsonPrimitive?.content)
         assertEquals(JsonPrimitive(true), obj["HostConfig"]?.jsonObject?.get("AutoRemove"))
+    }
+
+    @Test
+    fun stopWaitsForContainerStopTimeout() = runTest {
+        val seen = mutableListOf<Pair<String, HttpTimeoutConfig?>>()
+        val c = PortainerClient(
+            "https://h",
+            "k",
+            MockEngine { request ->
+                seen += request.url.toString() to request.getCapabilityOrNull(HttpTimeoutCapability)
+                respond("", HttpStatusCode.NoContent)
+            },
+        )
+        c.stopContainer(1, "abc")
+        c.startContainer(1, "abc")
+        val (stopUrl, stopTimeout) = seen[0]
+        assertEquals("https://h/api/endpoints/1/docker/containers/abc/stop", stopUrl, "no t= parameter: Docker uses the container's own stop timeout")
+        assertEquals(300_000L, stopTimeout?.requestTimeoutMillis)
+        assertEquals(300_000L, stopTimeout?.socketTimeoutMillis)
+        assertNull(seen[1].second?.requestTimeoutMillis?.takeIf { it == 300_000L })
     }
 }

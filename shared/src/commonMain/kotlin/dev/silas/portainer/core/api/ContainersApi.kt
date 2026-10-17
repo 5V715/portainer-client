@@ -7,6 +7,7 @@ import dev.silas.portainer.core.logs.LogOptions
 import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeoutConfig
 import io.ktor.client.plugins.timeout
+import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.parameter
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsChannel
@@ -23,6 +24,7 @@ import kotlinx.serialization.json.JsonPrimitive
 
 private const val COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 private const val NOT_MODIFIED = 304
+private const val STOP_TIMEOUT_MS = 5 * 60_000L
 
 @Serializable
 private data class ContainerDto(
@@ -61,8 +63,17 @@ suspend fun PortainerClient.containers(endpointId: Int): List<ContainerSummary> 
 suspend fun PortainerClient.startContainer(endpointId: Int, id: String) =
     containerAction(endpointId, id, "start")
 
+/**
+ * No `t` parameter, so Docker waits the container's own stop timeout; the request timeout is raised to
+ * [STOP_TIMEOUT_MS] because that grace period is often longer than the client default.
+ */
 suspend fun PortainerClient.stopContainer(endpointId: Int, id: String) =
-    containerAction(endpointId, id, "stop")
+    containerAction(endpointId, id, "stop") {
+        timeout {
+            requestTimeoutMillis = STOP_TIMEOUT_MS
+            socketTimeoutMillis = STOP_TIMEOUT_MS
+        }
+    }
 
 suspend fun PortainerClient.restartContainer(endpointId: Int, id: String) =
     containerAction(endpointId, id, "restart")
@@ -108,9 +119,15 @@ suspend fun PortainerClient.connectNetwork(endpointId: Int, network: String, con
 }
 
 /** Docker answers 304 when the container is already in the requested state; that counts as success. */
-private suspend fun PortainerClient.containerAction(endpointId: Int, id: String, action: String) {
+private suspend fun PortainerClient.containerAction(
+    endpointId: Int,
+    id: String,
+    action: String,
+    configure: HttpRequestBuilder.() -> Unit = {},
+) {
     execute(dockerPath(endpointId, "containers/$id/$action"), okStatuses = setOf(NOT_MODIFIED)) {
         method = HttpMethod.Post
+        configure()
     }
 }
 
