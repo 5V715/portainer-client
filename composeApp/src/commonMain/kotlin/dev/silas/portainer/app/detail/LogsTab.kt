@@ -1,7 +1,6 @@
 package dev.silas.portainer.app.detail
 
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -52,7 +52,12 @@ fun LogsTab(viewModel: LogsViewModel) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var autoScroll by remember { mutableStateOf(true) }
-    val visible = state.visible
+    // Pairs of (stable sequence number, line); recomputed only when the inputs change, not on every recomposition.
+    val visible = remember(state.lines, state.firstSeq, state.query, state.matchesOnly) {
+        val needle = state.query.takeIf { state.matchesOnly && it.isNotEmpty() }
+        state.lines.mapIndexed { i, l -> (state.firstSeq + i) to l }
+            .filter { (_, l) -> needle == null || l.text.contains(needle, ignoreCase = true) }
+    }
 
     // Stop collecting while the app is in the background (or this tab is left); resume from the last line.
     LifecycleResumeEffect(viewModel) {
@@ -67,37 +72,48 @@ fun LogsTab(viewModel: LogsViewModel) {
         }
     }
 
-    // Auto-scroll sticks until the user drags the list; reaching the bottom again re-enables it.
+    // Follow the tail only while the viewport was at the bottom before new lines arrived. User scrolling by any
+    // input (drag, wheel, keyboard) updates the flag; growth of the list alone never turns it off.
+    var programmatic by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
-        launch {
-            listState.interactionSource.interactions.collect { if (it is DragInteraction.Start) autoScroll = false }
+        snapshotFlow { listState.isScrollInProgress to listState.isAtBottom() }.collect { (scrolling, atBottom) ->
+            if (atBottom) autoScroll = true else if (scrolling && !programmatic) autoScroll = false
         }
-        snapshotFlow { listState.canScrollForward }.collect { if (!it) autoScroll = true }
     }
-    LaunchedEffect(visible.size, autoScroll) {
-        if (autoScroll && visible.isNotEmpty()) listState.scrollToItem(visible.lastIndex)
+    suspend fun scrollToEnd(lastIndex: Int) {
+        programmatic = true
+        try {
+            listState.scrollToItem(lastIndex)
+        } finally {
+            programmatic = false
+        }
+    }
+    LaunchedEffect(visible.size, state.firstSeq) {
+        if (autoScroll && visible.isNotEmpty()) scrollToEnd(visible.lastIndex)
     }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             Controls(state, viewModel)
-            SelectionContainer(Modifier.weight(1f)) {
-                LazyColumn(Modifier.fillMaxSize().padding(horizontal = 8.dp), state = listState) {
-                    items(visible) { line -> LogRow(line, state.showTimestamps, state.query) }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                SelectionContainer {
+                    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 8.dp), state = listState) {
+                        items(visible, key = { it.first }) { (_, line) -> LogRow(line, state.showTimestamps, state.query) }
+                    }
                 }
-            }
-            if (visible.isEmpty()) {
-                Text(
-                    if (state.following) "Waiting for output…" else "No log output",
-                    Modifier.padding(16.dp).align(Alignment.CenterHorizontally),
-                )
+                if (visible.isEmpty()) {
+                    Text(
+                        if (state.following) "Waiting for output…" else "No log output",
+                        Modifier.align(Alignment.Center).padding(16.dp),
+                    )
+                }
             }
         }
         if (!autoScroll && visible.isNotEmpty()) {
             ExtendedFloatingActionButton(
                 onClick = {
                     autoScroll = true
-                    scope.launch { listState.scrollToItem(visible.lastIndex) }
+                    scope.launch { scrollToEnd(visible.lastIndex) }
                 },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
             ) { Text("Jump to latest") }
@@ -153,4 +169,11 @@ internal fun highlighted(text: String, query: String, highlight: Color): Annotat
         from = hit + query.length
     }
     append(text.substring(from))
+}
+
+/** True when the last item is the last one in the list and fully inside the viewport (or the list is empty). */
+private fun LazyListState.isAtBottom(): Boolean {
+    val info = layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return true
+    return last.index == info.totalItemsCount - 1 && last.offset + last.size <= info.viewportEndOffset + 1
 }

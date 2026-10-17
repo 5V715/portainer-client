@@ -7,9 +7,11 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -125,5 +127,63 @@ class LogsViewModelTest {
         assertTrue(!vm.state.value.showTimestamps)
         vm.toggleTimestamps()
         assertTrue(vm.state.value.showTimestamps)
+    }
+
+    // --- live collector: each request stays open until its gate is completed ---
+
+    private val gates = mutableListOf<CompletableDeferred<String>>()
+    private var outstanding = 0
+
+    private suspend fun gatedEnv(): TestEnv {
+        val env = TestEnv { req ->
+            queries += req.url.parameters.entries().associate { it.key to it.value.first() }
+            val gate = CompletableDeferred<String>()
+            gates += gate
+            outstanding++
+            try {
+                respond(gate.await(), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/plain"))
+            } finally {
+                outstanding--
+            }
+        }
+        env.repo.save(ServerConfig("s1", "A", "https://a.example.com"), "k")
+        return env
+    }
+
+    @Test
+    fun changingTailTwiceLeavesOnlyTheLastCollectorAndIgnoresStaleOutput() = runTest {
+        val vm = vm(gatedEnv())
+        settle { gates.size == 1 }
+        vm.setTail(1000)
+        settle { gates.size == 2 && outstanding == 1 }
+        vm.setTail(100)
+        settle { gates.size == 3 && outstanding == 1 }
+        assertEquals(listOf("200", "1000", "100"), queries.map { it["tail"] })
+        gates[0].complete(text(0..0, "stale"))
+        gates[1].complete(text(0..0, "stale"))
+        gates[2].complete(text(0..1, "new"))
+        settle { vm.state.value.lines.size == 2 && !vm.state.value.following }
+        assertEquals(listOf("new 0", "new 1"), vm.state.value.lines.map { it.text })
+    }
+
+    @Test
+    fun pauseMidStreamStopsTheRequestAndIgnoresLateOutput() = runTest {
+        val vm = vm(gatedEnv())
+        settle { gates.size == 1 && vm.state.value.following }
+        vm.pause()
+        settle { outstanding == 0 }
+        assertTrue(!vm.state.value.following)
+        gates[0].complete(text(0..2, "late"))
+        advanceUntilIdle()
+        assertTrue(vm.state.value.lines.isEmpty())
+        assertTrue(!vm.state.value.following)
+    }
+
+    @Test
+    fun clearingTheViewModelCancelsTheCollector() = runTest {
+        val vm = vm(gatedEnv())
+        settle { gates.size == 1 && outstanding == 1 }
+        vm.onCleared()
+        settle { outstanding == 0 }
     }
 }

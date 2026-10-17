@@ -11,6 +11,7 @@ import dev.silas.portainer.core.logs.followLogs
 import dev.silas.portainer.core.logs.rfc3339EpochSeconds
 import dev.silas.portainer.core.platform.platformSupportsStreaming
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.coroutines.coroutineContext
 
 /** Tail choices offered in the UI; null is "All". */
 val TAIL_CHOICES: List<Int?> = listOf(100, 200, 1000, null)
@@ -30,6 +32,8 @@ data class LogsState(
     val matchesOnly: Boolean = false,
     val following: Boolean = false,
     val error: String? = null,
+    /** Sequence number of `lines[0]`; a line's `firstSeq + index` never changes while it stays in the buffer. */
+    val firstSeq: Long = 0,
 ) {
     /** [lines] narrowed to those containing [query] (case-insensitive) when "matches only" is on. */
     val visible: List<LogLine>
@@ -48,6 +52,7 @@ class LogsViewModel(
     val state: StateFlow<LogsState> = _state
 
     private val buffer = LogBuffer()
+    private var added = 0L
     private var job: Job? = null
     private var paused = false
 
@@ -92,8 +97,9 @@ class LogsViewModel(
     private fun startFresh() {
         stop()
         buffer.clear()
+        added = 0
         lastTimestamp = null
-        _state.update { it.copy(lines = emptyList(), error = null) }
+        _state.update { it.copy(lines = emptyList(), firstSeq = 0, error = null) }
         start(LogOptions(tail = _state.value.tail))
     }
 
@@ -106,7 +112,7 @@ class LogsViewModel(
     /** [skipUpTo]: lines at or before this timestamp were already shown (the `since` window is whole seconds). */
     private fun start(options: LogOptions, skipUpTo: String? = null) {
         _state.update { it.copy(following = true) }
-        val mine = viewModelScope.launch {
+        val mine = viewModelScope.launch(start = CoroutineStart.LAZY) {
             val message = try {
                 val client = container.client(serverId)
                 followLogs(client, endpointId, containerId, tty, options, streaming).collect { batch ->
@@ -116,7 +122,9 @@ class LogsViewModel(
                     }
                     if (fresh.isNotEmpty()) {
                         buffer.addAll(fresh)
-                        _state.update { it.copy(lines = buffer.lines) }
+                        added += fresh.size
+                        val lines = buffer.lines
+                        _state.update { it.copy(lines = lines, firstSeq = added - lines.size) }
                     }
                 }
                 null
@@ -129,12 +137,15 @@ class LogsViewModel(
             } catch (e: IllegalStateException) {
                 e.message ?: "Request failed"
             }
-            _state.update { it.copy(following = false, error = message ?: it.error) }
+            // A superseded collector must not touch state that now belongs to its successor.
+            if (job === coroutineContext[Job]) _state.update { it.copy(following = false, error = message ?: it.error) }
         }
         job = mine
+        mine.start()
     }
 
-    override fun onCleared() {
+    /** Public so tests can drive it; the framework calls it when the owner is destroyed. */
+    public override fun onCleared() {
         job?.cancel()
     }
 }
