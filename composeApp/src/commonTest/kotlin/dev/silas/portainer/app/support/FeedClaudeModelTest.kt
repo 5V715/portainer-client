@@ -30,10 +30,19 @@ class FeedClaudeModelTest {
         val m = FeedClaudeModel(300f, Random(1))
         val first = m.coins.first()
         assertTrue(!first.eaten)
+        // Mouth tip is at x + 33; the first coin is at 30, so it must survive until x reaches about -5.
         m.run(0, 3000) { first.eaten }
+        assertTrue(m.x + 11 * PX >= first.x - 2f, "eaten only once the mouth reached it")
         assertTrue(first.eaten)
         assertEquals(1f, first.pop, 0.2f)
         assertTrue(first.pop > 0f)
+    }
+
+    @Test
+    fun doesNotEatBeforeMouthArrives() {
+        val m = FeedClaudeModel(300f, Random(1))
+        m.run(0, 500) // x is about -17: mouth tip about 16, short of the coin at 30
+        assertTrue(m.coins.none { it.eaten })
     }
 
     @Test

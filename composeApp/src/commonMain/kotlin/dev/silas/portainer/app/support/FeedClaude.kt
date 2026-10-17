@@ -67,7 +67,8 @@ private const val SPONSOR = "https://github.com/sponsors/5V715"
 @Composable
 fun FeedClaudeBox(modifier: Modifier = Modifier) {
     val uri = LocalUriHandler.current
-    val pixelFont = FontFamily(Font(Res.font.press_start_2p))
+    val font = Font(Res.font.press_start_2p)
+    val pixelFont = remember(font) { FontFamily(font) }
     val shape = RoundedCornerShape(12.dp)
     Column(
         modifier
@@ -110,7 +111,7 @@ private fun PayButton(label: String, color: Color, modifier: Modifier, onClick: 
     val shape = RoundedCornerShape(8.dp)
     Box(
         modifier
-            .heightIn(min = 40.dp)
+            .heightIn(min = 48.dp)
             .shadow(5.dp, shape, ambientColor = color, spotColor = color)
             .background(color, shape)
             .clickable(role = Role.Button, onClick = onClick)
@@ -124,6 +125,8 @@ private fun PayButton(label: String, color: Color, modifier: Modifier, onClick: 
 @Composable
 private fun MascotTrack(pixelFont: FontFamily, modifier: Modifier) {
     val model = remember { FeedClaudeModel(0f) }
+    val reduceMotion = remember { prefersReducedMotion() }
+    val styles = remember(pixelFont) { PixelStyles(pixelFont) }
     var frame by remember { mutableLongStateOf(0L) }
     val measurer = rememberTextMeasurer()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -131,14 +134,14 @@ private fun MascotTrack(pixelFont: FontFamily, modifier: Modifier) {
     val active = lifecycleState.isAtLeast(Lifecycle.State.STARTED)
 
     // The loop ends when this leaves composition and is suspended while the app is not visible.
-    LaunchedEffect(active) {
-        if (!active) return@LaunchedEffect
+    LaunchedEffect(active, reduceMotion) {
+        if (!active || reduceMotion) return@LaunchedEffect
         var last = -1L
         while (true) {
             withFrameNanos { nanos ->
                 if (last < 0) last = nanos
                 val nowMs = nanos / 1_000_000
-                model.step((nanos - last) / 1e9f, nowMs)
+                if (model.width > 0f) model.step((nanos - last) / 1e9f, nowMs)
                 last = nanos
                 frame = nowMs
             }
@@ -149,33 +152,57 @@ private fun MascotTrack(pixelFont: FontFamily, modifier: Modifier) {
         val density = this.density
         val w = size.width / density
         val h = size.height / density
-        if (model.width != w) model.resize(w)
+        if (model.width != w) {
+            model.resize(w)
+            if (reduceMotion) model.centre()
+        }
         scale(density, density, Offset.Zero) {
-            drawTrack(model, frame, w, h, measurer, pixelFont)
+            drawTrack(model, frame, w, h, measurer, styles)
         }
     }
 }
+
+private val Unit1 = Density(1f)
+
+/** Text styles for the scene, measured at density 1 so sizes stay in the (density-scaled) scene's units. */
+private class PixelStyles(font: FontFamily) {
+    val bubble = TextStyle(fontFamily = font, fontSize = 7.sp)
+    val pop = TextStyle(fontFamily = font, fontSize = 8.sp)
+}
+
+private val CoinEdge = Color(0xFFC98A00)
+private val CoinFace = Color(0xFFFFD23A)
+private val CoinShine = Color(0xFFFFF6B0)
+private val Floor = Color(0xFF38F2FF).copy(alpha = 0.25f)
+private val PopCoin = Color(0xFFFFE14D)
+private val PopTreat = Color(0xFFFF8AC6)
 
 private fun DrawScope.px(color: Color, x: Float, y: Float, w: Float, h: Float) =
     drawRect(color, Offset(x, y), Size(w, h))
 
 private fun DrawScope.sprite(sx: Float, sy: Float, frame: Int, chomp: Boolean) {
-    val rows = BODY + LEGS[frame]
-    rows.forEachIndexed { y, row ->
-        row.forEachIndexed { xx, c ->
-            val color = PAL[c] ?: return@forEachIndexed
-            if (chomp && MOUTH.any { (mx, my) -> mx == xx && my == y }) return@forEachIndexed
+    val rows = FRAMES[frame]
+    for (y in rows.indices) {
+        val row = rows[y]
+        for (xx in row.indices) {
+            val color = palColor(row[xx]) ?: continue
+            if (chomp && isMouth(xx, y)) continue
             px(color, sx + xx * PX, sy + y * PX, PX, PX)
         }
     }
 }
 
+private fun isMouth(x: Int, y: Int): Boolean {
+    for (m in MOUTH) if (m.first == x && m.second == y) return true
+    return false
+}
+
 private fun DrawScope.coin(cx: Float, cy: Float, t: Long) {
     // pixel coin that slowly "spins" (gets narrower and wider)
     val wv = max(2, (3 + 2 * cos(t / 300.0 + cx)).roundToInt()).toFloat()
-    px(Color(0xFFC98A00), cx - wv, cy - 5, wv * 2, 10f)
-    px(Color(0xFFFFD23A), cx - wv + 1, cy - 4, wv * 2 - 2, 8f)
-    px(Color(0xFFFFF6B0), cx - wv + 1, cy - 4, 2f, 2f)
+    px(CoinEdge, cx - wv, cy - 5, wv * 2, 10f)
+    px(CoinFace, cx - wv + 1, cy - 4, wv * 2 - 2, 8f)
+    px(CoinShine, cx - wv + 1, cy - 4, 2f, 2f)
 }
 
 private fun DrawScope.treat(kind: Treat, cx: Float, cy: Float, t: Long) {
@@ -185,17 +212,18 @@ private fun DrawScope.treat(kind: Treat, cx: Float, cy: Float, t: Long) {
     val bob = (sin(t / 250.0 + cx) * 1.5).roundToInt()
     val ox = (cx - tw / 2f).roundToInt().toFloat()
     val oy = (cy - th / 2f).roundToInt().toFloat() + bob
-    map.forEachIndexed { y, row ->
-        row.forEachIndexed { x, c ->
-            val color = TREAT_PAL[c] ?: return@forEachIndexed
+    for (y in map.indices) {
+        val row = map[y]
+        for (x in row.indices) {
+            val color = treatColor(row[x]) ?: continue
             px(color, ox + x * 2, oy + y * 2, 2f, 2f)
         }
     }
 }
 
 
-private fun DrawScope.bubble(measurer: TextMeasurer, font: FontFamily, text: String, mx: Float, my: Float, w: Float) {
-    val layout = measurer.measure(text, TextStyle(fontFamily = font, fontSize = 7.sp), density = Density(1f))
+private fun DrawScope.bubble(measurer: TextMeasurer, style: TextStyle, text: String, mx: Float, my: Float, w: Float) {
+    val layout = measurer.measure(text, style, density = Unit1)
     val tw = layout.size.width.toFloat()
     val bw = tw + 10
     val bh = 15f
@@ -214,12 +242,12 @@ private fun DrawScope.bubble(measurer: TextMeasurer, font: FontFamily, text: Str
     drawText(layout, Color.White, Offset(bx + 5, by + 11 - layout.firstBaseline))
 }
 
-private fun DrawScope.drawTrack(model: FeedClaudeModel, t: Long, w: Float, h: Float, measurer: TextMeasurer, font: FontFamily) {
+private fun DrawScope.drawTrack(model: FeedClaudeModel, t: Long, w: Float, h: Float, measurer: TextMeasurer, styles: PixelStyles) {
     val ground = h - 4
     // dotted floor line like a maze lane
     var i = 0f
     while (i < w) {
-        px(Color(0xFF38F2FF).copy(alpha = 0.25f), i, ground, 4f, 2f)
+        px(Floor, i, ground, 4f, 2f)
         i += 8
     }
     val cy = ground - 15
@@ -229,8 +257,8 @@ private fun DrawScope.drawTrack(model: FeedClaudeModel, t: Long, w: Float, h: Fl
             if (kind == null) coin(c.x, cy, t) else treat(kind, c.x, cy - 1, t)
         } else if (c.pop > 0f) {
             val text = if (kind == null) "+1" else kind.say
-            val color = if (kind == null) Color(0xFFFFE14D) else Color(0xFFFF8AC6)
-            val layout = measurer.measure(text, TextStyle(fontFamily = font, fontSize = 8.sp), density = Density(1f))
+            val color = if (kind == null) PopCoin else PopTreat
+            val layout = measurer.measure(text, styles.pop, density = Unit1)
             val tw = layout.size.width.toFloat()
             val x = min(w - tw - 2, max(2f, c.x - tw / 2))
             drawText(layout, color.copy(alpha = c.pop), Offset(x, cy - 12 - (1 - c.pop) * 10 - layout.firstBaseline))
@@ -243,7 +271,7 @@ private fun DrawScope.drawTrack(model: FeedClaudeModel, t: Long, w: Float, h: Fl
     val mx = model.x.roundToInt().toFloat()
     sprite(mx, my, frame, chomp)
     if (talking != null) {
-        val text = talking.text + if (talking.dots) ".".repeat(1 + (floor(t / 300.0).toInt() % 3)) else ""
-        bubble(measurer, font, text, mx, my, w)
+        val text = if (talking.dots) talking.variants[floor(t / 300.0).toInt() % 3] else talking.variants[0]
+        bubble(measurer, styles.bubble, text, mx, my, w)
     }
 }
