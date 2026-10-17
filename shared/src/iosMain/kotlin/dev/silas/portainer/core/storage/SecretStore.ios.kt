@@ -15,6 +15,7 @@ import platform.CoreFoundation.CFDictionaryAddValue
 import platform.CoreFoundation.CFDictionaryCreateMutable
 import platform.CoreFoundation.CFMutableDictionaryRef
 import platform.CoreFoundation.CFRelease
+import platform.CoreFoundation.CFTypeRef
 import platform.CoreFoundation.CFTypeRefVar
 import platform.CoreFoundation.kCFBooleanTrue
 import platform.CoreFoundation.kCFTypeDictionaryKeyCallBacks
@@ -26,6 +27,8 @@ import platform.Foundation.create
 import platform.Security.SecItemAdd
 import platform.Security.SecItemCopyMatching
 import platform.Security.SecItemDelete
+import platform.Security.SecItemUpdate
+import platform.Security.errSecItemNotFound
 import platform.Security.errSecSuccess
 import platform.Security.kSecAttrAccessible
 import platform.Security.kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
@@ -85,24 +88,36 @@ private class KeychainSecretStore : SecretStore {
     }
 
     override suspend fun put(key: String, value: String) {
-        remove(key)
         val bytes = value.encodeToByteArray()
         val data = if (bytes.isEmpty()) {
             NSData()
         } else {
             bytes.usePinned { NSData.create(bytes = it.addressOf(0), length = bytes.size.convert()) }
         }
-        val dataRef = CFBridgingRetain(data)
-        val q = query(key) {
-            CFDictionaryAddValue(it, kSecValueData, dataRef)
-            CFDictionaryAddValue(it, kSecAttrAccessible, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
-        }
+        var dataRef: CFTypeRef? = null
+        var q: CFMutableDictionaryRef? = null
+        var attrs: CFMutableDictionaryRef? = null
         try {
-            val status = SecItemAdd(q, null)
+            dataRef = CFBridgingRetain(data)
+            q = query(key)
+            attrs = CFDictionaryCreateMutable(
+                null,
+                0,
+                kCFTypeDictionaryKeyCallBacks.ptr,
+                kCFTypeDictionaryValueCallBacks.ptr,
+            )
+            CFDictionaryAddValue(attrs, kSecValueData, dataRef)
+            var status = SecItemUpdate(q, attrs)
+            if (status == errSecItemNotFound) {
+                CFDictionaryAddValue(q, kSecValueData, dataRef)
+                CFDictionaryAddValue(q, kSecAttrAccessible, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+                status = SecItemAdd(q, null)
+            }
             check(status == errSecSuccess) { "Keychain write failed ($status)" }
         } finally {
-            CFRelease(q)
-            CFRelease(dataRef)
+            attrs?.let { CFRelease(it) }
+            q?.let { CFRelease(it) }
+            dataRef?.let { CFRelease(it) }
         }
     }
 

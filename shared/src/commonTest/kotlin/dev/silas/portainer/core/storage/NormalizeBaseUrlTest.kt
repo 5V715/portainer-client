@@ -11,6 +11,7 @@ class NormalizeBaseUrlTest {
         "https://nas.example/api" to "https://nas.example",
         "https://nas.example/api/" to "https://nas.example",
         "https://p.example" to "https://p.example",
+        "api" to "https://api",
     )
 
     @Test

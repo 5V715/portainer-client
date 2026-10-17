@@ -17,7 +17,9 @@ fun normalizeBaseUrl(input: String): Result<String> {
     }
     if (!url.startsWith("https://", ignoreCase = true)) url = "https://$url"
     url = url.trimEnd('/')
-    if (url.endsWith("/api", ignoreCase = true)) url = url.dropLast(4).trimEnd('/')
+    val hostEnd = url.indexOf("://") + 3
+    val slash = url.indexOf('/', hostEnd)
+    if (slash >= 0 && url.endsWith("/api", ignoreCase = true)) url = url.dropLast(4).trimEnd('/')
     if (url.length <= "https://".length) {
         return Result.failure(IllegalArgumentException("Enter the Portainer address"))
     }
