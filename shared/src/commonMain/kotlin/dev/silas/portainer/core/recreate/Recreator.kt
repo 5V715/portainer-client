@@ -34,7 +34,8 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
             if (!pulled) return@flow
         }
 
-        val tmpName = "${plan.containerName}-old-${nowEpochSeconds()}"
+        val epoch = nowEpochSeconds()
+        val tmpName = "${plan.containerName}-old-$epoch"
         val renamed = step(RecreateStep.RenameOld, onFailure = { RecreateEvent.Failed(RecreateStep.RenameOld, it, rolledBack = true) }) {
             ops.rename(oldId, tmpName)
         }
@@ -43,9 +44,9 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
         // Create before stop: the new container must reference the old one's anonymous volumes while the old one
         // still exists. For AutoRemove containers Docker then can't delete those volumes on stop (they're in use)
         // instead of deleting the data.
-        val restore = Restore(oldId, plan, tmpName)
+        val restore = Restore(oldId, plan, tmpName, failedName = "${plan.containerName}-failed-$epoch")
         var newId = ""
-        val created = step(RecreateStep.CreateNew, onFailure = { restore(RecreateStep.CreateNew, it, newId = null, oldStopped = false) }) {
+        val created = step(RecreateStep.CreateNew, onFailure = { restore.beforeStop(RecreateStep.CreateNew, it, newId = null) }) {
             newId = ops.create(plan.containerName, plan.createBody)
         }
         if (!created) return@flow
@@ -53,18 +54,18 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
         // Connecting a created-but-not-started container only records the config (no IP until start),
         // so static IPs don't clash with the still-running old container.
         if (plan.extraNetworks.isNotEmpty()) {
-            val connected = step(RecreateStep.ConnectNetworks, onFailure = { restore(RecreateStep.ConnectNetworks, it, newId, oldStopped = false) }) {
+            val connected = step(RecreateStep.ConnectNetworks, onFailure = { restore.beforeStop(RecreateStep.ConnectNetworks, it, newId) }) {
                 plan.extraNetworks.forEach { (network, config) -> ops.connect(network, newId, config) }
             }
             if (!connected) return@flow
         }
 
         if (plan.wasRunning) {
-            val stopped = step(RecreateStep.StopOld, onFailure = { restore(RecreateStep.StopOld, it, newId, oldStopped = true) }) {
+            val stopped = step(RecreateStep.StopOld, onFailure = { restore.afterStop(RecreateStep.StopOld, it, newId) }) {
                 ops.stop(oldId)
             }
             if (!stopped) return@flow
-            val started = step(RecreateStep.StartNew, onFailure = { restore(RecreateStep.StartNew, it, newId, oldStopped = true) }) {
+            val started = step(RecreateStep.StartNew, onFailure = { restore.afterStop(RecreateStep.StartNew, it, newId) }) {
                 ops.start(newId)
             }
             if (!started) return@flow
@@ -104,28 +105,63 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
         return true
     }
 
-    private inner class Restore(val oldId: String, val plan: RecreatePlan, val tmpName: String) {
-        /**
-         * Removes the new container (if any), renames the old one back and, when it was stopped, starts it again.
-         * Every step is attempted even if an earlier one fails; the message names anything left behind.
-         */
-        suspend operator fun invoke(step: RecreateStep, message: String, newId: String?, oldStopped: Boolean): RecreateEvent.Failed {
+    /**
+     * Undoes a failed recreate. Every rollback step is attempted even if an earlier one fails; when any fails,
+     * `rolledBack` is false and the message names what's left.
+     */
+    private inner class Restore(val oldId: String, val plan: RecreatePlan, val tmpName: String, val failedName: String) {
+        private val name get() = plan.containerName
+
+        /** The old container was never stopped: remove the new one (if created) and rename the old one back. */
+        suspend fun beforeStop(step: RecreateStep, message: String, newId: String?): RecreateEvent.Failed {
             val problems = mutableListOf<String>()
             if (newId != null && attempt { ops.remove(newId, force = true) } != null) {
-                problems += "Removing the new container failed; it is still there as ${plan.containerName}."
+                problems += "Removing the new container failed; it is still there as $name."
             }
-            val renameError = attempt { ops.rename(oldId, plan.containerName) }
-            val oldGone = oldStopped && renameError is PortainerException.NotFound && RecreateWarning.AutoRemove in plan.warnings
-            when {
-                oldGone -> problems.add(0, "The old container was removed by Docker (auto-remove), so it can't be restored.")
-                renameError != null -> problems += "Renaming the original container back failed; it is named $tmpName."
+            if (attempt { ops.rename(oldId, name) } != null) {
+                problems += "Renaming the original container back failed; it is named $tmpName."
             }
-            if (oldStopped && !oldGone && attempt { ops.start(oldId) } != null) {
+            return failed(step, message, problems)
+        }
+
+        /**
+         * The old container may be stopped, or gone (auto-remove). The new container is renamed aside first and only
+         * removed once the old one is confirmed back, so there is always a container left.
+         */
+        suspend fun afterStop(step: RecreateStep, message: String, newId: String): RecreateEvent.Failed {
+            val problems = mutableListOf<String>()
+            val aside = attempt { ops.rename(newId, failedName) } == null
+            if (!aside) problems += "Renaming the new container aside failed."
+            val renameOldError = attempt { ops.rename(oldId, name) }
+            if (renameOldError is PortainerException.NotFound) {
+                val keptAs = if (!aside || attempt { ops.rename(newId, name) } == null) name else failedName
+                val gone = if (RecreateWarning.AutoRemove in plan.warnings) {
+                    "The old container was removed by Docker (auto-remove), so it can't be restored."
+                } else {
+                    "The old container no longer exists, so it can't be restored."
+                }
+                return RecreateEvent.Failed(
+                    step,
+                    "${message.trimEnd('.')}. $gone The new container was kept as $keptAs (not running) so you can fix and start it.",
+                    rolledBack = false,
+                )
+            }
+            if (renameOldError != null) problems += "Renaming the original container back failed; it is named $tmpName."
+            if (attempt { ops.remove(newId, force = true) } != null) {
+                problems += "Removing the new container failed; it is still there as ${if (aside) failedName else name}."
+            }
+            if (plan.wasRunning && attempt { ops.start(oldId) } != null) {
                 problems += "Starting the original container failed; it is stopped."
             }
-            if (problems.isEmpty()) return RecreateEvent.Failed(step, message, rolledBack = true)
-            return RecreateEvent.Failed(step, "${message.trimEnd('.')}. ${problems.joinToString(" ")}", rolledBack = false)
+            return failed(step, message, problems)
         }
+
+        private fun failed(step: RecreateStep, message: String, problems: List<String>) =
+            if (problems.isEmpty()) {
+                RecreateEvent.Failed(step, message, rolledBack = true)
+            } else {
+                RecreateEvent.Failed(step, "${message.trimEnd('.')}. ${problems.joinToString(" ")}", rolledBack = false)
+            }
     }
 }
 

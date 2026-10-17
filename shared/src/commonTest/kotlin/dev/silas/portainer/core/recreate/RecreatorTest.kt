@@ -26,6 +26,7 @@ private const val OLD = "old-id"
 private const val NEW = "new-id"
 private const val NOW = 1_760_000_000L
 private const val TMP = "web-old-$NOW"
+private const val FAILED = "web-failed-$NOW"
 
 /** Records every call as a string; a call whose string is in [failures] throws the mapped exception. */
 private class FakeOps(private val failures: Map<String, Throwable> = emptyMap()) : DockerOps {
@@ -137,13 +138,13 @@ class RecreatorTest {
     }
 
     @Test
-    fun startFailureRestoresAndRestartsOld() = runTest {
+    fun startFailureRenamesNewAsideThenRestoresAndRestartsOld() = runTest {
         val ops = FakeOps(mapOf("start $NEW" to boom))
         val events = recreator(ops).run(OLD, plan()).toList()
         assertEquals(
             listOf(
                 "pull nginx:1.27 3", "rename $OLD $TMP", "create web", "connect backend $NEW", "stop $OLD", "start $NEW",
-                "remove $NEW force=true", "rename $OLD web", "start $OLD",
+                "rename $NEW $FAILED", "rename $OLD web", "remove $NEW force=true", "start $OLD",
             ),
             ops.calls,
         )
@@ -155,37 +156,58 @@ class RecreatorTest {
         val ops = FakeOps(mapOf("stop $OLD" to boom))
         val events = recreator(ops).run(OLD, plan(pull = false, extraNetworks = emptyMap())).toList()
         assertEquals(
-            listOf("rename $OLD $TMP", "create web", "stop $OLD", "remove $NEW force=true", "rename $OLD web", "start $OLD"),
+            listOf("rename $OLD $TMP", "create web", "stop $OLD", "rename $NEW $FAILED", "rename $OLD web", "remove $NEW force=true", "start $OLD"),
             ops.calls,
         )
         assertEquals(Failed(RecreateStep.StopOld, "boom", rolledBack = true), events.last())
     }
 
+    private val autoRemoved = PortainerException.NotFound("Not found: No such container: $OLD")
+    private val autoRemovePlan = plan(warnings = listOf(RecreateWarning.AutoRemove, RecreateWarning.ConnectionDependency))
+
     @Test
-    fun autoRemoveStartFailureReportsNoRollback() = runTest {
-        val ops = FakeOps(
-            mapOf(
-                "start $NEW" to boom,
-                "rename $OLD web" to PortainerException.NotFound("Not found: No such container: $OLD"),
-            ),
+    fun autoRemoveStartFailureKeepsNewContainer() = runTest {
+        val ops = FakeOps(mapOf("start $NEW" to boom, "rename $OLD web" to autoRemoved))
+        val events = recreator(ops).run(OLD, autoRemovePlan).toList()
+        assertEquals(
+            listOf("stop $OLD", "start $NEW", "rename $NEW $FAILED", "rename $OLD web", "rename $NEW web"),
+            ops.calls.takeLast(5),
         )
-        val events = recreator(ops).run(OLD, plan(warnings = listOf(RecreateWarning.AutoRemove, RecreateWarning.ConnectionDependency))).toList()
+        assertFalse(ops.calls.any { it.startsWith("remove $NEW") }, "the only remaining container must not be removed")
+        assertFalse("start $OLD" in ops.calls, "a container Docker already removed can't be started")
         assertEquals(
             Failed(
                 RecreateStep.StartNew,
-                "boom. The old container was removed by Docker (auto-remove), so it can't be restored.",
+                "boom. The old container was removed by Docker (auto-remove), so it can't be restored. " +
+                    "The new container was kept as web (not running) so you can fix and start it.",
                 rolledBack = false,
             ),
             events.last(),
         )
-        assertFalse("start $OLD" in ops.calls, "a container Docker already removed can't be started")
+    }
+
+    @Test
+    fun autoRemoveKeptContainerNamedAsideWhenRenameBackFails() = runTest {
+        val ops = FakeOps(mapOf("start $NEW" to boom, "rename $OLD web" to autoRemoved, "rename $NEW web" to boom))
+        val failed = recreator(ops).run(OLD, autoRemovePlan).toList().last() as Failed
+        assertFalse(ops.calls.any { it.startsWith("remove $NEW") })
+        assertFalse(failed.rolledBack)
+        assertTrue(failed.message.endsWith("The new container was kept as $FAILED (not running) so you can fix and start it."), failed.message)
+    }
+
+    @Test
+    fun autoRemoveKeptContainerKeepsNameWhenAsideRenameFails() = runTest {
+        val ops = FakeOps(mapOf("start $NEW" to boom, "rename $NEW $FAILED" to boom, "rename $OLD web" to autoRemoved))
+        val failed = recreator(ops).run(OLD, autoRemovePlan).toList().last() as Failed
+        assertEquals(listOf("rename $NEW $FAILED", "rename $OLD web"), ops.calls.takeLast(2))
+        assertTrue(failed.message.endsWith("The new container was kept as web (not running) so you can fix and start it."), failed.message)
     }
 
     @Test
     fun everyRollbackStepIsAttemptedAndLeftoversNamed() = runTest {
         val ops = FakeOps(mapOf("start $NEW" to boom, "rename $OLD web" to PortainerException.Api(409, "conflict")))
         val events = recreator(ops).run(OLD, plan(pull = false, extraNetworks = emptyMap())).toList()
-        assertEquals("start $OLD", ops.calls.last())
+        assertEquals(listOf("rename $NEW $FAILED", "rename $OLD web", "remove $NEW force=true", "start $OLD"), ops.calls.takeLast(4))
         val failed = events.last() as Failed
         assertEquals(RecreateStep.StartNew, failed.step)
         assertFalse(failed.rolledBack)
