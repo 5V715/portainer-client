@@ -41,6 +41,7 @@ kotlin {
             implementation(libs.compose.foundation)
             implementation(libs.compose.material3)
             implementation(libs.compose.ui)
+            implementation(libs.compose.material.icons.core)
             implementation(libs.navigation.compose)
             implementation(libs.lifecycle.viewmodel.compose)
             implementation(libs.kotlinx.coroutines.core)

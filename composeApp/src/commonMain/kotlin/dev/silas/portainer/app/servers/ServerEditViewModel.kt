@@ -10,6 +10,7 @@ import dev.silas.portainer.core.storage.ServerConfig
 import dev.silas.portainer.core.storage.ValidationResult
 import dev.silas.portainer.core.storage.normalizeBaseUrl
 import dev.silas.portainer.core.storage.validateServer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlin.random.Random
 
@@ -69,11 +70,18 @@ class ServerEditViewModel(
                     is ValidationResult.Ok -> {
                         val id = existing?.id ?: Random.nextLong().toULong().toString(16)
                         val displayName = name.trim().ifEmpty { baseUrl.substringAfter("://") }
-                        container.saveServer(
-                            ServerConfig(id, displayName, baseUrl, existing?.lastEndpointId),
-                            typedKey,
-                        )
-                        saved = true
+                        try {
+                            container.saveServer(
+                                ServerConfig(id, displayName, baseUrl, existing?.lastEndpointId),
+                                typedKey,
+                            )
+                            apiKey = ""
+                            saved = true
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            error = SaveError.Failed("Could not store the server: ${e.message ?: "storage error"}")
+                        }
                     }
                     ValidationResult.InvalidKey -> error = SaveError.InvalidKey
                     is ValidationResult.Unreachable -> error = SaveError.Unreachable(result.message)

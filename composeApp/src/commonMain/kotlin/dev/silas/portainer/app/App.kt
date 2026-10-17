@@ -4,7 +4,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -21,11 +24,18 @@ import dev.silas.portainer.app.theme.PortainerTheme
 import dev.silas.portainer.core.storage.ServerRepository
 import dev.silas.portainer.core.storage.createSecretStore
 
+/** Process-wide dependencies; on Android, AndroidPlatform/AppContext must be initialised before first access. */
+object AppGraph {
+    val container: AppContainer by lazy {
+        AppContainer(ServerRepository(createSettings(), createSecretStore()))
+    }
+}
+
 val LocalAppContainer = compositionLocalOf<AppContainer> { error("AppContainer not provided") }
 
 @Composable
 fun App() {
-    val container = remember { AppContainer(ServerRepository(createSettings(), createSecretStore())) }
+    val container = AppGraph.container
     PortainerTheme {
         CompositionLocalProvider(LocalAppContainer provides container) {
             AppNavHost(container)
@@ -38,7 +48,11 @@ private fun AppNavHost(container: AppContainer) {
     val nav = rememberNavController()
 
     // Reopen the last environment when there is exactly one server; back leads to Environments.
+    // Once per cold start: the saved flag survives Activity recreation, which also restores the back stack.
+    var autoOpened by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
+        if (autoOpened) return@LaunchedEffect
+        autoOpened = true
         val only = container.servers.servers.value.singleOrNull()
         val endpointId = only?.lastEndpointId
         if (only != null && endpointId != null) {

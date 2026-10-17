@@ -12,7 +12,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -20,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import dev.silas.portainer.app.theme.BackButton
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -30,7 +30,7 @@ fun ServerEditScreen(viewModel: ServerEditViewModel, onDone: () -> Unit, onBack:
         topBar = {
             TopAppBar(
                 title = { Text(if (viewModel.isEdit) "Edit server" else "Add server") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+                navigationIcon = { BackButton(onBack) },
             )
         },
     ) { padding ->
@@ -58,7 +58,7 @@ fun ServerEditScreen(viewModel: ServerEditViewModel, onDone: () -> Unit, onBack:
                 value = viewModel.apiKey,
                 onValueChange = { viewModel.apiKey = it },
                 label = { Text("API key") },
-                placeholder = if (viewModel.isEdit) ({ Text("Leave empty to keep current key") }) else null,
+                supportingText = if (viewModel.isEdit) ({ Text("Leave empty to keep current key") }) else null,
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),

@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
+import dev.silas.portainer.app.theme.BackButton
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,7 +37,7 @@ fun EnvironmentsScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Environments") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+                navigationIcon = { BackButton(onBack) },
                 actions = { TextButton(onClick = onRegistries) { Text("Registries") } },
             )
         },
