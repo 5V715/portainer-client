@@ -2,7 +2,11 @@ package dev.silas.portainer.core.api
 
 import dev.silas.portainer.core.platform.httpEngine
 import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import kotlinx.io.IOException
+import kotlinx.serialization.SerializationException
 import io.ktor.client.engine.HttpClientEngine
+import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.defaultRequest
@@ -33,13 +37,17 @@ class PortainerClient(
         install(ContentNegotiation) { json(json) }
         install(HttpTimeout) { requestTimeoutMillis = REQUEST_TIMEOUT_MS }
         expectSuccess = false
+        // Never follow redirects: they would re-send X-API-Key to whatever host the 3xx names.
+        followRedirects = false
     }
 
     fun close() = http.close()
 
     /**
      * Runs a request against [path] (starting with `/`), maps failures to [PortainerException]
-     * and returns the successful response. The body is not consumed for 2xx responses.
+     * and returns the successful response. `http.request {}` buffers the full response body, so
+     * this is NOT usable for streaming (logs, pulls): streamed calls must use `http.prepareRequest`
+     * with [throwForStatus] and a per-request timeout override.
      */
     internal suspend fun execute(path: String, block: HttpRequestBuilder.() -> Unit = {}): HttpResponse {
         val response = try {
@@ -89,7 +97,32 @@ class PortainerClient(
         val message = (obj["message"] as? JsonPrimitive)?.takeIf { it.isString }?.content
         val details = (obj["details"] as? JsonPrimitive)?.takeIf { it.isString }?.content
         val text = listOfNotNull(message, details).filter { it.isNotBlank() }.joinToString(": ")
-        return text.takeIf { it.isNotEmpty() }?.replace(apiKey, "***")
+        if (text.isEmpty()) return null
+        return if (apiKey.isBlank()) text else text.replace(apiKey, "***")
+    }
+
+    /** GET [path] and decode the JSON body, mapping read/parse failures to [PortainerException]. */
+    internal suspend inline fun <reified T> getJson(path: String): T {
+        val response = execute(path)
+        return decodeBody(response) { response.body<T>() }
+    }
+
+    internal suspend inline fun <T> decodeBody(response: HttpResponse, decode: () -> T): T = try {
+        decode()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: PortainerException) {
+        throw e
+    } catch (e: SerializationException) {
+        throw PortainerException.Api(response.status.value, "Unexpected response from Portainer")
+    } catch (e: IOException) {
+        throw PortainerException.Unreachable("Could not reach Portainer")
+    } catch (e: Throwable) {
+        // Ktor wraps parse failures (NoTransformationFoundException, JsonConvertException) and timeouts.
+        if (e is HttpRequestTimeoutException) {
+            throw PortainerException.Unreachable("Could not reach Portainer")
+        }
+        throw PortainerException.Api(response.status.value, "Unexpected response from Portainer")
     }
 
     private companion object {

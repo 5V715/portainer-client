@@ -2,7 +2,6 @@ package dev.silas.portainer.core.api
 
 import dev.silas.portainer.core.model.Endpoint
 import dev.silas.portainer.core.model.EndpointType
-import io.ktor.client.call.body
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -20,9 +19,9 @@ private data class EndpointDto(
 )
 
 suspend fun PortainerClient.status(): PortainerStatus =
-    PortainerStatus(execute("/api/status").body<StatusDto>().version)
+    PortainerStatus(getJson<StatusDto>("/api/status").version)
 
 suspend fun PortainerClient.endpoints(): List<Endpoint> =
-    execute("/api/endpoints").body<List<EndpointDto>>().map {
+    getJson<List<EndpointDto>>("/api/endpoints").map {
         Endpoint(it.id, it.name, EndpointType.fromCode(it.type), online = it.status == 1)
     }

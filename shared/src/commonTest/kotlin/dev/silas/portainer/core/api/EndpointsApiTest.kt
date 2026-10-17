@@ -111,11 +111,51 @@ class EndpointsApiTest {
             HttpStatusCode.Unauthorized to """{"message":"bad $key"}""",
             HttpStatusCode.NotFound to "",
             HttpStatusCode.InternalServerError to """{"message":"boom"}""",
+            HttpStatusCode.NotFound to """{"message":"no $key"}""",
+            HttpStatusCode.InternalServerError to """{"message":"m $key","details":"d $key"}""",
         )
         for ((status, body) in cases) {
             val e = assertFailsWith<PortainerException> { client(status, body).endpoints() }
             assertFalse(e.message!!.contains(key), "message leaked key: ${e.message}")
         }
+    }
+
+    @Test
+    fun redactsKeyInBodyMessage() = runTest {
+        val e = assertFailsWith<PortainerException.Api> {
+            client(HttpStatusCode.InternalServerError, """{"message":"m $key","details":"d $key"}""").endpoints()
+        }
+        assertFalse(e.message!!.contains(key))
+        assertTrue(e.message!!.contains("***"))
+        val nf = assertFailsWith<PortainerException.NotFound> {
+            client(HttpStatusCode.NotFound, """{"message":"no $key"}""").endpoints()
+        }
+        assertFalse(nf.message!!.contains(key))
+        assertTrue(nf.message!!.contains("***"))
+    }
+
+    @Test
+    fun htmlBodyOn200IsApiError() = runTest {
+        val e = assertFailsWith<PortainerException.Api> { client(body = "<html>login</html>").endpoints() }
+        assertEquals(200, e.status)
+        assertEquals("Unexpected response from Portainer", e.message)
+        assertFailsWith<PortainerException.Api> { client(body = "<html>").status() }
+    }
+
+    @Test
+    fun redirectsAreNotFollowed() = runTest {
+        var calls = 0
+        val c = PortainerClient(
+            "https://h",
+            key,
+            MockEngine { request ->
+                calls++
+                respond("", HttpStatusCode.Found, headersOf(HttpHeaders.Location, "https://evil.example/"))
+            },
+        )
+        val e = assertFailsWith<PortainerException.Api> { c.endpoints() }
+        assertEquals(302, e.status)
+        assertEquals(1, calls)
     }
 
     @Test
