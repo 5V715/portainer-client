@@ -4,16 +4,22 @@ import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.ContainerSummary
 import dev.silas.portainer.core.model.Health
 import dev.silas.portainer.core.logs.LogOptions
+import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeoutConfig
 import io.ktor.client.plugins.timeout
 import io.ktor.client.request.parameter
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import io.ktor.http.ContentType
 import io.ktor.http.HttpMethod
+import io.ktor.http.contentType
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 private const val COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 private const val NOT_MODIFIED = 304
@@ -65,6 +71,39 @@ suspend fun PortainerClient.removeContainer(endpointId: Int, id: String, force: 
     execute(dockerPath(endpointId, "containers/$id")) {
         method = HttpMethod.Delete
         if (force) parameter("force", "true")
+    }
+}
+
+/** Raw `GET /containers/{id}/json` document. */
+suspend fun PortainerClient.inspectContainer(endpointId: Int, id: String): JsonObject =
+    getJson(dockerPath(endpointId, "containers/$id/json"))
+
+suspend fun PortainerClient.renameContainer(endpointId: Int, id: String, newName: String) {
+    execute(dockerPath(endpointId, "containers/$id/rename")) {
+        method = HttpMethod.Post
+        parameter("name", newName)
+    }
+}
+
+/** Creates (does not start) a container named [name] from [body]; returns the new container's `Id`. */
+suspend fun PortainerClient.createContainer(endpointId: Int, name: String, body: JsonObject): String {
+    val response = execute(dockerPath(endpointId, "containers/create")) {
+        method = HttpMethod.Post
+        parameter("name", name)
+        contentType(ContentType.Application.Json)
+        setBody(body)
+    }
+    val created = decodeBody(response) { response.body<JsonObject>() }
+    return (created["Id"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?: throw PortainerException.Api(response.status.value, "Unexpected response from Portainer")
+}
+
+/** Connects [containerId] to [network]. On a created-but-not-started container this only records the config. */
+suspend fun PortainerClient.connectNetwork(endpointId: Int, network: String, containerId: String, endpointConfig: JsonObject) {
+    execute(dockerPath(endpointId, "networks/$network/connect")) {
+        method = HttpMethod.Post
+        contentType(ContentType.Application.Json)
+        setBody(JsonObject(mapOf("Container" to JsonPrimitive(containerId), "EndpointConfig" to endpointConfig)))
     }
 }
 
