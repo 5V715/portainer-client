@@ -13,6 +13,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import dev.silas.portainer.app.containers.ContainerListScreen
+import dev.silas.portainer.app.containers.ContainerListViewModel
 import dev.silas.portainer.app.environments.EnvironmentsScreen
 import dev.silas.portainer.app.environments.EnvironmentsViewModel
 import dev.silas.portainer.app.placeholder.ComingSoonScreen
@@ -86,7 +88,18 @@ private fun AppNavHost(container: AppContainer) {
                 onBack = { nav.popBackStack() },
             )
         }
-        composable<Containers> { ComingSoonScreen() }
+        composable<Containers> { entry ->
+            val route = entry.toRoute<Containers>()
+            val vm = viewModel(key = "containers-${route.serverId}-${route.endpointId}") {
+                ContainerListViewModel(container, route.serverId, route.endpointId)
+            }
+            ContainerListScreen(
+                viewModel = vm,
+                onOpen = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
+                onRegistries = { nav.navigate(Registries(route.serverId)) },
+                onBack = { nav.popBackStack() },
+            )
+        }
         composable<ContainerDetail> { ComingSoonScreen() }
         composable<Recreate> { ComingSoonScreen() }
         composable<Registries> { ComingSoonScreen() }
