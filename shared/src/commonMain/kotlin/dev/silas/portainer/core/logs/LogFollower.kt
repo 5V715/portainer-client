@@ -60,8 +60,8 @@ fun followLogs(
     }
 }
 
-/** Floor of the Unix time of an RFC3339 timestamp (`Z` or `±hh:mm`), or null if malformed; fraction is ignored. */
-internal fun rfc3339EpochSeconds(ts: String): Long? = try {
+/** Public so the app can resume a log follow from the last seen line. Floor of the Unix time of an RFC3339 timestamp (`Z` or `±hh:mm`), or null if malformed; fraction is ignored. */
+fun rfc3339EpochSeconds(ts: String): Long? = try {
     parseRfc3339(ts)
 } catch (e: NumberFormatException) {
     null

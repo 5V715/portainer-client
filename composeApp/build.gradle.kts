@@ -44,6 +44,7 @@ kotlin {
             implementation(libs.compose.material.icons.core)
             implementation(libs.navigation.compose)
             implementation(libs.lifecycle.viewmodel.compose)
+            implementation(libs.lifecycle.runtime.compose)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.ktor.client.core)
