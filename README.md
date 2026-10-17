@@ -1,6 +1,33 @@
 # Portainer Client
 
-A Kotlin Multiplatform + Compose Multiplatform client for managing Docker containers through a Portainer server. It targets Android, iOS and (experimental) the web via wasmJs, and talks to Portainer over HTTPS using an API key.
+A Kotlin Multiplatform + Compose Multiplatform client for managing Docker containers through a [Portainer](https://www.portainer.io/) server. Targets Android, iOS and an experimental web build (wasmJs). It talks to Portainer over HTTPS using an API key.
+
+## What it does
+
+- Multiple Portainer servers (URL + API key, HTTPS only).
+- Docker environments: local and agent. Edge and Kubernetes environments are listed as "Not supported yet".
+- Container list with search, state filters and stack filter; start, stop, restart and remove.
+- Container detail: overview and live logs (tail, search, timestamps).
+- Edit and recreate: change image tag and environment variables, pull latest, private registry auth via Portainer, a change summary with warnings, and a rollback that never leaves you without a container.
+- Registries management (list, add, edit, remove registries configured in Portainer).
+- Portainer's own containers are protected from stop, remove and recreate, since that would cut off the connection.
+
+Tested against Portainer CE 2.x (the API shapes used). The registry API field names have not yet been verified against a live server.
+
+## Create a Portainer API key
+
+In Portainer: **My account → Access tokens → Add access token**. Copy the token when it is shown; Portainer displays it only once.
+
+The key is stored in the Android Keystore (Android), the Keychain (iOS) or browser `localStorage` (web, which is **not secure**).
+
+## Add a server
+
+Accepted URL formats:
+
+- `https://host` or `https://host:port`
+- a bare `host` (https is assumed)
+- a trailing `/` or `/api` is stripped
+- `http://` is rejected: Portainer must be reached over HTTPS
 
 ## Build
 
@@ -19,3 +46,61 @@ A Kotlin Multiplatform + Compose Multiplatform client for managing Docker contai
 ```
 
 Android builds need the Android SDK (`sdk.dir` in `local.properties`).
+
+## CI artifacts
+
+Every push builds the `android-debug-apk` and `web` artifacts (Actions → run → Artifacts). iOS builds (unsigned, simulator) run on `main`, `v*` tags and manual dispatch. iOS signing, TestFlight and store publishing are out of scope.
+
+## Web build on GitHub Pages
+
+CI deploys the web build to GitHub Pages on pushes to `main` once Pages is enabled for the repository (public repo or paid plan).
+
+The browser enforces CORS, so Portainer (or a reverse proxy in front of it) must allow the Pages origin and answer the `OPTIONS` preflight:
+
+- `Access-Control-Allow-Origin: https://<owner>.github.io`
+- `Access-Control-Allow-Headers: X-API-Key, Content-Type`
+- `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`
+
+Caddy:
+
+```caddy
+portainer.example.com {
+    @preflight method OPTIONS
+    header Access-Control-Allow-Origin "https://<owner>.github.io"
+    header Access-Control-Allow-Headers "X-API-Key, Content-Type"
+    header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    respond @preflight 204
+    reverse_proxy portainer:9000
+}
+```
+
+nginx:
+
+```nginx
+location / {
+    add_header Access-Control-Allow-Origin "https://<owner>.github.io" always;
+    add_header Access-Control-Allow-Headers "X-API-Key, Content-Type" always;
+    add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+    if ($request_method = OPTIONS) { return 204; }
+    proxy_pass http://portainer:9000;
+}
+```
+
+Check the preflight with:
+
+```sh
+curl -i -X OPTIONS https://YOUR-PORTAINER/api/endpoints \
+  -H "Origin: https://5v715.github.io" \
+  -H "Access-Control-Request-Method: GET" \
+  -H "Access-Control-Request-Headers: x-api-key"
+```
+
+Chrome may ask once for local-network permission when the host resolves to a private IP.
+
+## Feed my Claude
+
+🍺 Feed my Claude – a tip keeps the tokens flowing. Entirely optional.
+
+- [PayPal](https://www.paypal.com/donate/?hosted_button_id=M6D3G2TRTEQXG)
+- [Ko-fi](https://ko-fi.com/silasschwarz)
+- [GitHub Sponsors](https://github.com/sponsors/5V715)
