@@ -31,7 +31,7 @@ private const val REQUEST_TIMEOUT_MS = 15_000L
 class PortainerClient(
     private val baseUrl: String,
     private val apiKey: String,
-    engine: HttpClientEngine = httpEngine(),
+    private val engine: HttpClientEngine = httpEngine(),
 ) {
     internal val json = Json { ignoreUnknownKeys = true }
 
@@ -43,7 +43,11 @@ class PortainerClient(
         followRedirects = false
     }
 
-    fun close() = http.close()
+    /** Closes the client and the engine it was given (an explicitly passed engine is not closed by `HttpClient.close()`). */
+    fun close() {
+        http.close()
+        engine.close()
+    }
 
     /**
      * Runs a request against [path] (starting with `/`), maps failures to [PortainerException]
