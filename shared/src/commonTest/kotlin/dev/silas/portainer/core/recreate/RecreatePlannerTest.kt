@@ -24,6 +24,7 @@ class RecreatePlannerTest {
     private val netmode = obj(RecreateFixtures.INSPECT_CONTAINER_NETMODE)
     private val autoremove = obj(RecreateFixtures.INSPECT_AUTOREMOVE)
     private val imageInspect = obj(RecreateFixtures.IMAGE_CONFIG)
+    private val compose = obj(RecreateFixtures.INSPECT_COMPOSE_ANON)
 
     private val JsonObject.config get() = getValue("Config").jsonObject
     private val JsonObject.hostConfig get() = getValue("HostConfig").jsonObject
@@ -170,28 +171,84 @@ class RecreatePlannerTest {
     }
 
     @Test
+    fun sourcelessMountVolumeGetsItsName() {
+        val host = plan(compose, null).createBody.hostConfig
+        assertEquals(
+            JsonArray(
+                listOf(
+                    obj("""{"Type": "volume", "Source": "shop_db", "Target": "/var/lib/data", "VolumeOptions": {}}"""),
+                    obj("""{"Type": "volume", "Target": "/app/node_modules", "VolumeOptions": {}, "Source": "5c0d8e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d"}"""),
+                ),
+            ),
+            host["Mounts"],
+        )
+        // Not also added to Binds: Docker rejects duplicate mount points.
+        assertEquals(strings("/srv/shop/src:/app/src:rw"), host["Binds"])
+    }
+
+    @Test
+    fun lonePathBindGetsVolumeName() {
+        val name = "f1e2d3c4b5a6978877665544332211ffeeddccbbaa99887766554433221100ff"
+        assertEquals(listOf("$name:/data:ro"), plan(autoremove.withSection("HostConfig", "Binds", strings("/data")), null).createBody.binds())
+        // An explicit mode on the anonymous bind is kept as written.
+        assertEquals(listOf("$name:/data:ro,Z"), plan(autoremove.withSection("HostConfig", "Binds", strings("/data:ro,Z")), null).createBody.binds())
+    }
+
+    @Test
+    fun reattachedVolumeCarriesMountMode() {
+        val mounts = autoremove.getValue("Mounts").jsonArray.map {
+            JsonObject(it.jsonObject + ("Mode" to JsonPrimitive("z,nocopy")))
+        }
+        val inspect = JsonObject(autoremove + ("Mounts" to JsonArray(mounts)))
+        assertEquals(
+            listOf("f1e2d3c4b5a6978877665544332211ffeeddccbbaa99887766554433221100ff:/data:ro,z,nocopy"),
+            plan(inspect, null).createBody.binds(),
+        )
+    }
+
+    @Test
+    fun envRemovalReportsReinheritedImageValues() {
+        // APP_VERSION removed by the user: the old image's APP_VERSION=1 applies again. LOG_LEVEL isn't in the image.
+        val env = full.envOf().filterNot { it.startsWith("APP_VERSION=") || it.startsWith("LOG_LEVEL=") }
+        val c = plan(edits = edits(full, env = env)).changes
+        assertEquals(listOf("APP_VERSION=1"), c.envReinherited)
+        assertEquals(listOf("LOG_LEVEL=info", "APP_VERSION=1"), c.envRemoved)
+        assertTrue(plan().changes.envReinherited.isEmpty())
+        assertTrue(plan(imageConfig = null, edits = edits(full, env = env)).changes.envReinherited.isEmpty(), "unknown without image config")
+    }
+
+    @Test
     fun splitsPrimaryAndExtraNetworks() {
         val p = plan()
         val endpoints = p.createBody.getValue("NetworkingConfig").jsonObject.getValue("EndpointsConfig").jsonObject
         assertEquals(setOf("frontend"), endpoints.keys)
         assertEquals(
-            obj("""{"Links": ["shop-db-1:db"], "Aliases": ["web"], "DriverOpts": {"com.docker.network.endpoint.sysctls": "net.ipv4.conf.IFNAME.log_martians=1"}}"""),
+            obj(
+                """{"Links": ["shop-db-1:db"], "Aliases": ["web"], "DriverOpts": {"com.docker.network.endpoint.sysctls": "net.ipv4.conf.IFNAME.log_martians=1"},
+                   "MacAddress": "02:42:ac:15:00:03", "GwPriority": 0}""",
+            ),
             endpoints["frontend"],
         )
         assertEquals(setOf("backend"), p.extraNetworks.keys)
-        assertEquals(obj("""{"IPAMConfig": {"IPv4Address": "172.20.0.10"}, "Aliases": ["app"]}"""), p.extraNetworks["backend"])
+        assertEquals(
+            obj("""{"IPAMConfig": {"IPv4Address": "172.20.0.10"}, "Aliases": ["app"], "MacAddress": "02:42:ac:14:00:0a", "GwPriority": 10}"""),
+            p.extraNetworks["backend"],
+        )
     }
 
     @Test
     fun primaryNetworkFallsBackToBridgeOrFirst() {
         val default = autoremove.withSection("HostConfig", "NetworkMode", JsonPrimitive("default"))
-        val endpoints = plan(default, null).createBody.getValue("NetworkingConfig").jsonObject.getValue("EndpointsConfig").jsonObject
+        val defaultPlan = plan(default, null)
+        val endpoints = defaultPlan.createBody.getValue("NetworkingConfig").jsonObject.getValue("EndpointsConfig").jsonObject
         assertEquals(setOf("bridge"), endpoints.keys)
+        assertEquals(JsonPrimitive("default"), defaultPlan.createBody.hostConfig["NetworkMode"], "matched: NetworkMode untouched")
 
         val unknown = full.withSection("HostConfig", "NetworkMode", JsonPrimitive("gone"))
         val p = plan(unknown)
         assertEquals(setOf("backend"), p.createBody.getValue("NetworkingConfig").jsonObject.getValue("EndpointsConfig").jsonObject.keys)
         assertEquals(setOf("frontend"), p.extraNetworks.keys)
+        assertEquals(JsonPrimitive("backend"), p.createBody.hostConfig["NetworkMode"], "fallback: NetworkMode follows the chosen network")
     }
 
     @Test

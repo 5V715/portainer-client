@@ -16,8 +16,18 @@ private val IMAGE_DEFAULT_FIELDS = listOf("Entrypoint", "WorkingDir", "User", "H
 /** Config fields Docker rejects or mis-applies when the container shares another container's network namespace. */
 private val CONTAINER_MODE_STRIPPED = listOf("Hostname", "Domainname", "MacAddress", "ExposedPorts")
 
-/** EndpointSettings fields that are user configuration; everything else in inspect is runtime state. */
-private val ENDPOINT_FIELDS = listOf("IPAMConfig", "Links", "Aliases", "DriverOpts")
+/**
+ * EndpointSettings fields that are user configuration; everything else in inspect is runtime state.
+ * `MacAddress` is kept so a pinned MAC survives (reusing a generated one is harmless: the old
+ * container is stopped before the new one starts).
+ */
+private val ENDPOINT_FIELDS = listOf("IPAMConfig", "Links", "Aliases", "DriverOpts", "MacAddress", "GwPriority")
+
+/** Option words Docker accepts in the mode part of a `-v` spec (`[src:]dst[:mode]`). */
+private val BIND_MODE_WORDS = setOf(
+    "ro", "rw", "z", "Z", "nocopy", "shared", "rshared", "slave", "rslave", "private", "rprivate",
+    "consistent", "cached", "delegated",
+)
 
 /**
  * Turns `docker inspect` output plus the user's edits into a `POST /containers/create` body.
@@ -50,13 +60,16 @@ object RecreatePlanner {
         val isolatedNetwork = networkMode == "host" || networkMode == "none" || networkMode.startsWith("container:")
         if (networkMode.startsWith("container:")) CONTAINER_MODE_STRIPPED.forEach { config.remove(it) }
 
-        config["HostConfig"] = withAnonymousVolumes(hostConfig, inspect.array("Mounts"))
+        var newHostConfig = withAnonymousVolumes(hostConfig, inspect.array("Mounts"))
         var extraNetworks = emptyMap<String, JsonObject>()
         if (!isolatedNetwork) {
-            val (primary, extra) = splitNetworks(networkMode, inspect.obj("NetworkSettings")?.obj("Networks"), shortId)
-            config["NetworkingConfig"] = JsonObject(mapOf("EndpointsConfig" to JsonObject(primary)))
-            extraNetworks = extra
+            val split = splitNetworks(networkMode, inspect.obj("NetworkSettings")?.obj("Networks"), shortId)
+            config["NetworkingConfig"] = JsonObject(mapOf("EndpointsConfig" to JsonObject(split.primary)))
+            extraNetworks = split.extra
+            // NetworkMode names a network the container isn't on: point it at the network we attach to.
+            if (split.fellBack) newHostConfig = JsonObject(newHostConfig + ("NetworkMode" to JsonPrimitive(split.primary.keys.single())))
         }
+        config["HostConfig"] = newHostConfig
 
         val warnings = buildList {
             originalConfig.obj("Labels")?.string(STACK_LABEL)?.let { add(RecreateWarning.StackMember(it)) }
@@ -73,7 +86,7 @@ object RecreatePlanner {
             image = ImageRef.parse(edits.image),
             pull = edits.pullImage || edits.image != originalImage,
             registryId = edits.registryId,
-            changes = changeSummary(originalImage, edits, originalConfig.array("Env").strings(), dropped),
+            changes = changeSummary(originalImage, edits, originalConfig.array("Env").strings(), imageConfig, dropped),
             warnings = warnings,
         )
     }
@@ -132,51 +145,106 @@ object RecreatePlanner {
     }
 
     /**
-     * Appends every `volume` mount not already declared in `HostConfig.Binds`/`HostConfig.Mounts`
-     * (i.e. anonymous volumes) to `Binds` by name, so the new container reattaches the same data
-     * instead of getting a fresh empty volume.
+     * Makes every volume in the inspect `Mounts[]` reattach by name, so the new container gets the same
+     * data instead of a fresh empty volume:
+     * - `HostConfig.Mounts` volume entries without a `Source` (`--mount type=volume,target=…`, compose
+     *   anonymous volumes) get `Source` = the volume's name;
+     * - anonymous `Binds` entries (`/data`, `/data:ro`) become `<name>:/data[:mode]`;
+     * - volumes declared nowhere in `HostConfig` (image `VOLUME`, `-v /data`) are appended to `Binds`.
+     * Nothing is ever added for a target already present, since Docker rejects duplicate mount points.
      */
     private fun withAnonymousVolumes(hostConfig: JsonObject, mounts: JsonArray?): JsonObject {
-        val binds = hostConfig.array("Binds").strings()
-        val covered = binds.map(::bindTarget).toMutableSet()
-        hostConfig.array("Mounts")?.forEach { m -> (m as? JsonObject)?.string("Target")?.let { covered += it } }
-
-        val added = mounts.orEmpty().mapNotNull { m ->
-            val mount = m as? JsonObject ?: return@mapNotNull null
-            val name = mount.string("Name")
+        val volumes = linkedMapOf<String, JsonObject>()
+        mounts.orEmpty().forEach { m ->
+            val mount = m as? JsonObject ?: return@forEach
             val destination = mount.string("Destination")
-            if (mount.string("Type") != "volume" || name.isNullOrEmpty() || destination.isNullOrEmpty()) return@mapNotNull null
-            if (!covered.add(destination)) return@mapNotNull null
-            if (mount["RW"] == JsonPrimitive(false)) "$name:$destination:ro" else "$name:$destination"
+            if (mount.string("Type") == "volume" && !mount.string("Name").isNullOrEmpty() && !destination.isNullOrEmpty()) {
+                volumes.getOrPut(destination) { mount }
+            }
         }
-        if (added.isEmpty()) return hostConfig
-        return JsonObject(hostConfig + ("Binds" to JsonArray((binds + added).map { JsonPrimitive(it) })))
+        if (volumes.isEmpty()) return hostConfig
+        val covered = mutableSetOf<String>()
+        val result = hostConfig.toMutableMap()
+
+        val originalBinds = hostConfig.array("Binds").strings()
+        val binds = originalBinds.map { bind ->
+            val spec = parseBind(bind)
+            covered += spec.target
+            val volume = volumes[spec.target]
+            if (spec.source == null && volume != null) {
+                volumeBind(volume.string("Name")!!, spec.target, spec.mode ?: mountOptions(volume))
+            } else {
+                bind
+            }
+        }
+
+        val hostMounts = hostConfig.array("Mounts")?.map { m ->
+            val mount = m as? JsonObject ?: return@map m
+            val target = mount.string("Target") ?: return@map m
+            covered += target
+            val volume = volumes[target]
+            if (mount.string("Type") == "volume" && mount.string("Source").isNullOrEmpty() && volume != null) {
+                JsonObject(mount + ("Source" to JsonPrimitive(volume.string("Name")!!)))
+            } else {
+                mount
+            }
+        }
+        if (hostMounts != null) result["Mounts"] = JsonArray(hostMounts)
+
+        val added = volumes.filterKeys { it !in covered }.map { (destination, volume) ->
+            volumeBind(volume.string("Name")!!, destination, mountOptions(volume))
+        }
+        if (binds != originalBinds || added.isNotEmpty()) result["Binds"] = JsonArray((binds + added).map { JsonPrimitive(it) })
+        return JsonObject(result)
     }
 
-    /** Container path of a `src:dst[:opts]` bind (a lone path is its own target). */
-    private fun bindTarget(bind: String): String = bind.split(':').let { if (it.size >= 2) it[1] else it[0] }
+    private class BindSpec(val source: String?, val target: String, val mode: String?)
 
-    /** Picks the network for `NetworkingConfig` (named by [networkMode], else the first); the rest are connected later. */
-    private fun splitNetworks(
-        networkMode: String,
-        networks: JsonObject?,
-        shortId: String,
-    ): Pair<Map<String, JsonObject>, Map<String, JsonObject>> {
-        if (networks == null || networks.isEmpty()) return emptyMap<String, JsonObject>() to emptyMap()
+    /** Parses a Linux `-v` spec: `dst`, `dst:mode`, `src:dst`, `src:dst:mode`. */
+    private fun parseBind(bind: String): BindSpec {
+        val parts = bind.split(':')
+        return when {
+            parts.size == 1 -> BindSpec(null, parts[0], null)
+            parts.size == 2 && isBindMode(parts[1]) -> BindSpec(null, parts[0], parts[1])
+            else -> BindSpec(parts[0], parts[1], parts.getOrNull(2))
+        }
+    }
+
+    private fun isBindMode(text: String) = text.split(',').all { it in BIND_MODE_WORDS }
+
+    /** `-v` options for a reattached volume: `ro` when read-only, plus the mount's `Mode` (e.g. `z`, `nocopy`). */
+    private fun mountOptions(volume: JsonObject): String? {
+        val options = mutableListOf<String>()
+        if (volume["RW"] == JsonPrimitive(false)) options += "ro"
+        volume.string("Mode")?.split(',')?.filter { it.isNotEmpty() && it !in options }?.let { options += it }
+        return options.joinToString(",").ifEmpty { null }
+    }
+
+    private fun volumeBind(name: String, destination: String, mode: String?) =
+        if (mode == null) "$name:$destination" else "$name:$destination:$mode"
+
+    private class NetworkSplit(val primary: Map<String, JsonObject>, val extra: Map<String, JsonObject>, val fellBack: Boolean)
+
+    /**
+     * Picks the network for `NetworkingConfig` (named by [networkMode] or matching its NetworkID; `default`
+     * means `bridge`), else falls back to the first one; the rest are connected after create.
+     */
+    private fun splitNetworks(networkMode: String, networks: JsonObject?, shortId: String): NetworkSplit {
+        if (networks == null || networks.isEmpty()) return NetworkSplit(emptyMap(), emptyMap(), fellBack = false)
         val wanted = if (networkMode == "default") "bridge" else networkMode
-        val primaryName = networks.keys.firstOrNull { it == wanted }
+        val matched = networks.keys.firstOrNull { it == wanted }
             ?: networks.entries.firstOrNull { (it.value as? JsonObject)?.string("NetworkID") == wanted }?.key
-            ?: networks.keys.first()
+        val primaryName = matched ?: networks.keys.first()
         val configs = networks.mapValues { (_, v) -> endpointConfig(v as? JsonObject ?: JsonObject(emptyMap()), shortId) }
-        return mapOf(primaryName to configs.getValue(primaryName)) to (configs - primaryName)
+        return NetworkSplit(mapOf(primaryName to configs.getValue(primaryName)), configs - primaryName, fellBack = matched == null)
     }
 
-    /** User-settable part of an endpoint: IPAM config, links, aliases (minus Docker's short-id alias), driver opts. */
+    /** User-settable part of an endpoint ([ENDPOINT_FIELDS]); Docker's short-id alias and empty values are left out. */
     private fun endpointConfig(endpoint: JsonObject, shortId: String): JsonObject {
         val out = linkedMapOf<String, JsonElement>()
         for (field in ENDPOINT_FIELDS) {
             val value = endpoint[field] ?: continue
-            if (value is JsonNull) continue
+            if (value.isEmptyJson()) continue
             if (field == "Aliases") {
                 val aliases = (value as? JsonArray)?.filterNot { (it as? JsonPrimitive)?.content == shortId }.orEmpty()
                 if (aliases.isNotEmpty()) out[field] = JsonArray(aliases)
@@ -187,8 +255,18 @@ object RecreatePlanner {
         return JsonObject(out)
     }
 
-    /** Env diff is by key (text before the first `=`); [oldEnv] is the container's `Config.Env` as inspected. */
-    private fun changeSummary(oldImage: String, edits: RecreateEdits, oldEnv: List<String>, dropped: List<String>): ChangeSummary {
+    /**
+     * Env diff is by key (text before the first `=`); [oldEnv] is the container's `Config.Env` as inspected.
+     * Docker merges the image's Env at create, so a removed key the old image defines comes back with the
+     * image's value: those image entries are listed in `envReinherited`.
+     */
+    private fun changeSummary(
+        oldImage: String,
+        edits: RecreateEdits,
+        oldEnv: List<String>,
+        imageConfig: JsonObject?,
+        dropped: List<String>,
+    ): ChangeSummary {
         val new = edits.env
         val oldByKey = oldEnv.associateBy(::envKey)
         val newByKey = new.associateBy(::envKey)
@@ -198,6 +276,7 @@ object RecreatePlanner {
             envChanged = newByKey.mapNotNull { (k, entry) -> oldByKey[k]?.takeIf { it != entry }?.let { it to entry } },
             envRemoved = oldEnv.filter { envKey(it) !in newByKey },
             droppedImageDefaults = dropped,
+            envReinherited = imageConfig?.array("Env").strings().filter { envKey(it) in oldByKey && envKey(it) !in newByKey },
         )
     }
 

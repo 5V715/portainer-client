@@ -16,6 +16,8 @@ data class ChangeSummary(
     val envRemoved: List<String>,
     /** Values inherited from the old image that are left out so the new image's defaults apply. */
     val droppedImageDefaults: List<String>,
+    /** Old-image `K=V` entries that apply again because the user removed key K (Docker merges image Env at create). */
+    val envReinherited: List<String> = emptyList(),
 )
 
 sealed interface RecreateWarning {

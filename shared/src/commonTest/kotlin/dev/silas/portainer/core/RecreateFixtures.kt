@@ -1,9 +1,9 @@
 package dev.silas.portainer.core
 
 /**
- * Recreate-planner fixtures, shaped exactly like Docker Engine API v1.47 output
+ * Recreate-planner fixtures, shaped exactly like Docker Engine API v1.48 output
  * (`GET /containers/{id}/json`, `GET /images/{id}/json`). Field names and nesting match
- * what `docker inspect` prints for Docker 27.x.
+ * what `docker inspect` prints for Docker 28.x.
  */
 object RecreateFixtures {
     /**
@@ -260,6 +260,7 @@ object RecreateFixtures {
         "Aliases": ["app", "3f4e5d6c7b8a"],
         "MacAddress": "02:42:ac:14:00:0a",
         "DriverOpts": null,
+        "GwPriority": 10,
         "NetworkID": "b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9",
         "EndpointID": "c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3",
         "Gateway": "172.20.0.1",
@@ -275,6 +276,7 @@ object RecreateFixtures {
         "Links": ["shop-db-1:db"],
         "Aliases": ["web", "3f4e5d6c7b8a"],
         "MacAddress": "02:42:ac:15:00:03",
+        "GwPriority": 0,
         "DriverOpts": {"com.docker.network.endpoint.sysctls": "net.ipv4.conf.IFNAME.log_martians=1"},
         "NetworkID": "a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a6b8",
         "EndpointID": "d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a6b8c0d2e4",
@@ -497,6 +499,149 @@ object RecreateFixtures {
         "GlobalIPv6Address": "",
         "GlobalIPv6PrefixLen": 0,
         "DNSNames": null
+      }
+    }
+  }
+}"""
+
+    /**
+     * Docker Compose v2 service `node` (project `shop`) with
+     * `volumes: [./src:/app/src, db:/var/lib/data, /app/node_modules]`: compose sends the named and the
+     * anonymous volume as `HostConfig.Mounts`, the anonymous one without a `Source`.
+     */
+    const val INSPECT_COMPOSE_ANON = """{
+  "Id": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
+  "Created": "2026-10-10T07:30:00.000000000Z",
+  "Path": "docker-entrypoint.sh",
+  "Args": ["npm", "start"],
+  "State": {
+    "Status": "running",
+    "Running": true,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 7702,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-10T07:30:01.000000000Z",
+    "FinishedAt": "0001-01-01T00:00:00Z"
+  },
+  "Image": "sha256:e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5",
+  "Name": "/shop-node-1",
+  "RestartCount": 0,
+  "Driver": "overlay2",
+  "Platform": "linux",
+  "HostConfig": {
+    "Binds": ["/srv/shop/src:/app/src:rw"],
+    "ContainerIDFile": "",
+    "LogConfig": {"Type": "json-file", "Config": {}},
+    "NetworkMode": "shop_default",
+    "PortBindings": {},
+    "RestartPolicy": {"Name": "always", "MaximumRetryCount": 0},
+    "AutoRemove": false,
+    "VolumeDriver": "",
+    "VolumesFrom": null,
+    "ConsoleSize": [0, 0],
+    "CapAdd": null,
+    "CapDrop": null,
+    "CgroupnsMode": "private",
+    "Dns": null,
+    "DnsOptions": null,
+    "DnsSearch": null,
+    "ExtraHosts": [],
+    "IpcMode": "private",
+    "Links": null,
+    "Privileged": false,
+    "ShmSize": 67108864,
+    "Runtime": "runc",
+    "Devices": null,
+    "Mounts": [
+      {"Type": "volume", "Source": "shop_db", "Target": "/var/lib/data", "VolumeOptions": {}},
+      {"Type": "volume", "Target": "/app/node_modules", "VolumeOptions": {}}
+    ]
+  },
+  "Mounts": [
+    {
+      "Type": "bind",
+      "Source": "/srv/shop/src",
+      "Destination": "/app/src",
+      "Mode": "rw",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "volume",
+      "Name": "shop_db",
+      "Source": "/var/lib/docker/volumes/shop_db/_data",
+      "Destination": "/var/lib/data",
+      "Driver": "local",
+      "Mode": "z",
+      "RW": true,
+      "Propagation": ""
+    },
+    {
+      "Type": "volume",
+      "Name": "5c0d8e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d",
+      "Source": "/var/lib/docker/volumes/5c0d8e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d/_data",
+      "Destination": "/app/node_modules",
+      "Driver": "local",
+      "Mode": "z",
+      "RW": true,
+      "Propagation": ""
+    }
+  ],
+  "Config": {
+    "Hostname": "c3d4e5f6a7b8",
+    "Domainname": "",
+    "User": "node",
+    "AttachStdin": false,
+    "AttachStdout": true,
+    "AttachStderr": true,
+    "Tty": false,
+    "OpenStdin": false,
+    "StdinOnce": false,
+    "Env": ["NODE_ENV=production", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
+    "Cmd": ["npm", "start"],
+    "Image": "node:22-alpine",
+    "Volumes": null,
+    "WorkingDir": "/app",
+    "Entrypoint": ["docker-entrypoint.sh"],
+    "OnBuild": null,
+    "Labels": {
+      "com.docker.compose.project": "shop",
+      "com.docker.compose.service": "node",
+      "com.docker.compose.version": "2.29.7"
+    }
+  },
+  "NetworkSettings": {
+    "Bridge": "",
+    "SandboxID": "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
+    "SandboxKey": "/var/run/docker/netns/d4e5f6a7b8c9",
+    "Ports": {},
+    "HairpinMode": false,
+    "EndpointID": "",
+    "Gateway": "",
+    "IPAddress": "",
+    "IPPrefixLen": 0,
+    "MacAddress": "",
+    "Networks": {
+      "shop_default": {
+        "IPAMConfig": null,
+        "Links": null,
+        "Aliases": ["shop-node-1", "node"],
+        "MacAddress": "02:42:ac:16:00:02",
+        "DriverOpts": null,
+        "GwPriority": 0,
+        "NetworkID": "f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6",
+        "EndpointID": "a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8",
+        "Gateway": "172.22.0.1",
+        "IPAddress": "172.22.0.2",
+        "IPPrefixLen": 16,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "DNSNames": ["shop-node-1", "node", "c3d4e5f6a7b8"]
       }
     }
   }

@@ -13,6 +13,8 @@ class ProtectionTest {
             "portainer/portainer-ee@sha256:3f0e6d8b2a1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f",
             "portainer/portainer",
             "portainer/agent:2.21.4",
+            "registry-1.docker.io/portainer/portainer-ce:latest",
+            "index.docker.io/portainer/agent:2.21",
         )) assertTrue(isProtectedImage(image), image)
     }
 
