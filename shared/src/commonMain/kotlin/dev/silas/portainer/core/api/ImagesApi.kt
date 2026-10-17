@@ -17,7 +17,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-private const val PULL_DENIED = "Image pull was denied. Check the registry credentials in Registries."
+/**
+ * Registry-style denials are also what Docker reports for images that only exist locally, so the copy
+ * shows Docker's own words and only suggests credentials.
+ */
+private fun pullDenied(dockerMessage: String) =
+    "Image pull failed: ${dockerMessage.trimEnd('.')}. If the image is in a private registry, check its credentials in Registries."
 private val DENIAL_MARKERS = listOf(
     "pull access denied",
     "requested access to the resource is denied",
@@ -40,8 +45,8 @@ suspend fun PortainerClient.inspectImage(endpointId: Int, imageId: String): Json
  * Pulls [ref]. Docker reports pull failures (bad tag, registry auth) inside the HTTP 200 progress
  * stream, so the whole stream is read and any `error` line fails the call.
  *
- * Denial mapping: a stream error or any non-2xx body with a registry-style denial phrase becomes the
- * "pull was denied" message. A 401/403 without one (including Portainer RBAC "Access denied ...")
+ * Denial mapping: a stream error or any non-2xx body with a registry-style denial phrase gets the
+ * "check its credentials in Registries" hint. Docker's text is redacted of the API key. A 401/403 without one (including Portainer RBAC "Access denied ...")
  * stays [PortainerException.Unauthorized], because it is ambiguous with a bad API key. A digest pins the pull.
  */
 suspend fun PortainerClient.pullImage(endpointId: Int, ref: ImageRef, registryId: Int?) {
@@ -68,8 +73,10 @@ suspend fun PortainerClient.pullImage(endpointId: Int, ref: ImageRef, registryId
     }
 }
 
-private fun pullFailure(status: Int, text: String) =
-    PortainerException.Api(status, if (looksDenied(text)) PULL_DENIED else text)
+private fun PortainerClient.pullFailure(status: Int, text: String): PortainerException.Api {
+    val safe = redact(text)
+    return PortainerException.Api(status, if (looksDenied(safe)) pullDenied(safe) else safe)
+}
 
 private suspend fun PortainerClient.throwForPullStatus(response: HttpResponse) {
     if (response.status.isSuccess()) return
@@ -81,8 +88,8 @@ private suspend fun PortainerClient.throwForPullStatus(response: HttpResponse) {
     } catch (e: Throwable) {
         ""
     }
-    val message = messageOf(text)
-    if (message != null && looksDenied(message)) throw PortainerException.Api(status, PULL_DENIED)
+    val message = messageOf(text)?.let(::redact)
+    if (message != null && looksDenied(message)) throw pullFailure(status, message)
     when (status) {
         401, 403 -> throw PortainerException.Unauthorized()
         404 -> throw PortainerException.NotFound(message?.let { "Not found: $it" } ?: "Not found")

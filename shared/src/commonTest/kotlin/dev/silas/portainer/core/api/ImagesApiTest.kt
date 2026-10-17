@@ -18,10 +18,11 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ImagesApiTest {
-    private val denial = "Image pull was denied. Check the registry credentials in Registries."
+    private fun denial(docker: String) =
+        "Image pull failed: $docker. If the image is in a private registry, check its credentials in Registries."
 
     private fun client(status: HttpStatusCode = HttpStatusCode.OK, body: String, onRequest: (HttpRequestData) -> Unit = {}) =
-        PortainerClient("https://h", "k", MockEngine { onRequest(it); respond(body, status, headersOf(HttpHeaders.ContentType, "application/json")) })
+        PortainerClient("https://h", "test-api-key", MockEngine { onRequest(it); respond(body, status, headersOf(HttpHeaders.ContentType, "application/json")) })
 
     @Test
     fun streamErrorWithHttp200Throws() = runTest {
@@ -42,21 +43,21 @@ class ImagesApiTest {
     fun deniedStreamErrorUsesDenialMessage() = runTest {
         val c = client(body = "{\"error\":\"Head https://r/v2/x: denied: requested access to the resource is denied\"}\n")
         val e = assertFailsWith<PortainerException.Api> { c.pullImage(1, ImageRef.parse("r/x"), 3) }
-        assertEquals(denial, e.message)
+        assertEquals(denial("Head https://r/v2/x: denied: requested access to the resource is denied"), e.message)
     }
 
     @Test
     fun unauthorizedStreamErrorUsesDenialMessage() = runTest {
         val c = client(body = "{\"error\":\"unauthorized: authentication required\"}")
         val e = assertFailsWith<PortainerException.Api> { c.pullImage(1, ImageRef.parse("r/x"), 3) }
-        assertEquals(denial, e.message)
+        assertEquals(denial("unauthorized: authentication required"), e.message)
     }
 
     @Test
     fun http401WithDeniedBodyUsesDenialMessage() = runTest {
         val c = client(HttpStatusCode.Unauthorized, "{\"message\":\"pull access denied for x\"}")
         val e = assertFailsWith<PortainerException.Api> { c.pullImage(1, ImageRef.parse("r/x"), 3) }
-        assertEquals(denial, e.message)
+        assertEquals(denial("pull access denied for x"), e.message)
     }
 
     @Test
@@ -116,8 +117,27 @@ class ImagesApiTest {
     fun registryDenialOnNotFoundUsesDenialMessage() = runTest {
         val c = client(HttpStatusCode.NotFound, "{\"message\":\"pull access denied for x, repository does not exist or may require 'docker login'\"}")
         val e = assertFailsWith<PortainerException.Api> { c.pullImage(1, ImageRef.parse("x"), null) }
-        assertEquals(denial, e.message)
+        assertEquals(denial("pull access denied for x, repository does not exist or may require 'docker login'"), e.message)
         assertEquals(404, e.status)
+    }
+
+    @Test
+    fun pullFailureMessagesRedactTheApiKey() = runTest {
+        val key = "ptr_secretkey123"
+        fun keyed(status: HttpStatusCode, body: String) =
+            PortainerClient("https://h", key, MockEngine { respond(body, status, headersOf(HttpHeaders.ContentType, "application/json")) })
+        val streamed = assertFailsWith<PortainerException.Api> {
+            keyed(HttpStatusCode.OK, "{\"error\":\"unauthorized: token $key rejected\"}").pullImage(1, ImageRef.parse("r/x"), 3)
+        }
+        assertEquals(denial("unauthorized: token *** rejected"), streamed.message)
+        val other = assertFailsWith<PortainerException.Api> {
+            keyed(HttpStatusCode.OK, "{\"error\":\"manifest for $key unknown\"}").pullImage(1, ImageRef.parse("r/x"), 3)
+        }
+        assertEquals("manifest for *** unknown", other.message)
+        val status = assertFailsWith<PortainerException.Api> {
+            keyed(HttpStatusCode.InternalServerError, "{\"message\":\"boom $key\"}").pullImage(1, ImageRef.parse("r/x"), 3)
+        }
+        assertEquals("boom ***", status.message)
     }
 
     @Test

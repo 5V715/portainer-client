@@ -1,5 +1,6 @@
 package dev.silas.portainer.core.api
 
+import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.ContainerSummary
 import dev.silas.portainer.core.model.Health
@@ -22,7 +23,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-private const val COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 private const val NOT_MODIFIED = 304
 private const val STOP_TIMEOUT_MS = 5 * 60_000L
 

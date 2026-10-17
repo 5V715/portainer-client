@@ -1,5 +1,8 @@
 package dev.silas.portainer.core.model
 
+/** Docker Compose label naming the project (stack) a container belongs to. */
+const val COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
+
 enum class ContainerState {
     Running,
     Exited,

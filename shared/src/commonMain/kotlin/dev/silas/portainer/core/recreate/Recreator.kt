@@ -3,9 +3,11 @@ package dev.silas.portainer.core.recreate
 import dev.silas.portainer.core.api.PortainerException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 enum class RecreateStep { Pull, RenameOld, CreateNew, ConnectNetworks, StopOld, StartNew, RemoveOld }
@@ -203,12 +205,19 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
     }
 }
 
-/** Runs [block]; returns the failure, or null on success. Cancellation is rethrown. */
-private inline fun attempt(block: () -> Unit): Exception? = try {
+/**
+ * Runs [block]; returns the failure, or null on success.
+ *
+ * A [CancellationException] is rethrown only when this coroutine itself is cancelled. One thrown by an op while
+ * the coroutine is still active (e.g. its HTTP engine was closed) is a failed op, reported as a lost connection,
+ * so the usual rollback runs instead of the recreate stopping halfway.
+ */
+private suspend inline fun attempt(block: () -> Unit): Exception? = try {
     block()
     null
 } catch (e: CancellationException) {
-    throw e
+    if (!currentCoroutineContext().isActive) throw e
+    PortainerException.Unreachable("Lost connection to Portainer")
 } catch (e: Exception) {
     e
 }

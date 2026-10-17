@@ -16,10 +16,11 @@ fun normalizeBaseUrl(input: String): Result<String> {
         return Result.failure(IllegalArgumentException("Portainer must be reached over HTTPS"))
     }
     if (!url.startsWith("https://", ignoreCase = true)) url = "https://$url"
-    url = url.trimEnd('/')
-    val hostEnd = url.indexOf("://") + 3
-    val slash = url.indexOf('/', hostEnd)
-    if (slash >= 0 && url.endsWith("/api", ignoreCase = true)) url = url.dropLast(4).trimEnd('/')
+    // Keep only scheme + authority: a pasted browser URL (`https://host:9443/#!/2/docker/containers`),
+    // a query, or a path such as `/api` all point at the same Portainer.
+    val hostStart = "https://".length
+    val hostEnd = url.indexOfAny(charArrayOf('/', '?', '#'), hostStart).takeIf { it >= 0 } ?: url.length
+    url = "https://" + url.substring(hostStart, hostEnd)
     if (url.length <= "https://".length) {
         return Result.failure(IllegalArgumentException("Enter the Portainer address"))
     }

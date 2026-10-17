@@ -252,6 +252,26 @@ class RecreatePlannerTest {
     }
 
     @Test
+    fun configMacAddressDroppedWhenPrimaryEndpointCarriesOne() {
+        // Docker API >= 1.44 rejects a create whose Config.MacAddress differs from the primary endpoint's.
+        val legacyMac = full.withSection("Config", "MacAddress", JsonPrimitive("02:42:ac:15:00:99"))
+        val p = plan(legacyMac)
+        assertFalse("MacAddress" in p.createBody, "matched primary network")
+        val primary = p.createBody.getValue("NetworkingConfig").jsonObject.getValue("EndpointsConfig").jsonObject.getValue("frontend").jsonObject
+        assertEquals(JsonPrimitive("02:42:ac:15:00:03"), primary["MacAddress"])
+
+        val fallback = plan(legacyMac.withSection("HostConfig", "NetworkMode", JsonPrimitive("gone")))
+        assertFalse("MacAddress" in fallback.createBody, "fallback primary network")
+    }
+
+    @Test
+    fun configMacAddressKeptWhenPrimaryEndpointHasNone() {
+        val noEndpointMac = obj(RecreateFixtures.INSPECT_FULL.replace("\"MacAddress\": \"02:42:ac:15:00:03\"", "\"MacAddress\": \"\""))
+        val p = plan(noEndpointMac.withSection("Config", "MacAddress", JsonPrimitive("02:42:ac:15:00:99")))
+        assertEquals(JsonPrimitive("02:42:ac:15:00:99"), p.createBody["MacAddress"])
+    }
+
+    @Test
     fun containerNetworkModeOmitsNetworkingAndHostname() {
         val p = plan(netmode, null)
         val body = p.createBody

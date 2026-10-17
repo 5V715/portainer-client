@@ -131,8 +131,11 @@ class PortainerClient(
         val details = (obj["details"] as? JsonPrimitive)?.takeIf { it.isString }?.content
         val text = listOfNotNull(message, details).filter { it.isNotBlank() }.joinToString(": ")
         if (text.isEmpty()) return null
-        return if (apiKey.isBlank()) text else text.replace(apiKey, "***")
+        return redact(text)
     }
+
+    /** Replaces the API key in server-provided [text] before it can reach an exception or the UI. */
+    internal fun redact(text: String): String = if (apiKey.isBlank()) text else text.replace(apiKey, "***")
 
     /** GET [path] and decode the JSON body, mapping read/parse failures to [PortainerException]. */
     internal suspend inline fun <reified T> getJson(path: String): T {

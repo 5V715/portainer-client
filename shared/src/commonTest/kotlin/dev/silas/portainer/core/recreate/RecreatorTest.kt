@@ -13,6 +13,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
@@ -270,6 +271,28 @@ class RecreatorTest {
         val events = recreator(ops).run(OLD, plan(pull = false)).toList()
         assertEquals(listOf("rename $OLD $TMP", "create web", "rename $OLD web"), ops.calls)
         assertEquals(Failed(RecreateStep.CreateNew, "bad body", rolledBack = true), events.last())
+    }
+
+    @Test
+    fun opCancelledWhileCollectorActiveIsRolledBack() = runTest {
+        // e.g. the HTTP engine was closed under the recreate: the op throws CancellationException, the flow is not cancelled.
+        val ops = FakeOps(mapOf("create web" to CancellationException("Engine was closed")))
+        val events = recreator(ops).run(OLD, plan(pull = false)).toList()
+        assertEquals(listOf("rename $OLD $TMP", "create web", "rename $OLD web"), ops.calls)
+        assertEquals(Failed(RecreateStep.CreateNew, "Lost connection to Portainer", rolledBack = true), events.last())
+    }
+
+    @Test
+    fun cancellingTheCollectorMidStepStopsWithoutRollback() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val ops = FakeOps(gates = mapOf("create web" to gate))
+        val events = mutableListOf<RecreateEvent>()
+        val job = launch { recreator(ops).run(OLD, plan(pull = false)).collect { events += it } }
+        while (ops.calls.lastOrNull() != "create web") yield()
+        job.cancel()
+        job.join()
+        assertEquals(listOf("rename $OLD $TMP", "create web"), ops.calls)
+        assertFalse(events.any { it is Failed })
     }
 
     @Test

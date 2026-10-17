@@ -1,5 +1,6 @@
 package dev.silas.portainer.core.recreate
 
+import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import dev.silas.portainer.core.model.ImageRef
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -7,7 +8,6 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-private const val STACK_LABEL = "com.docker.compose.project"
 private const val SHORT_ID_LENGTH = 12
 
 /** Single-value Config fields dropped when equal to the old image's (Cmd handled separately). */
@@ -65,6 +65,9 @@ object RecreatePlanner {
         if (!isolatedNetwork) {
             val split = splitNetworks(networkMode, inspect.obj("NetworkSettings")?.obj("Networks"), shortId)
             config["NetworkingConfig"] = JsonObject(mapOf("EndpointsConfig" to JsonObject(split.primary)))
+            // Docker API >= 1.44 rejects a create whose top-level MacAddress differs from the primary endpoint's
+            // (e.g. after falling back to another network); the endpoint's value is the one Docker applies.
+            if (split.primary.values.any { it.containsKey("MacAddress") }) config.remove("MacAddress")
             extraNetworks = split.extra
             // NetworkMode names a network the container isn't on: point it at the network we attach to.
             if (split.fellBack) newHostConfig = JsonObject(newHostConfig + ("NetworkMode" to JsonPrimitive(split.primary.keys.single())))
@@ -72,7 +75,7 @@ object RecreatePlanner {
         config["HostConfig"] = newHostConfig
 
         val warnings = buildList {
-            originalConfig.obj("Labels")?.string(STACK_LABEL)?.let { add(RecreateWarning.StackMember(it)) }
+            originalConfig.obj("Labels")?.string(COMPOSE_PROJECT_LABEL)?.let { add(RecreateWarning.StackMember(it)) }
             if (hostConfig.boolean("AutoRemove")) add(RecreateWarning.AutoRemove)
             if (imageConfig == null) add(RecreateWarning.ImageConfigUnavailable)
             add(RecreateWarning.ConnectionDependency)
