@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -70,14 +71,20 @@ fun LogsTab(viewModel: LogsViewModel) {
 
     // Stick to the bottom from layout state: if the item count did not change, the viewport moved (user input or
     // Jump to latest) and the flag follows whether it is at the bottom; if the count changed, content moved instead.
+    val currentVisible by rememberUpdatedState(visible)
     LaunchedEffect(listState) {
         var prevCount = -1
-        snapshotFlow { listState.layoutInfo.totalItemsCount to listState.isAtBottom() }.collect { (count, atBottom) ->
-            autoScroll = nextStick(prevCount, count, atBottom, autoScroll)
+        var prevLastKey: Long? = null
+        snapshotFlow {
+            Triple(listState.layoutInfo.totalItemsCount, currentVisible.lastOrNull()?.first, listState.isAtBottom())
+        }.collect { (count, lastKey, atBottom) ->
+            autoScroll = nextStick(prevCount, count, prevLastKey, lastKey, atBottom, autoScroll)
             prevCount = count
+            prevLastKey = lastKey
         }
     }
-    LaunchedEffect(visible.size, state.firstSeq) {
+    val lastKey = visible.lastOrNull()?.first
+    LaunchedEffect(visible.size, lastKey) {
         if (autoScroll && visible.isNotEmpty()) listState.scrollToItem(visible.lastIndex)
     }
 
@@ -168,9 +175,15 @@ private fun LazyListState.isAtBottom(): Boolean {
 }
 
 /**
- * Whether the list should keep following the newest line. [prevCount] == [count] means only the viewport moved
- * (the user scrolled, or jumped), so the answer is [atBottom]; otherwise lines were added or filtered and the
- * previous decision [stick] stands.
+ * Whether the list should keep following the newest line. If the item count or the last item's key changed, content
+ * moved (lines added, trimmed at buffer capacity, or a filter change) and the previous decision [stick] stands.
+ * Only when both are unchanged did the viewport move on its own (the user scrolled, or jumped): then [atBottom] decides.
  */
-internal fun nextStick(prevCount: Int, count: Int, atBottom: Boolean, stick: Boolean): Boolean =
-    if (count == prevCount) atBottom else stick
+internal fun nextStick(
+    prevCount: Int,
+    count: Int,
+    prevLastKey: Long?,
+    lastKey: Long?,
+    atBottom: Boolean,
+    stick: Boolean,
+): Boolean = if (count == prevCount && lastKey == prevLastKey) atBottom else stick
