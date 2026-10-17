@@ -14,7 +14,9 @@ import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.header
 import io.ktor.client.request.request
 import io.ktor.client.request.url
+import io.ktor.client.request.prepareRequest
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.HttpStatement
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
@@ -70,6 +72,26 @@ class PortainerClient(
         }
         throwForStatus(response, okStatuses)
         return response
+    }
+
+    /**
+     * Prepares a streamed request against [path]: URL and API key applied, nothing executed yet.
+     * Run it with `.execute { }` and call [throwForStatus]; map transport failures with [mapTransportFailure].
+     */
+    internal suspend fun prepareStream(path: String, block: HttpRequestBuilder.() -> Unit = {}): HttpStatement =
+        http.prepareRequest {
+            url(baseUrl + path)
+            header(API_KEY_HEADER, apiKey)
+            block()
+        }
+
+    /**
+     * Maps a throwable from a streamed call to [PortainerException]; message never echoes the cause
+     * because it can contain the request URL or headers.
+     */
+    internal fun mapTransportFailure(e: Throwable): Throwable = when (e) {
+        is CancellationException, is PortainerException -> e
+        else -> PortainerException.Unreachable("Could not reach Portainer")
     }
 
     /**
