@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -26,9 +28,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.silas.portainer.app.theme.StatusLabel
+import dev.silas.portainer.app.theme.StatusTone
+import dev.silas.portainer.app.theme.color
 import dev.silas.portainer.app.theme.statusOf
 import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.Health
+import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,6 +51,15 @@ fun OverviewTab(overview: ContainerOverview?, loading: Boolean, onRefresh: () ->
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 overview.stack?.let { StackBadge(it) }
+                // Why there is no "Edit & recreate" for this container.
+                if (overview.protectedImage) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(PROTECTED_IMAGE_MESSAGE, Modifier.padding(12.dp), color = StatusTone.Warn.color())
+                    }
+                }
                 Field("Image", overview.image)
                 Column {
                     Text("State", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

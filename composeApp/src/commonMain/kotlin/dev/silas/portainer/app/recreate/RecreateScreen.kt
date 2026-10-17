@@ -178,7 +178,9 @@ private fun EditForm(state: RecreateState, vm: RecreateViewModel) {
         TextButton(onClick = vm::addEnvRow) { Text("Add variable") }
 
         state.validationError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        Button(onClick = vm::review, modifier = Modifier.fillMaxWidth()) { Text("Review changes") }
+        Button(onClick = vm::review, enabled = !state.checking, modifier = Modifier.fillMaxWidth()) {
+            Text(if (state.checking) "Checking container…" else "Review changes")
+        }
     }
 }
 
@@ -207,6 +209,11 @@ private fun ReviewPane(phase: RecreatePhase.Reviewing, vm: RecreateViewModel) {
     val lines = summaryLines(phase.plan.changes)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Review changes", style = MaterialTheme.typography.titleMedium)
+        phase.notice?.let { notice ->
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer), modifier = Modifier.fillMaxWidth()) {
+                Text(notice, Modifier.padding(12.dp), color = MaterialTheme.colorScheme.onSecondaryContainer)
+            }
+        }
         if (lines.isEmpty()) {
             Text("No changes — the container will be recreated with the same settings.")
         } else {

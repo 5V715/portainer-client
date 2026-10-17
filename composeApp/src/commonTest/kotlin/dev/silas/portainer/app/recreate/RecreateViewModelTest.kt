@@ -36,6 +36,7 @@ class RecreateViewModelTest {
     private val requests = mutableListOf<String>()
     private var image = "ghcr.io/acme/app:1"
     private var failCreate = false
+    private var inspectGone = false
     private var startGate: CompletableDeferred<Unit>? = null
 
     private fun inspect() = """{
@@ -55,7 +56,9 @@ class RecreateViewModelTest {
         val path = r.url.encodedPath
         requests += "${r.method.value} ${path.substringAfter("/docker", path)}"
         return when {
-            path.endsWith("/containers/abc/json") -> respond(inspect(), HttpStatusCode.OK, json)
+            path.endsWith("/containers/abc/json") ->
+                if (inspectGone) respond("""{"message":"No such container: abc"}""", HttpStatusCode.NotFound, json)
+                else respond(inspect(), HttpStatusCode.OK, json)
             path.endsWith("/images/sha256:old/json") -> respond("""{"Config":{"Env":["PATH=/x"]}}""", HttpStatusCode.OK, json)
             path.endsWith("/api/registries") -> respond(registries, HttpStatusCode.OK, json)
             path.endsWith("/containers/create") ->
@@ -86,6 +89,76 @@ class RecreateViewModelTest {
         val vm = RecreateViewModel(env.container, "s1", 1, "abc")
         settle { vm.state.value.phase != RecreatePhase.Loading }
         return vm
+    }
+
+    private suspend fun TestScope.reviewed(vm: RecreateViewModel): RecreatePhase.Reviewing {
+        vm.review()
+        settle { vm.state.value.phase is RecreatePhase.Reviewing }
+        return vm.state.value.phase as RecreatePhase.Reviewing
+    }
+
+    private fun inspectCount() = requests.count { it.endsWith("/containers/abc/json") }
+
+    /** Starts a recreate that stays suspended in StartNew until the returned gate completes. */
+    private suspend fun TestScope.runningUntilGate(env: TestEnv): Pair<RecreateViewModel, CompletableDeferred<Unit>> {
+        val gate = CompletableDeferred<Unit>()
+        startGate = gate
+        val vm = editing(env)
+        vm.setPull(false)
+        reviewed(vm)
+        vm.confirm()
+        settle {
+            vm.state.value.phase.let { p -> p is RecreatePhase.Running && p.steps.any { it.step == RecreateStep.StartNew && it.status == StepStatus.Active } }
+        }
+        return vm to gate
+    }
+
+    @Test
+    fun savingTheServerMidRecreateDoesNotBreakIt() = runTest {
+        val env = env()
+        val (vm, gate) = runningUntilGate(env)
+        env.container.saveServer(ServerConfig("s1", "Renamed", "https://a.example.com"), null)
+        gate.complete(Unit)
+        settle { vm.state.value.phase is RecreatePhase.Done }
+        assertEquals(RecreateResult.Success("new1"), (vm.state.value.phase as RecreatePhase.Done).result)
+        assertTrue(requests.last().startsWith("DELETE /containers/abc"), "old container removed after the new one started")
+    }
+
+    @Test
+    fun deletingTheServerMidRecreateDoesNotBreakIt() = runTest {
+        val env = env()
+        val (vm, gate) = runningUntilGate(env)
+        env.container.deleteServer("s1")
+        gate.complete(Unit)
+        settle { vm.state.value.phase is RecreatePhase.Done }
+        assertEquals(RecreateResult.Success("new1"), (vm.state.value.phase as RecreatePhase.Done).result)
+    }
+
+    @Test
+    fun reviewReinspectsAndPlansFromTheCurrentContainer() = runTest {
+        val vm = editing(env())
+        val before = inspectCount()
+        val unchanged = reviewed(vm)
+        assertEquals(before + 1, inspectCount())
+        assertNull(unchanged.notice)
+        assertNull(unchanged.plan.changes.imageChange)
+
+        vm.cancelReview()
+        image = "ghcr.io/acme/app:9" // changed outside the app after the form was loaded
+        val changed = reviewed(vm)
+        assertEquals("ghcr.io/acme/app:9" to "ghcr.io/acme/app:1", changed.plan.changes.imageChange)
+        assertEquals(CONTAINER_CHANGED_NOTICE, changed.notice)
+        assertEquals("ghcr.io/acme/app:1", vm.state.value.image, "the user's edits are kept")
+    }
+
+    @Test
+    fun reviewReportsAFailedReinspectOnTheForm() = runTest {
+        val vm = editing(env())
+        inspectGone = true
+        vm.review()
+        settle { vm.state.value.validationError != null }
+        assertEquals(RecreatePhase.Editing, vm.state.value.phase)
+        assertTrue(vm.state.value.validationError!!.startsWith("Not found"), vm.state.value.validationError)
     }
 
     @Test
@@ -130,7 +203,7 @@ class RecreateViewModelTest {
         vm.addEnvRow()
         vm.setEnvRow(2, "B", "2")
         vm.setImage("ghcr.io/acme/app:2")
-        vm.review()
+        reviewed(vm)
         val phase = assertIs<RecreatePhase.Reviewing>(vm.state.value.phase)
         assertEquals(listOf("B=2"), phase.plan.changes.envAdded)
         assertEquals("ghcr.io/acme/app:1" to "ghcr.io/acme/app:2", phase.plan.changes.imageChange)
@@ -167,7 +240,7 @@ class RecreateViewModelTest {
         val vm = editing(env())
         vm.addEnvRow()
         vm.addEnvRow()
-        vm.review()
+        reviewed(vm)
         val phase = assertIs<RecreatePhase.Reviewing>(vm.state.value.phase)
         assertTrue(phase.plan.changes.envAdded.isEmpty())
     }
@@ -186,7 +259,7 @@ class RecreateViewModelTest {
     fun confirmRunsRecreatorAndMapsEventsToSteps() = runTest {
         val vm = editing(env())
         vm.setPull(false)
-        vm.review()
+        reviewed(vm)
         vm.confirm()
         settle { vm.state.value.phase is RecreatePhase.Done }
         val done = assertIs<RecreatePhase.Done>(vm.state.value.phase)
@@ -204,7 +277,7 @@ class RecreateViewModelTest {
         failCreate = true
         val vm = editing(env())
         vm.setPull(false)
-        vm.review()
+        reviewed(vm)
         vm.confirm()
         settle { vm.state.value.phase is RecreatePhase.Done }
         val done = assertIs<RecreatePhase.Done>(vm.state.value.phase)
@@ -224,7 +297,7 @@ class RecreateViewModelTest {
         val env = env()
         val first = editing(env)
         first.setPull(false)
-        first.review()
+        reviewed(first)
         first.confirm()
         settle { first.state.value.phase.let { it is RecreatePhase.Running && it.steps.any { s -> s.status == StepStatus.Active } } }
 

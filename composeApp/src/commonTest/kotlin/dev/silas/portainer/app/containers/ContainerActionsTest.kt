@@ -10,9 +10,10 @@ import kotlin.test.assertEquals
 
 class ContainerActionsTest {
     @Test
-    fun liveStatesOfferStopRestartRemove() {
+    fun liveStatesOfferStopRestartButNotRemove() {
+        // Remove never forces, so Docker would refuse it (409) for a live container.
         listOf(ContainerState.Running, ContainerState.Restarting, ContainerState.Paused).forEach {
-            assertEquals(listOf(Stop, Restart, Remove), availableActions(it), it.name)
+            assertEquals(listOf(Stop, Restart), availableActions(it), it.name)
         }
     }
 
@@ -24,9 +25,12 @@ class ContainerActionsTest {
     }
 
     @Test
-    fun unknownStatesOfferEverything() {
-        listOf(ContainerState.Unknown, ContainerState.Removing).forEach {
-            assertEquals(listOf(Start, Stop, Restart, Remove), availableActions(it), it.name)
-        }
+    fun unknownStateOffersEverything() {
+        assertEquals(listOf(Start, Stop, Restart, Remove), availableActions(ContainerState.Unknown))
+    }
+
+    @Test
+    fun removingStateDoesNotOfferRemove() {
+        assertEquals(listOf(Start, Stop, Restart), availableActions(ContainerState.Removing))
     }
 }

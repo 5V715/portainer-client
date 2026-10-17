@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
 import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.inspectContainer
+import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import dev.silas.portainer.core.recreate.isProtectedImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -91,8 +92,6 @@ class ContainerDetailViewModel(
     }
 }
 
-private const val STACK_LABEL = "com.docker.compose.project"
-
 internal fun parseOverview(inspect: JsonObject): ContainerOverview {
     val config = inspect.obj("Config")
     val state = inspect.obj("State")
@@ -115,7 +114,7 @@ internal fun parseOverview(inspect: JsonObject): ContainerOverview {
         env = (config["Env"] as? JsonArray).orEmpty().mapNotNull { it.str() },
         labels = labels,
         restartPolicy = policy.ifEmpty { "no" },
-        stack = labels[STACK_LABEL],
+        stack = labels[COMPOSE_PROJECT_LABEL],
         tty = (config["Tty"] as? JsonPrimitive)?.booleanOrNull ?: false,
     )
 }

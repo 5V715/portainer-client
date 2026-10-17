@@ -1,5 +1,7 @@
 package dev.silas.portainer.app.recreate
 
+import dev.silas.portainer.core.api.PortainerClient
+import dev.silas.portainer.core.recreate.PortainerDockerOps
 import dev.silas.portainer.core.recreate.RecreateEvent
 import dev.silas.portainer.core.recreate.RecreatePlan
 import dev.silas.portainer.core.recreate.RecreateStep
@@ -40,19 +42,26 @@ internal fun plannedSteps(plan: RecreatePlan): List<RecreateStep> = RecreateStep
  * so leaving the screen, rotating or recreating a ViewModel never cancels the operation.
  * Call from one thread (the UI thread); the progress flows themselves are safe to read anywhere.
  */
-class RecreateSessions(private val scope: CoroutineScope) {
+class RecreateSessions(private val scope: CoroutineScope, private val nowEpochSeconds: () -> Long) {
     private val sessions = mutableMapOf<SessionKey, MutableStateFlow<RecreateProgress?>>()
 
     /** Null when nothing has been started (or the last result was cleared). */
     fun progress(key: SessionKey): StateFlow<RecreateProgress?> = flowFor(key)
 
-    fun isRunning(key: SessionKey): Boolean = flowFor(key).value.let { it != null && it.result == null }
-
-    /** Starts [recreator] for [oldId]; ignored while one is already running or its result is still uncleared. */
-    fun start(key: SessionKey, recreator: Recreator, oldId: String, plan: RecreatePlan) {
+    /**
+     * Recreates [oldId] on [key]'s endpoint through [client], which this session takes ownership of: it is
+     * closed when the recreate finishes, and nothing else may close it (so a server save/delete can't cut the
+     * recreate or its rollback off). Ignored, closing [client], while one is already running or its result is
+     * still uncleared.
+     */
+    fun start(key: SessionKey, client: PortainerClient, oldId: String, plan: RecreatePlan) {
         val state = flowFor(key)
-        if (state.value != null) return
+        if (state.value != null) {
+            client.close()
+            return
+        }
         state.value = RecreateProgress(plannedSteps(plan).map { StepState(it, StepStatus.Pending) })
+        val recreator = Recreator(PortainerDockerOps(client, key.endpointId), nowEpochSeconds)
         scope.launch {
             try {
                 recreator.run(oldId, plan).collect { event -> state.update { it?.apply(event) } }
@@ -62,6 +71,8 @@ class RecreateSessions(private val scope: CoroutineScope) {
                 throw e
             } catch (e: Exception) {
                 state.update { it?.fail(it.steps.firstOrNull { s -> s.status == StepStatus.Active }?.step, e.message ?: "Unexpected error", false) }
+            } finally {
+                client.close()
             }
         }
     }

@@ -177,6 +177,21 @@ class ContainerListViewModelTest {
         vm.remove("s4")
         settle { vm.state.value.error != null && vm.state.value.busyIds.isEmpty() }
         assertTrue(actionCalls().isEmpty())
+        assertEquals("Internal Server Error", vm.state.value.error, "the inspect failure is shown, not the Portainer message")
+    }
+
+    @Test
+    fun resumingTheScreenReloadsExceptTheFirstTime() = runTest {
+        val vm = loaded(env())
+        assertEquals(1, gets())
+        vm.onScreenResumed() // the first resume follows init's own load
+        advanceUntilIdle()
+        assertEquals(1, gets())
+
+        listBody = { 0L to """[{"Id":"a1","Names":["/web"],"Image":"nginx","State":"running","Status":""}]""" }
+        vm.onScreenResumed() // back from detail/recreate: the container may be gone
+        settle { vm.state.value.items.size == 1 && !vm.state.value.loading }
+        assertEquals(2, gets())
     }
 
     @Test

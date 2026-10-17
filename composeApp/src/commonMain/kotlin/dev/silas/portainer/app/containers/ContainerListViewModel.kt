@@ -59,6 +59,16 @@ class ContainerListViewModel(
         loadJob = viewModelScope.launch { load() }
     }
 
+    private var resumedBefore = false
+
+    /**
+     * The screen became visible again (e.g. back from detail or recreate, where containers may have changed or
+     * gone): reload. The first resume is skipped, as init already loads.
+     */
+    fun onScreenResumed() {
+        if (resumedBefore) refresh() else resumedBefore = true
+    }
+
     fun setFilter(filter: ContainerFilter) = _state.update { it.copy(filter = filter) }
 
     fun clearError() = _state.update { it.copy(error = null) }
@@ -78,9 +88,15 @@ class ContainerListViewModel(
         _state.update { it.copy(busyIds = it.busyIds + id) }
         viewModelScope.launch {
             try {
-                if (guardProtected && isProtected(target)) {
-                    _state.update { it.copy(error = PROTECTED_IMAGE_MESSAGE) }
-                    return@launch
+                if (guardProtected) {
+                    when (protection(target)) {
+                        Protection.Protected -> {
+                            _state.update { it.copy(error = PROTECTED_IMAGE_MESSAGE) }
+                            return@launch
+                        }
+                        Protection.Unknown -> return@launch // the inspect failure is already the error
+                        Protection.Unprotected -> Unit
+                    }
                 }
                 if (guard { container.client(serverId).call() }) refresh()
             } finally {
@@ -89,19 +105,26 @@ class ContainerListViewModel(
         }
     }
 
+    private enum class Protection { Protected, Unprotected, Unknown }
+
     /**
      * The list endpoint reports an image ID instead of the reference once a tag has moved, so for those
-     * the container is inspected. If that fails the action is refused (returns true, with the error set).
+     * the container is inspected. If that fails the result is [Protection.Unknown] (the action is refused,
+     * with the inspect error set).
      */
-    private suspend fun isProtected(target: ContainerSummary): Boolean {
-        if (!looksLikeImageId(target.image)) return isProtectedImage(target.image)
+    private suspend fun protection(target: ContainerSummary): Protection {
+        if (!looksLikeImageId(target.image)) return protectionOf(isProtectedImage(target.image))
         var image: String? = null
         val ok = guard {
             val config = container.client(serverId).inspectContainer(endpointId, target.id)["Config"] as? JsonObject
             image = (config?.get("Image") as? JsonPrimitive)?.takeIf { it.isString }?.content
         }
-        return !ok || image?.let(::isProtectedImage) ?: true
+        if (!ok) return Protection.Unknown
+        // No image reference to check: refuse rather than risk cutting off Portainer.
+        return image?.let { protectionOf(isProtectedImage(it)) } ?: Protection.Protected
     }
+
+    private fun protectionOf(protected: Boolean) = if (protected) Protection.Protected else Protection.Unprotected
 
     private fun looksLikeImageId(image: String) =
         image.startsWith("sha256:") || (image.length == 64 && image.all { it in '0'..'9' || it in 'a'..'f' })

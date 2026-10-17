@@ -10,11 +10,9 @@ import dev.silas.portainer.core.api.registries
 import dev.silas.portainer.core.model.ImageRef
 import dev.silas.portainer.core.model.Registry
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
-import dev.silas.portainer.core.recreate.PortainerDockerOps
 import dev.silas.portainer.core.recreate.RecreateEdits
 import dev.silas.portainer.core.recreate.RecreatePlan
 import dev.silas.portainer.core.recreate.RecreatePlanner
-import dev.silas.portainer.core.recreate.Recreator
 import dev.silas.portainer.core.recreate.isProtectedImage
 import dev.silas.portainer.core.registry.matchRegistry
 import kotlinx.coroutines.CancellationException
@@ -28,6 +26,9 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
+const val CONTAINER_CHANGED_NOTICE =
+    "The container changed since you opened this screen — the summary reflects its current settings."
+
 /** Where the flow is. Running and Done mirror the app-level [RecreateSessions] entry, not ViewModel state. */
 sealed interface RecreatePhase {
     data object Loading : RecreatePhase
@@ -35,7 +36,8 @@ sealed interface RecreatePhase {
     /** Loading failed, or the container runs Portainer itself (no form, no review). */
     data class Error(val message: String) : RecreatePhase
     data object Editing : RecreatePhase
-    data class Reviewing(val plan: RecreatePlan) : RecreatePhase
+    /** [notice] is set when the container changed since the form was loaded (the plan reflects its current settings). */
+    data class Reviewing(val plan: RecreatePlan, val notice: String? = null) : RecreatePhase
     data class Running(val steps: List<StepState>) : RecreatePhase
     data class Done(val steps: List<StepState>, val result: RecreateResult) : RecreatePhase
 }
@@ -51,7 +53,21 @@ data class RecreateState(
     val registryId: Int? = null,
     /** Validation message for the Editing form; cleared on the next edit. */
     val validationError: String? = null,
+    /** Review was requested and the container is being re-inspected; the form is read-only meanwhile. */
+    val checking: Boolean = false,
 )
+
+/** What the form was loaded with, to tell whether the container changed before the review. */
+private data class ContainerSnapshot(val image: String, val env: List<String>, val running: Boolean)
+
+private fun JsonObject.snapshot(): ContainerSnapshot {
+    val config = this["Config"] as? JsonObject
+    return ContainerSnapshot(
+        image = (config?.get("Image") as? JsonPrimitive)?.content.orEmpty(),
+        env = (config?.get("Env") as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.content },
+        running = ((this["State"] as? JsonObject)?.get("Running") as? JsonPrimitive)?.content == "true",
+    )
+}
 
 class RecreateViewModel(
     private val container: AppContainer,
@@ -64,8 +80,8 @@ class RecreateViewModel(
     private val _state = MutableStateFlow(RecreateState())
     val state: StateFlow<RecreateState> = _state
 
-    private var inspect: JsonObject? = null
-    private var oldImageConfig: JsonObject? = null
+    /** Set once the form is loaded; review() compares a fresh inspect against it. */
+    private var loaded: ContainerSnapshot? = null
     private var registryPicked = false
 
     init {
@@ -85,21 +101,18 @@ class RecreateViewModel(
         val message = try {
             val client = container.client(serverId)
             val inspected = client.inspectContainer(endpointId, containerId)
-            val config = inspected["Config"] as? JsonObject
-            val image = (config?.get("Image") as? JsonPrimitive)?.content.orEmpty()
+            val snapshot = inspected.snapshot()
+            val image = snapshot.image
             if (isProtectedImage(image)) {
                 PROTECTED_IMAGE_MESSAGE
             } else {
-                val imageId = (inspected["Image"] as? JsonPrimitive)?.content
-                oldImageConfig = imageId?.let { client.inspectImage(endpointId, it) }
                 // Registries are only a convenience; an account that can't list them still gets to edit.
                 val registries = try {
                     client.registries()
                 } catch (e: PortainerException) {
                     emptyList()
                 }
-                inspect = inspected
-                val env = (config?.get("Env") as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.content }
+                loaded = snapshot
                 _state.update {
                     // A recreate may have been started elsewhere while loading; the progress collector owns the phase then.
                     val phase = if (it.phase == RecreatePhase.Loading) RecreatePhase.Editing else it.phase
@@ -107,30 +120,32 @@ class RecreateViewModel(
                         phase = phase,
                         containerName = (inspected["Name"] as? JsonPrimitive)?.content.orEmpty().removePrefix("/"),
                         image = image,
-                        env = env,
+                        env = snapshot.env,
                         registries = registries,
                         registryId = matchFor(image, registries),
                     )
                 }
                 null
             }
-        } catch (e: CancellationException) {
-            // A client closed by invalidation cancels the call; only rethrow if this coroutine itself was cancelled.
-            if (!currentCoroutineContext().isActive) throw e
-            "The connection was interrupted"
-        } catch (e: PortainerException) {
-            e.message ?: "Request failed"
-        } catch (e: IllegalStateException) {
-            e.message ?: "Request failed"
+        } catch (e: Exception) {
+            requestFailure(e)
         }
         if (message != null) _state.update { it.copy(phase = RecreatePhase.Error(message)) }
+    }
+
+    /** The message for a failed request; rethrows when this coroutine itself was cancelled. */
+    private suspend fun requestFailure(e: Exception): String = when (e) {
+        // A client closed by invalidation cancels the call; only rethrow if this coroutine itself was cancelled.
+        is CancellationException -> if (currentCoroutineContext().isActive) "The connection was interrupted" else throw e
+        is PortainerException, is IllegalStateException -> e.message ?: "Request failed"
+        else -> throw e
     }
 
     private fun matchFor(image: String, registries: List<Registry>): Int? =
         if (image.isBlank()) null else matchRegistry(ImageRef.parse(image.trim()), registries)?.id
 
     private fun edit(block: (RecreateState) -> RecreateState) = _state.update {
-        if (it.phase == RecreatePhase.Editing) block(it).copy(validationError = null) else it
+        if (it.phase == RecreatePhase.Editing && !it.checking) block(it).copy(validationError = null) else it
     }
 
     fun setImage(image: String) = edit {
@@ -159,11 +174,15 @@ class RecreateViewModel(
         edit { it.copy(registryId = id) }
     }
 
-    /** Validates the form and builds the plan. Unavailable (no-op) unless Editing, so a protected image never gets here. */
+    /**
+     * Validates the form, then re-inspects the container and its current image so the plan is built from what
+     * the container is now (it may have changed since the screen opened), plus the user's edits.
+     * Unavailable (no-op) unless Editing, so a protected image never gets here.
+     */
     fun review() {
         val current = _state.value
-        val inspected = inspect
-        if (current.phase != RecreatePhase.Editing || inspected == null) return
+        val loadedWith = loaded
+        if (current.phase != RecreatePhase.Editing || current.checking || loadedWith == null) return
         val image = current.image.trim()
         val env = current.env.filter { envKey(it).isNotBlank() }
         val problem = when {
@@ -175,8 +194,35 @@ class RecreateViewModel(
             _state.update { it.copy(validationError = problem) }
             return
         }
-        val plan = RecreatePlanner.plan(inspected, oldImageConfig, RecreateEdits(image, env, current.pull, current.registryId))
-        _state.update { it.copy(phase = RecreatePhase.Reviewing(plan), validationError = null) }
+        val edits = RecreateEdits(image, env, current.pull, current.registryId)
+        _state.update { it.copy(checking = true, validationError = null) }
+        viewModelScope.launch {
+            var error: String? = null
+            val reviewing = try {
+                val client = container.client(serverId)
+                val fresh = client.inspectContainer(endpointId, containerId)
+                val now = fresh.snapshot()
+                if (isProtectedImage(now.image)) {
+                    error = PROTECTED_IMAGE_MESSAGE
+                    null
+                } else {
+                    val imageConfig = (fresh["Image"] as? JsonPrimitive)?.content?.let { client.inspectImage(endpointId, it) }
+                    val notice = if (now != loadedWith) CONTAINER_CHANGED_NOTICE else null
+                    RecreatePhase.Reviewing(RecreatePlanner.plan(fresh, imageConfig, edits), notice)
+                }
+            } catch (e: Exception) {
+                error = requestFailure(e)
+                null
+            }
+            _state.update {
+                // A recreate started elsewhere meanwhile owns the phase; only leave the form if still on it.
+                when {
+                    it.phase != RecreatePhase.Editing -> it.copy(checking = false)
+                    reviewing != null -> it.copy(phase = reviewing, checking = false)
+                    else -> it.copy(validationError = error, checking = false)
+                }
+            }
+        }
     }
 
     /** "Cancel" on the review: back to the form with the edits kept. */
@@ -186,14 +232,14 @@ class RecreateViewModel(
     fun confirm() {
         val phase = _state.value.phase as? RecreatePhase.Reviewing ?: return
         viewModelScope.launch {
+            // A client of its own, owned by the session: saving or deleting the server can't close it mid-recreate.
             val client = try {
-                container.client(serverId)
+                container.dedicatedClient(serverId)
             } catch (e: IllegalStateException) {
                 _state.update { it.copy(phase = RecreatePhase.Error(e.message ?: "Request failed")) }
                 return@launch
             }
-            val recreator = Recreator(PortainerDockerOps(client, endpointId), container.nowEpochSeconds)
-            sessions.start(key, recreator, containerId, phase.plan)
+            sessions.start(key, client, containerId, phase.plan)
         }
     }
 

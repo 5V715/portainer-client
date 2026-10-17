@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import dev.silas.portainer.app.theme.BackButton
 import dev.silas.portainer.app.theme.SelectableChip
 import dev.silas.portainer.app.theme.StatusLabel
@@ -65,6 +66,11 @@ fun ContainerListScreen(
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
+    // Back from detail or recreate, containers may have changed or gone: reload (the VM skips the first resume).
+    LifecycleResumeEffect(viewModel) {
+        viewModel.onScreenResumed()
+        onPauseOrDispose {}
+    }
     val snackbar = remember { SnackbarHostState() }
     var pendingRemove by remember { mutableStateOf<ContainerSummary?>(null) }
 

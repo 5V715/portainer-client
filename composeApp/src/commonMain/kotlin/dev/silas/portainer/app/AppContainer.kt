@@ -13,7 +13,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.time.Clock
 
-/** App-wide dependencies. Caches one [PortainerClient] per server until the server is saved or deleted. */
+/**
+ * App-wide dependencies. Caches one [PortainerClient] per server until the server is saved or deleted;
+ * recreates use a [dedicatedClient] instead, so invalidation never cuts one off.
+ */
 class AppContainer(
     val servers: ServerRepository,
     /** Outlives every screen: long-running work (container recreate) must not be tied to a ViewModel. */
@@ -22,17 +25,27 @@ class AppContainer(
     val engineFactory: () -> HttpClientEngine = ::httpEngine,
 ) {
     /** Running and finished recreates, so screens can come and go without affecting the operation. */
-    val recreateSessions = RecreateSessions(appScope)
+    val recreateSessions = RecreateSessions(appScope, nowEpochSeconds)
 
     private val lock = Mutex()
     private val clients = mutableMapOf<String, PortainerClient>()
 
     suspend fun client(serverId: String): PortainerClient = lock.withLock {
         clients[serverId]?.let { return it }
+        newClient(serverId).also { clients[serverId] = it }
+    }
+
+    /**
+     * A client of its own for long-running work (a recreate) that saving or deleting the server must not
+     * interrupt: it is never cached or invalidated, and the caller closes it.
+     */
+    suspend fun dedicatedClient(serverId: String): PortainerClient = newClient(serverId)
+
+    private suspend fun newClient(serverId: String): PortainerClient {
         val config = servers.servers.value.firstOrNull { it.id == serverId }
             ?: throw IllegalStateException("Unknown server")
         val key = servers.apiKey(serverId) ?: throw IllegalStateException("No API key stored for ${config.name}")
-        PortainerClient(config.baseUrl, key, engineFactory()).also { clients[serverId] = it }
+        return PortainerClient(config.baseUrl, key, engineFactory())
     }
 
     suspend fun saveServer(config: ServerConfig, apiKey: String?) {
