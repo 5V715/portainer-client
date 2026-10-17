@@ -37,7 +37,14 @@ data class LogsState(
 ) {
     /** [lines] narrowed to those containing [query] (case-insensitive) when "matches only" is on. */
     val visible: List<LogLine>
-        get() = if (matchesOnly && query.isNotEmpty()) lines.filter { it.text.contains(query, ignoreCase = true) } else lines
+        get() = visibleEntries().map { it.second }
+
+    /** [visible] paired with each line's stable sequence number (`firstSeq` + index in [lines]). */
+    fun visibleEntries(): List<Pair<Long, LogLine>> {
+        val needle = query.takeIf { matchesOnly && it.isNotEmpty() }
+        return lines.mapIndexed { i, l -> (firstSeq + i) to l }
+            .filter { (_, l) -> needle == null || l.text.contains(needle, ignoreCase = true) }
+    }
 }
 
 class LogsViewModel(

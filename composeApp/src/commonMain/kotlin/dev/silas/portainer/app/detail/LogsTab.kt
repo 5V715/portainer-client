@@ -53,11 +53,7 @@ fun LogsTab(viewModel: LogsViewModel) {
     val scope = rememberCoroutineScope()
     var autoScroll by remember { mutableStateOf(true) }
     // Pairs of (stable sequence number, line); recomputed only when the inputs change, not on every recomposition.
-    val visible = remember(state.lines, state.firstSeq, state.query, state.matchesOnly) {
-        val needle = state.query.takeIf { state.matchesOnly && it.isNotEmpty() }
-        state.lines.mapIndexed { i, l -> (state.firstSeq + i) to l }
-            .filter { (_, l) -> needle == null || l.text.contains(needle, ignoreCase = true) }
-    }
+    val visible = remember(state.lines, state.firstSeq, state.query, state.matchesOnly) { state.visibleEntries() }
 
     // Stop collecting while the app is in the background (or this tab is left); resume from the last line.
     LifecycleResumeEffect(viewModel) {
@@ -72,24 +68,17 @@ fun LogsTab(viewModel: LogsViewModel) {
         }
     }
 
-    // Follow the tail only while the viewport was at the bottom before new lines arrived. User scrolling by any
-    // input (drag, wheel, keyboard) updates the flag; growth of the list alone never turns it off.
-    var programmatic by remember { mutableStateOf(false) }
+    // Stick to the bottom from layout state: if the item count did not change, the viewport moved (user input or
+    // Jump to latest) and the flag follows whether it is at the bottom; if the count changed, content moved instead.
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress to listState.isAtBottom() }.collect { (scrolling, atBottom) ->
-            if (atBottom) autoScroll = true else if (scrolling && !programmatic) autoScroll = false
-        }
-    }
-    suspend fun scrollToEnd(lastIndex: Int) {
-        programmatic = true
-        try {
-            listState.scrollToItem(lastIndex)
-        } finally {
-            programmatic = false
+        var prevCount = -1
+        snapshotFlow { listState.layoutInfo.totalItemsCount to listState.isAtBottom() }.collect { (count, atBottom) ->
+            autoScroll = nextStick(prevCount, count, atBottom, autoScroll)
+            prevCount = count
         }
     }
     LaunchedEffect(visible.size, state.firstSeq) {
-        if (autoScroll && visible.isNotEmpty()) scrollToEnd(visible.lastIndex)
+        if (autoScroll && visible.isNotEmpty()) listState.scrollToItem(visible.lastIndex)
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -113,7 +102,7 @@ fun LogsTab(viewModel: LogsViewModel) {
             ExtendedFloatingActionButton(
                 onClick = {
                     autoScroll = true
-                    scope.launch { scrollToEnd(visible.lastIndex) }
+                    scope.launch { listState.scrollToItem(visible.lastIndex) }
                 },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
             ) { Text("Jump to latest") }
@@ -177,3 +166,11 @@ private fun LazyListState.isAtBottom(): Boolean {
     val last = info.visibleItemsInfo.lastOrNull() ?: return true
     return last.index == info.totalItemsCount - 1 && last.offset + last.size <= info.viewportEndOffset + 1
 }
+
+/**
+ * Whether the list should keep following the newest line. [prevCount] == [count] means only the viewport moved
+ * (the user scrolled, or jumped), so the answer is [atBottom]; otherwise lines were added or filtered and the
+ * previous decision [stick] stands.
+ */
+internal fun nextStick(prevCount: Int, count: Int, atBottom: Boolean, stick: Boolean): Boolean =
+    if (count == prevCount) atBottom else stick
