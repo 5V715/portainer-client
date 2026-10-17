@@ -13,6 +13,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import dev.silas.portainer.app.about.AboutScreen
 import dev.silas.portainer.app.containers.ContainerListScreen
 import dev.silas.portainer.app.containers.ContainerListViewModel
 import dev.silas.portainer.app.detail.ContainerDetailScreen
@@ -74,8 +75,10 @@ private fun AppNavHost(container: AppContainer) {
                 onOpen = { nav.navigate(Environments(it.id)) },
                 onAdd = { nav.navigate(ServerEdit(null)) },
                 onEdit = { nav.navigate(ServerEdit(it.id)) },
+                onAbout = { nav.navigate(About) },
             )
         }
+        composable<About> { AboutScreen(onBack = { nav.popBackStack() }) }
         composable<ServerEdit> { entry ->
             val route = entry.toRoute<ServerEdit>()
             val vm = viewModel(key = "edit-${route.serverId}") { ServerEditViewModel(container, route.serverId) }

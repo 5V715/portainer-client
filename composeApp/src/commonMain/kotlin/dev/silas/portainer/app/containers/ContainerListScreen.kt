@@ -9,20 +9,18 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,18 +43,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import dev.silas.portainer.app.theme.BackButton
+import dev.silas.portainer.app.theme.SelectableChip
+import dev.silas.portainer.app.theme.StatusLabel
+import dev.silas.portainer.app.theme.statusOf
 import dev.silas.portainer.core.containers.ContainerFilter
 import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.ContainerSummary
-import dev.silas.portainer.core.model.Health
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 import dev.silas.portainer.core.recreate.isProtectedImage
 
-private val Amber = Color(0xFFFFB300)
-private val Green = Color(0xFF2E7D32)
 private val FILTER_STATES = listOf(ContainerState.Running, ContainerState.Exited, ContainerState.Paused)
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -84,7 +81,7 @@ fun ContainerListScreen(
                 title = { Text("Containers") },
                 navigationIcon = { BackButton(onBack) },
                 actions = {
-                    IconButton(onClick = onRegistries) { Icon(Icons.Default.Lock, contentDescription = "Registries") }
+                    TextButton(onClick = onRegistries) { Text("Registries") }
                 },
             )
         },
@@ -132,12 +129,16 @@ fun ContainerListScreen(
     pendingRemove?.let { c ->
         AlertDialog(
             onDismissRequest = { pendingRemove = null },
-            title = { Text("Remove ${c.name}? This can't be undone.") },
+            title = { Text("Remove ${c.name}?", style = MaterialTheme.typography.headlineSmall) },
+            text = { Text("This can't be undone.") },
             confirmButton = {
-                TextButton(onClick = {
-                    pendingRemove = null
-                    viewModel.remove(c.id)
-                }) { Text("Remove") }
+                TextButton(
+                    onClick = {
+                        pendingRemove = null
+                        viewModel.remove(c.id)
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Remove") }
             },
             dismissButton = { TextButton(onClick = { pendingRemove = null }) { Text("Cancel") } },
         )
@@ -152,7 +153,7 @@ private fun FilterRow(filter: ContainerFilter, stacks: List<String>, onChange: (
         verticalAlignment = Alignment.CenterVertically,
     ) {
         FILTER_STATES.forEach { s ->
-            FilterChip(
+            SelectableChip(
                 selected = s in filter.states,
                 onClick = { onChange(filter.copy(states = if (s in filter.states) filter.states - s else filter.states + s)) },
                 label = { Text(s.name) },
@@ -161,7 +162,7 @@ private fun FilterRow(filter: ContainerFilter, stacks: List<String>, onChange: (
         if (stacks.isNotEmpty()) {
             var open by remember { mutableStateOf(false) }
             Box {
-                FilterChip(
+                SelectableChip(
                     selected = filter.stack != null,
                     onClick = { open = true },
                     label = { Text(filter.stack?.let { "Stack: $it" } ?: "Stack") },
@@ -201,9 +202,9 @@ private fun ContainerRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Box(Modifier.size(12.dp).background(stateColor(c), CircleShape))
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(c.name, style = MaterialTheme.typography.titleMedium)
+            StatusLabel(statusOf(c.state, c.health))
             Text(c.image, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
             c.stack?.let {
                 Text(
@@ -231,35 +232,42 @@ private fun RowMenu(
 ) {
     var open by remember { mutableStateOf(false) }
     val protected = isProtectedImage(c.image)
-    val label: @Composable (String) -> Unit = { title ->
-        Column {
-            Text(title)
-            if (protected) Text(PROTECTED_IMAGE_MESSAGE, style = MaterialTheme.typography.bodySmall)
-        }
-    }
+    val actions = availableActions(c.state)
     Box {
         IconButton(onClick = { open = true }, enabled = !busy) {
             Icon(Icons.Default.MoreVert, contentDescription = "Actions for ${c.name}")
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(text = { Text("Start") }, onClick = { open = false; onStart() })
-            DropdownMenuItem(
-                text = { label("Stop") },
-                enabled = !protected,
-                onClick = { open = false; onStop() },
-            )
-            DropdownMenuItem(text = { Text("Restart") }, onClick = { open = false; onRestart() })
-            DropdownMenuItem(
-                text = { label("Remove") },
-                enabled = !protected,
-                onClick = { open = false; onRemove() },
-            )
+            actions.forEach { action ->
+                val locked = protected && (action == ContainerAction.Stop || action == ContainerAction.Remove)
+                DropdownMenuItem(
+                    text = { Text(action.name) },
+                    trailingIcon = if (locked) {
+                        { Text("Locked", style = MaterialTheme.typography.labelSmall) }
+                    } else {
+                        null
+                    },
+                    enabled = !locked,
+                    onClick = {
+                        open = false
+                        when (action) {
+                            ContainerAction.Start -> onStart()
+                            ContainerAction.Stop -> onStop()
+                            ContainerAction.Restart -> onRestart()
+                            ContainerAction.Remove -> onRemove()
+                        }
+                    },
+                )
+            }
+            if (protected && actions.any { it == ContainerAction.Stop || it == ContainerAction.Remove }) {
+                HorizontalDivider()
+                Text(
+                    PROTECTED_IMAGE_MESSAGE,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.widthIn(max = 260.dp).padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
         }
     }
-}
-
-private fun stateColor(c: ContainerSummary): Color = when {
-    c.health == Health.Unhealthy || c.state == ContainerState.Restarting -> Amber
-    c.state == ContainerState.Running -> Green
-    else -> Color.Gray
 }

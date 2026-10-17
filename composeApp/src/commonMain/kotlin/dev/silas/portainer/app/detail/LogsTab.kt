@@ -15,7 +15,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
@@ -42,6 +41,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import dev.silas.portainer.app.theme.SelectableChip
 import dev.silas.portainer.core.logs.LogLine
 import dev.silas.portainer.core.logs.LogStream
 import kotlinx.coroutines.launch
@@ -132,10 +132,10 @@ private fun Controls(state: LogsState, vm: LogsViewModel) {
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FilterChip(state.matchesOnly, { vm.setMatchesOnly(!state.matchesOnly) }, { Text("Matches only") })
-        FilterChip(state.showTimestamps, { vm.toggleTimestamps() }, { Text("Timestamps") })
+        SelectableChip(state.matchesOnly, { vm.setMatchesOnly(!state.matchesOnly) }, { Text("Matches only") })
+        SelectableChip(state.showTimestamps, { vm.toggleTimestamps() }, { Text("Timestamps") })
         TAIL_CHOICES.forEach { tail ->
-            FilterChip(state.tail == tail, { vm.setTail(tail) }, { Text(tail?.toString() ?: "All") })
+            SelectableChip(state.tail == tail, { vm.setTail(tail) }, { Text(tail?.toString() ?: "All") })
         }
     }
 }

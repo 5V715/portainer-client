@@ -25,6 +25,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import dev.silas.portainer.app.theme.StatusLabel
+import dev.silas.portainer.app.theme.statusOf
+import dev.silas.portainer.core.model.ContainerState
+import dev.silas.portainer.core.model.Health
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -43,7 +47,10 @@ fun OverviewTab(overview: ContainerOverview?, loading: Boolean, onRefresh: () ->
             ) {
                 overview.stack?.let { StackBadge(it) }
                 Field("Image", overview.image)
-                Field("State", overview.state + (overview.health?.let { " ($it)" } ?: ""))
+                Column {
+                    Text("State", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    StatusLabel(statusOf(ContainerState.fromDocker(overview.state), healthOf(overview.health)))
+                }
                 Field("Created", overview.created ?: "Unknown")
                 Field("Started", overview.startedAt ?: "Never started")
                 Field("Restart policy", overview.restartPolicy)
@@ -102,3 +109,5 @@ private fun Collapsible(title: String, values: List<String>) {
         }
     }
 }
+
+private fun healthOf(value: String?): Health? = Health.entries.firstOrNull { it.name.equals(value, ignoreCase = true) }

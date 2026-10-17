@@ -25,3 +25,6 @@ data class Registries(val serverId: String)
 
 @Serializable
 data class RegistryEdit(val serverId: String, val registryId: Int?)
+
+@Serializable
+object About
