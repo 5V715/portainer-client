@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class LogFollowerTest {
     private val t1 = "2026-10-17T10:00:00.000000001Z"
@@ -62,7 +63,26 @@ class LogFollowerTest {
     @Test
     fun epochSecondsParsesRfc3339() {
         assertEquals(1792231205L, rfc3339EpochSeconds(t2))
+        assertEquals(null, rfc3339EpochSeconds("2026-13-xxT10:00:00Z"))
+        assertEquals(null, rfc3339EpochSeconds("2026-10-17"))
         assertEquals(0L, rfc3339EpochSeconds("1970-01-01T00:00:00Z"))
         assertEquals(1792231205L, rfc3339EpochSeconds("2026-10-17T12:00:05+02:00"))
+    }
+
+    @Test
+    fun tailZeroWithSilentContainerNeverRequestsAllHistory() = runTest {
+        val urls = mutableListOf<Url>()
+        val engine = MockEngine { request ->
+            urls += request.url
+            respond(if (urls.size == 1) ByteArray(0) else frame(1, "$t1 a\n"), HttpStatusCode.OK)
+        }
+        val client = PortainerClient("https://h", "k", engine)
+        val batches = followLogs(
+            client, 1, "abc", tty = false, options = LogOptions(tail = 0),
+            streaming = false, pollIntervalMs = 10,
+        ).take(1).toList()
+        assertEquals(listOf("a"), batches.single().map { it.text })
+        assertEquals(2, urls.size)
+        urls.forEach { assertTrue(it.parameters["tail"] == "0" || it.parameters["since"] != null, it.toString()) }
     }
 }

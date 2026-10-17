@@ -6,6 +6,7 @@ import dev.silas.portainer.core.platform.platformSupportsStreaming
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlin.time.Clock
 
 /** [tail] null means `all`. */
 data class LogOptions(val tail: Int? = 200, val follow: Boolean = true, val since: Long? = null)
@@ -36,10 +37,16 @@ fun followLogs(
 } else {
     flow {
         var last: String? = null
-        var first = true
+        // tail=0 asks for no history; later polls must not turn that into "all", so anchor on start time.
+        val anchor = if (options.tail == 0) options.since ?: Clock.System.now().epochSeconds else options.since
         while (true) {
-            val since = if (first) options.since else last?.let(::rfc3339EpochSeconds) ?: options.since
-            val request = LogOptions(if (first) options.tail else null, follow = false, since = since)
+            val seen = last
+            val request = if (seen == null) {
+                // Nothing timestamped yet: keep asking for the same window, never the whole history.
+                LogOptions(if (options.tail == 0) null else options.tail, follow = false, since = anchor)
+            } else {
+                LogOptions(null, follow = false, since = rfc3339EpochSeconds(seen) ?: anchor)
+            }
             val decoder = LogDecoder(tty)
             val lines = mutableListOf<LogLine>()
             client.containerLogs(endpointId, containerId, request).collect { lines += decoder.feed(it) }
@@ -47,15 +54,22 @@ fun followLogs(
             val boundary = last
             val fresh = if (boundary == null) lines else lines.filter { it.timestamp == null || it.timestamp > boundary }
             fresh.mapNotNull { it.timestamp }.maxOrNull()?.let { if (boundary == null || it > boundary) last = it }
-            first = false
             if (fresh.isNotEmpty()) emit(fresh)
             delay(pollIntervalMs)
         }
     }
 }
 
-/** Floor of the Unix time of an RFC3339 timestamp (`Z` or `±hh:mm`); fraction is ignored. */
-internal fun rfc3339EpochSeconds(ts: String): Long {
+/** Floor of the Unix time of an RFC3339 timestamp (`Z` or `±hh:mm`), or null if malformed; fraction is ignored. */
+internal fun rfc3339EpochSeconds(ts: String): Long? = try {
+    parseRfc3339(ts)
+} catch (e: NumberFormatException) {
+    null
+} catch (e: IndexOutOfBoundsException) {
+    null
+}
+
+private fun parseRfc3339(ts: String): Long {
     val year = ts.substring(0, 4).toInt()
     val month = ts.substring(5, 7).toInt()
     val day = ts.substring(8, 10).toInt()

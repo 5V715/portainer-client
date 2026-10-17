@@ -68,4 +68,15 @@ class LogDecoderTest {
         val out = LogDecoder(tty = true).feed("just text\n".encodeToByteArray())
         assertEquals(listOf(LogLine(LogStream.Stdout, null, "just text")), out)
     }
+
+    @Test
+    fun oversizedFrameLengthFallsBackToRawText() {
+        val decoder = LogDecoder(tty = false)
+        // Looks like a header claiming a ~2 GB payload (e.g. tty container read as non-tty).
+        val bytes = byteArrayOf(0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F) + "$ts hi\n".encodeToByteArray()
+        val out = decoder.feed(bytes)
+        assertEquals(1, out.size)
+        assertTrue(out[0].text.endsWith("hi"))
+        assertEquals(listOf("next"), decoder.feed("$ts next\n".encodeToByteArray()).map { it.text })
+    }
 }

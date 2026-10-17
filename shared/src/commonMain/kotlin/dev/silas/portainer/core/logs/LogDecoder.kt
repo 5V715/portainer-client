@@ -7,19 +7,24 @@ data class LogLine(val stream: LogStream, val timestamp: String?, val text: Stri
 private const val HEADER_SIZE = 8
 private const val STDERR_TYPE = 2
 
+/** Docker log frames are far smaller; a larger length means a corrupt header or a wrong tty flag. */
+internal const val MAX_FRAME_SIZE = 1 shl 20
+
 /**
  * Incremental decoder for Docker log bytes. Non-TTY containers use multiplexed frames
  * (byte 0 = stream, bytes 4-7 = big-endian payload length); TTY containers send raw bytes.
  * Partial frame headers, payloads and lines are kept across [feed] calls and UTF-8 is only
  * decoded on complete lines, so multibyte characters split across chunks survive.
  */
-class LogDecoder(private val tty: Boolean) {
+class LogDecoder(tty: Boolean) {
+    /** Starts as [tty]; switches to true for good if a frame header looks corrupt. */
+    private var raw = tty
     private var pending = ByteArray(0)
     private val partial = mapOf(LogStream.Stdout to ByteBuilder(), LogStream.Stderr to ByteBuilder())
 
     fun feed(bytes: ByteArray): List<LogLine> {
         val out = mutableListOf<LogLine>()
-        if (tty) {
+        if (raw) {
             consume(LogStream.Stdout, bytes, 0, bytes.size, out)
             return out
         }
@@ -30,8 +35,12 @@ class LogDecoder(private val tty: Boolean) {
                 ((pending[pos + 5].toInt() and 0xFF) shl 16) or
                 ((pending[pos + 6].toInt() and 0xFF) shl 8) or
                 (pending[pos + 7].toInt() and 0xFF)
-            if (length < 0) { // corrupt header: stop trusting the stream rather than buffer forever
+            if (length < 0 || length > MAX_FRAME_SIZE) {
+                // Corrupt header: treat the rest of the stream as raw text rather than buffer forever.
+                raw = true
+                val rest = pending.copyOfRange(pos, pending.size)
                 pending = ByteArray(0)
+                consume(LogStream.Stdout, rest, 0, rest.size, out)
                 return out
             }
             val payloadEnd = pos + HEADER_SIZE + length
