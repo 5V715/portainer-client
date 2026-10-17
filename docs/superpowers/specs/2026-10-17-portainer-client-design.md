@@ -1,7 +1,7 @@
 # Portainer Client — Design
 
 Date: 2026-10-17
-Status: draft for review
+Status: awaiting owner approval
 
 ## Intent
 
@@ -56,6 +56,23 @@ If that loop is fast and safe on a phone, v1 is a success.
    - **Stack warning**: if the container belongs to a compose stack, show a
      clear badge on the detail screen, and before recreate warn that the
      change will be lost on the next stack redeploy. The user may proceed.
+
+4. **Private registries** (owner: "manage just like the Portainer web UI
+   allows")
+   - Registries screen (per server): list, add, edit, remove registries
+     configured in Portainer (`/api/registries`), covering the registry types
+     Portainer supports (Docker Hub, custom registry, GHCR/GitLab/Quay/ECR/Azure
+     as Portainer exposes them). Credentials are sent to Portainer; the app
+     never stores registry passwords locally.
+   - Image pulls (recreate with "pull latest" or a changed image) authenticate
+     through Portainer: the app picks the registry whose URL matches the image
+     host (user can override in the recreate screen) and lets Portainer inject
+     the credentials. The Portainer web UI does this by sending
+     `X-Registry-Auth` as base64 JSON `{"registryId": <id>}` to the Docker
+     proxy; the builder must verify this against the targeted Portainer
+     version and fall back to Portainer's documented mechanism if it differs.
+   - A pull failing for auth reasons shows a clear message pointing to the
+     registry configuration.
 
 ## Non-goals (v1, planned later)
 
