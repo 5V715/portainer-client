@@ -3,6 +3,7 @@ package dev.silas.portainer.app
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -21,7 +22,10 @@ import dev.silas.portainer.app.detail.ContainerDetailViewModel
 import dev.silas.portainer.app.detail.LogsViewModel
 import dev.silas.portainer.app.environments.EnvironmentsScreen
 import dev.silas.portainer.app.environments.EnvironmentsViewModel
-import dev.silas.portainer.app.placeholder.ComingSoonScreen
+import dev.silas.portainer.app.registries.RegistriesScreen
+import dev.silas.portainer.app.registries.RegistriesViewModel
+import dev.silas.portainer.app.registries.RegistryEditScreen
+import dev.silas.portainer.app.registries.RegistryEditViewModel
 import dev.silas.portainer.app.recreate.RecreateScreen
 import dev.silas.portainer.app.recreate.RecreateViewModel
 import dev.silas.portainer.app.servers.ServerEditScreen
@@ -38,6 +42,8 @@ object AppGraph {
         AppContainer(ServerRepository(createSettings(), createSecretStore()))
     }
 }
+
+private const val REGISTRIES_REFRESH = "registriesRefresh"
 
 val LocalAppContainer = compositionLocalOf<AppContainer> { error("AppContainer not provided") }
 
@@ -141,7 +147,31 @@ private fun AppNavHost(container: AppContainer) {
                 onBack = { nav.popBackStack() },
             )
         }
-        composable<Registries> { ComingSoonScreen() }
-        composable<RegistryEdit> { ComingSoonScreen() }
+        composable<Registries> { entry ->
+            val route = entry.toRoute<Registries>()
+            val vm = viewModel(key = "registries-${route.serverId}") { RegistriesViewModel(container, route.serverId) }
+            val refresh by entry.savedStateHandle.getStateFlow(REGISTRIES_REFRESH, 0).collectAsState()
+            RegistriesScreen(
+                viewModel = vm,
+                refreshSignal = refresh,
+                onAdd = { nav.navigate(RegistryEdit(route.serverId, null)) },
+                onEdit = { nav.navigate(RegistryEdit(route.serverId, it.id)) },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable<RegistryEdit> { entry ->
+            val route = entry.toRoute<RegistryEdit>()
+            val vm = viewModel(key = "registry-edit-${route.serverId}-${route.registryId}") {
+                RegistryEditViewModel(container, route.serverId, route.registryId)
+            }
+            RegistryEditScreen(
+                viewModel = vm,
+                onDone = {
+                    nav.previousBackStackEntry?.savedStateHandle?.let { it[REGISTRIES_REFRESH] = (it[REGISTRIES_REFRESH] ?: 0) + 1 }
+                    nav.popBackStack()
+                },
+                onBack = { nav.popBackStack() },
+            )
+        }
     }
 }
