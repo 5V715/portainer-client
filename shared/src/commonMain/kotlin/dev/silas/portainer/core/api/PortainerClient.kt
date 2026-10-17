@@ -49,7 +49,11 @@ class PortainerClient(
      * this is NOT usable for streaming (logs, pulls): streamed calls must use `http.prepareRequest`
      * with [throwForStatus] and a per-request timeout override.
      */
-    internal suspend fun execute(path: String, block: HttpRequestBuilder.() -> Unit = {}): HttpResponse {
+    internal suspend fun execute(
+        path: String,
+        okStatuses: Set<Int> = emptySet(),
+        block: HttpRequestBuilder.() -> Unit = {},
+    ): HttpResponse {
         val response = try {
             http.request {
                 url(baseUrl + path)
@@ -64,13 +68,16 @@ class PortainerClient(
             // Deliberately not echoing e.message: it can contain the request URL or headers.
             throw PortainerException.Unreachable("Could not reach Portainer")
         }
-        throwForStatus(response)
+        throwForStatus(response, okStatuses)
         return response
     }
 
-    /** Maps a non-2xx [response] to a [PortainerException]; also usable on streamed responses. */
-    internal suspend fun throwForStatus(response: HttpResponse) {
-        if (response.status.isSuccess()) return
+    /**
+     * Maps a non-2xx [response] to a [PortainerException]; also usable on streamed responses.
+     * Statuses in [okStatuses] (e.g. Docker's 304 for "already started") are accepted as success.
+     */
+    internal suspend fun throwForStatus(response: HttpResponse, okStatuses: Set<Int> = emptySet()) {
+        if (response.status.isSuccess() || response.status.value in okStatuses) return
         val status = response.status.value
         when (status) {
             401, 403 -> throw PortainerException.Unauthorized()
