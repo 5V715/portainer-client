@@ -35,6 +35,9 @@ Accepted URL formats:
 # Shared tests (JVM) and wasm tests
 ./gradlew :shared:jvmTest :shared:wasmJsTest
 
+# App and ViewModel tests
+./gradlew :composeApp:testDebugUnitTest
+
 # Android debug APK
 ./gradlew :composeApp:assembleDebug
 
