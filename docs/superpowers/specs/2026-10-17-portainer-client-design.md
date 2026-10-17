@@ -75,6 +75,12 @@ If that loop is fast and safe on a phone, v1 is a success.
    - A pull failing for auth reasons shows a clear message pointing to the
      registry configuration.
 
+5. **Design and "Feed my Claude"** (owner feedback after first screenshots)
+   - Material 3 colours seeded from Portainer's blue (#13BEF9), accessible shades per theme.
+   - Container rows show a text state/health label; row menus offer only actions valid for the state; destructive buttons use the error colour.
+   - The "Feed my Claude" donation box from 5V715/games-with-friends (pixel Claude mascot eating coins and treats, speech bubbles, PayPal / Ko-fi / GitHub Sponsors links) at the bottom of the start screen and on an About screen.
+   - Note: Apple's and Google's store rules restrict tip links in store-distributed apps; store builds are out of scope for v1, revisit before publishing.
+
 ## Non-goals (v1, planned later)
 
 - Stack editing (compose file / stack env vars) and redeploy — **next

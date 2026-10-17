@@ -304,6 +304,27 @@ UI: tabs Overview | Logs; top bar action "Edit & recreate" (hidden for protected
 - [ ] **Step 2:** Run → FAIL. **Step 3:** Implement. **Step 4:** Run → PASS; app builds.
 - [ ] **Step 5: Commit** `feat(app): container detail overview and live logs`.
 
+### Task 11b: Design pass (owner feedback) and "Feed my Claude"
+
+Owner asked (after seeing screenshots): use Portainer's blue, fix the 7 design points below, and bring over the "Feed my Claude" mascot from `5V715/games-with-friends` (`public/js/donate.js`, donation box markup in `public/index.html`, styles in `public/css/style.css` under `.donate`).
+
+**Files:**
+- Modify: `theme/Theme.kt`, `containers/ContainerListScreen.kt`, `servers/ServerListScreen.kt`, `environments/EnvironmentsScreen.kt`, `detail/*` (only for theme/status consistency)
+- Create: `support/FeedClaude.kt` (mascot canvas + donation box), `support/FeedClaudeModel.kt` (pure simulation state), `composeApp/src/commonMain/composeResources/font/press_start_2p.ttf` + `composeResources/font/OFL.txt`
+- Test: `composeApp/src/commonTest/.../support/FeedClaudeModelTest.kt`, `containers/ContainerActionsTest.kt`
+
+**Interfaces:**
+- Produces: `fun availableActions(state: ContainerState): List<ContainerAction>` (`enum class ContainerAction { Start, Stop, Restart, Remove }`) — Running/Restarting/Paused → Stop, Restart, Remove; Exited/Created/Dead → Start, Remove; Unknown → all. `class FeedClaudeModel(width: Float, random: Random)` with `fun step(dtSeconds: Float, nowMs: Long)`, exposing mascot x, coins (x, kind, eaten, pop), current speech line or null. `@Composable fun FeedClaudeBox(modifier: Modifier = Modifier)`.
+
+Design decisions:
+- Colour: Material 3 schemes seeded from Portainer blue `#13BEF9`. Light scheme primary is a darker accessible shade of it (contrast ≥ 4.5:1 on white for text/buttons, e.g. `#0A6E9E`); dark scheme primary `#13BEF9` with dark on-primary. Use it consistently (buttons, links, chips, progress).
+- The 7 fixes: (1) row menu shows only actions valid for the container's state (`availableActions`); (2) health/state as a small text label next to the dot ("running", "healthy", "unhealthy", "starting", "exited", "paused", "restarting") with distinct colours; unhealthy uses the error colour; (3) protected container menu: Stop/Remove shown disabled with a "Locked" label, the explanation shown once at the bottom of the menu; (4) remove confirmation: "Remove" button in the error colour, title smaller (titleLarge → headlineSmall max), body text "This can't be undone."; (5) server rows: Edit/Delete move into a ⋮ overflow menu; (6) Registries top-bar action uses a registry/storage-style icon (e.g. `Icons.Filled.Inventory2` or `Storage` from icons-extended only if already available — otherwise a text action "Registries"), not a padlock; (7) filter chips are `FilterChip`s with a clear selected state (check icon + container colour).
+- "Feed my Claude": a box at the bottom of the server list screen (the start screen), also reachable from an "About" item in the server list's top-bar overflow menu which opens a small About screen containing the same box. Port `donate.js` faithfully to Compose `Canvas`: same 12×10 sprite and palette (`#d97757`, `#a9533a`, `#1a0f2e`, `#f0a07f`), two walking frames, chomping mouth, coins that spin, 18% treats (beer, burger, pizza, donut, GPU) with their pixel maps, "+1"/treat pop text, speech bubbles every 6–13 s for 2.6 s with the English lines from `LINES` (THINKING with animated dots), wrap-around tunnel, respawn coins 1.2 s after all eaten, pause when not visible (stop the frame loop when the composable leaves composition or the app is backgrounded), reduced motion → static mascot centred. Pixel font: Press Start 2P (OFL) bundled as a Compose resource with its licence. Box copy: title "INSERT COIN", text "🍺 Feed my Claude – a tip keeps the tokens flowing. Entirely optional.", buttons PayPal (`https://www.paypal.com/donate/?hosted_button_id=M6D3G2TRTEQXG`), Ko-fi (`https://ko-fi.com/silasschwarz`), Sponsor (`https://github.com/sponsors/5V715`) opened with `LocalUriHandler`. Colours of the box follow the source (dark navy box, magenta border/glow, gold title).
+
+- [ ] **Step 1: Write failing tests:** `availableActions` table for each state; `FeedClaudeModel`: mascot advances by speed×dt when not talking, eats a coin when its mouth passes it (coin.eaten, pop = 1), wraps to the left after passing width+10, respawns coins 1.2 s after all eaten, never talks within 6 s of start, talking stops movement.
+- [ ] **Step 2:** Run `./gradlew :composeApp:testDebugUnitTest` → FAIL. **Step 3:** Implement. **Step 4:** Run → PASS; `:composeApp:assembleDebug :composeApp:wasmJsBrowserDistribution` succeed.
+- [ ] **Step 5: Commit** `feat(app): Portainer-blue design pass and Feed my Claude`.
+
 ### Task 12: Edit & recreate flow
 
 **Files:**
