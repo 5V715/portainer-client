@@ -8,7 +8,7 @@ import dev.silas.portainer.core.platform.httpEngine
 import io.ktor.client.engine.HttpClientEngine
 import kotlinx.coroutines.CancellationException
 
-/** Turns what a user typed into `https://host[:port]`, or fails for plain `http://`. */
+/** Turns what a user typed into `https://host[:port][/sub-path]`, or fails for plain `http://`. */
 fun normalizeBaseUrl(input: String): Result<String> {
     var url = input.trim()
     if (url.isEmpty()) return Result.failure(IllegalArgumentException("Enter the Portainer address"))
@@ -16,11 +16,14 @@ fun normalizeBaseUrl(input: String): Result<String> {
         return Result.failure(IllegalArgumentException("Portainer must be reached over HTTPS"))
     }
     if (!url.startsWith("https://", ignoreCase = true)) url = "https://$url"
-    // Keep only scheme + authority: a pasted browser URL (`https://host:9443/#!/2/docker/containers`),
-    // a query, or a path such as `/api` all point at the same Portainer.
+    // A pasted browser URL (`https://host:9443/#!/2/docker/containers`) carries a fragment or query: drop them.
+    // Any other path is kept, for Portainer served under a sub-path behind a reverse proxy.
     val hostStart = "https://".length
-    val hostEnd = url.indexOfAny(charArrayOf('/', '?', '#'), hostStart).takeIf { it >= 0 } ?: url.length
-    url = "https://" + url.substring(hostStart, hostEnd)
+    val queryOrFragment = url.indexOfAny(charArrayOf('?', '#'), hostStart)
+    if (queryOrFragment >= 0) url = url.substring(0, queryOrFragment)
+    url = "https://" + url.substring(hostStart).trimEnd('/')
+    val slash = url.indexOf('/', hostStart)
+    if (slash >= 0 && url.endsWith("/api", ignoreCase = true)) url = url.dropLast(4).trimEnd('/')
     if (url.length <= "https://".length) {
         return Result.failure(IllegalArgumentException("Enter the Portainer address"))
     }

@@ -26,7 +26,9 @@ Accepted URL formats:
 
 - `https://host` or `https://host:port`
 - a bare `host` (https is assumed)
-- a trailing `/` or `/api` is stripped
+- a sub-path is kept for Portainer behind a reverse proxy (`https://host/portainer`)
+- a trailing `/` or `/api` is stripped, and so is a pasted browser URL's `#!/…` fragment or `?…` query
+  (`https://host:9443/#!/2/docker/containers` becomes `https://host:9443`)
 - `http://` is rejected: Portainer must be reached over HTTPS
 
 ## Build

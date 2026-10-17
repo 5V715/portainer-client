@@ -27,7 +27,7 @@ import kotlinx.serialization.json.JsonPrimitive
 
 private const val REQUEST_TIMEOUT_MS = 15_000L
 
-/** [baseUrl] must already be normalised (`https://host[:port]`, no trailing slash). */
+/** [baseUrl] must already be normalised (`https://host[:port][/sub-path]`, no trailing slash). */
 class PortainerClient(
     private val baseUrl: String,
     private val apiKey: String,

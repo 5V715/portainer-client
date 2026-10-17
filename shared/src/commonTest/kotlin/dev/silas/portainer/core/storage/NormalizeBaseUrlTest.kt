@@ -16,7 +16,11 @@ class NormalizeBaseUrlTest {
         "host:9443/#!/home" to "https://host:9443",
         "https://host/?redirect=1" to "https://host",
         "https://host:9443?x=1#y" to "https://host:9443",
-        "https://host/portainer/api/endpoints" to "https://host",
+        "https://host/portainer" to "https://host/portainer",
+        "https://host/portainer/" to "https://host/portainer",
+        "https://host/portainer/api" to "https://host/portainer",
+        "https://host/portainer/api/?x=1" to "https://host/portainer",
+        "https://host/portainer/#!/2/docker/containers" to "https://host/portainer",
         "https://host#frag" to "https://host",
     )
 
