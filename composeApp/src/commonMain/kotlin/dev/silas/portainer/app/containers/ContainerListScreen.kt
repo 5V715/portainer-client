@@ -35,7 +35,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -100,7 +99,6 @@ fun ContainerListScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             )
             FilterRow(state.filter, state.stacks, viewModel::setFilter)
-            if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
             PullToRefreshBox(
                 isRefreshing = state.loading,
                 onRefresh = viewModel::refresh,

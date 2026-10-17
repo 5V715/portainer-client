@@ -6,6 +6,7 @@ import dev.silas.portainer.app.AppContainer
 import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.containers
+import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.api.removeContainer
 import dev.silas.portainer.core.api.restartContainer
 import dev.silas.portainer.core.api.startContainer
@@ -16,12 +17,15 @@ import dev.silas.portainer.core.model.ContainerSummary
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 import dev.silas.portainer.core.recreate.isProtectedImage
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 data class ContainerListState(
     val items: List<ContainerSummary> = emptyList(),
@@ -42,13 +46,17 @@ class ContainerListViewModel(
     private val _state = MutableStateFlow(ContainerListState())
     val state: StateFlow<ContainerListState> = _state
 
+    private var loadJob: Job? = null
+
     init {
         refresh()
     }
 
+    /** Starts a load, cancelling any load still in flight so an older response can't overwrite newer data. */
     fun refresh() {
         _state.update { it.copy(loading = true) }
-        viewModelScope.launch { load() }
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch { load() }
     }
 
     fun setFilter(filter: ContainerFilter) = _state.update { it.copy(filter = filter) }
@@ -65,24 +73,48 @@ class ContainerListViewModel(
     fun remove(id: String) = act(id, guardProtected = true) { removeContainer(endpointId, id, force = false) }
 
     private fun act(id: String, guardProtected: Boolean = false, call: suspend PortainerClient.() -> Unit) {
-        val target = _state.value.items.firstOrNull { it.id == id }
-        if (guardProtected && target != null && isProtectedImage(target.image)) {
-            _state.update { it.copy(error = PROTECTED_IMAGE_MESSAGE) }
-            return
-        }
+        val target = _state.value.items.firstOrNull { it.id == id } ?: return
         if (id in _state.value.busyIds) return
         _state.update { it.copy(busyIds = it.busyIds + id) }
         viewModelScope.launch {
             try {
-                if (guard { container.client(serverId).call() }) load()
+                if (guardProtected && isProtected(target)) {
+                    _state.update { it.copy(error = PROTECTED_IMAGE_MESSAGE) }
+                    return@launch
+                }
+                if (guard { container.client(serverId).call() }) refresh()
             } finally {
                 _state.update { it.copy(busyIds = it.busyIds - id) }
             }
         }
     }
 
+    /**
+     * The list endpoint reports an image ID instead of the reference once a tag has moved, so for those
+     * the container is inspected. If that fails the action is refused (returns true, with the error set).
+     */
+    private suspend fun isProtected(target: ContainerSummary): Boolean {
+        if (!looksLikeImageId(target.image)) return isProtectedImage(target.image)
+        var image: String? = null
+        val ok = guard {
+            val config = container.client(serverId).inspectContainer(endpointId, target.id)["Config"] as? JsonObject
+            image = (config?.get("Image") as? JsonPrimitive)?.takeIf { it.isString }?.content
+        }
+        return !ok || image?.let(::isProtectedImage) ?: true
+    }
+
+    private fun looksLikeImageId(image: String) =
+        image.startsWith("sha256:") || (image.length == 64 && image.all { it in '0'..'9' || it in 'a'..'f' })
+
     private suspend fun load() {
-        guard { _state.update { s -> s.copy(items = container.client(serverId).containers(endpointId)) } }
+        guard {
+            val items = container.client(serverId).containers(endpointId)
+            _state.update { s ->
+                val stacks = items.mapNotNull { it.stack }.toSet()
+                val filter = if (s.filter.stack != null && s.filter.stack !in stacks) s.filter.copy(stack = null) else s.filter
+                s.copy(items = items, filter = filter)
+            }
+        }
         _state.update { it.copy(loading = false) }
     }
 
@@ -104,3 +136,4 @@ class ContainerListViewModel(
         return false
     }
 }
+
