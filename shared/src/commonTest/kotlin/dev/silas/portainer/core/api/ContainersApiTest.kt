@@ -3,6 +3,7 @@ package dev.silas.portainer.core.api
 import dev.silas.portainer.core.Fixtures
 import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.Health
+import dev.silas.portainer.core.model.PublishedPort
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.client.plugins.HttpTimeoutCapability
@@ -64,6 +65,16 @@ class ContainersApiTest {
         assertEquals(listOf("cache"), list[2].volumeNames)
         assertEquals(emptyList(), list[3].volumeNames) // bind mount ignored
         assertEquals(listOf("media_default"), list[3].networkNames)
+    }
+
+    @Test
+    fun parsesPublishedPorts() = runTest {
+        val body = """[{"Id":"1","Names":["/web"],"Ports":[{"IP":"0.0.0.0","PrivatePort":80,"PublicPort":8080,"Type":"tcp"},{"PrivatePort":443,"Type":"tcp"}]}]"""
+        val c = PortainerClient("https://h", "k", MockEngine { respond(body, HttpStatusCode.OK, json) })
+        assertEquals(
+            listOf(PublishedPort("0.0.0.0", 8080, 80, "tcp"), PublishedPort(null, null, 443, "tcp")),
+            c.containers(2).single().ports,
+        )
     }
 
     @Test

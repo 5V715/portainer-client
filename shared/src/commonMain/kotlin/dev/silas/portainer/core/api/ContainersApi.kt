@@ -4,6 +4,7 @@ import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.ContainerSummary
 import dev.silas.portainer.core.model.Health
+import dev.silas.portainer.core.model.PublishedPort
 import dev.silas.portainer.core.logs.LogOptions
 import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeoutConfig
@@ -37,6 +38,15 @@ private data class ContainerDto(
     @SerialName("ImageID") val imageId: String = "",
     @SerialName("Mounts") val mounts: List<MountDto>? = null,
     @SerialName("NetworkSettings") val networkSettings: NetworkSettingsDto? = null,
+    @SerialName("Ports") val ports: List<PortDto>? = null,
+)
+
+@Serializable
+private data class PortDto(
+    @SerialName("IP") val ip: String? = null,
+    @SerialName("PublicPort") val publicPort: Int? = null,
+    @SerialName("PrivatePort") val privatePort: Int = 0,
+    @SerialName("Type") val type: String = "tcp",
 )
 
 @Serializable
@@ -71,6 +81,7 @@ private fun ContainerDto.toSummary(): ContainerSummary {
         imageId = imageId,
         volumeNames = mounts.orEmpty().filter { it.type == "volume" }.mapNotNull { it.name?.takeIf(String::isNotEmpty) },
         networkNames = networkSettings?.networks?.keys?.toList().orEmpty(),
+        ports = ports.orEmpty().map { PublishedPort(it.ip, it.publicPort, it.privatePort, it.type) },
     )
 }
 

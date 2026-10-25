@@ -37,4 +37,9 @@ data class ContainerSummary(
     val volumeNames: List<String> = emptyList(),
     /** Networks the container is attached to (keys of `NetworkSettings.Networks`). */
     val networkNames: List<String> = emptyList(),
+    /** Ports Docker reports as published; it only lists them for running containers. */
+    val ports: List<PublishedPort> = emptyList(),
 )
+
+/** One entry of the container list's `Ports`; [publicPort] is null for exposed-but-unpublished ports. */
+data class PublishedPort(val ip: String?, val publicPort: Int?, val privatePort: Int, val type: String)
