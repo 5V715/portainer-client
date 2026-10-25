@@ -11,6 +11,8 @@ private val MOUNT_OPTION_KEYS = mapOf("bind" to "BindOptions", "volume" to "Volu
 
 private val EMPTY = JsonObject(emptyMap())
 
+private const val DEFAULT_NETWORK = "bridge"
+
 /**
  * Writes form edits back into inspect-shaped JSON. Only sections whose form values differ between `before`
  * and `after` are rewritten, and within them only the entries that changed; everything else (including
@@ -168,7 +170,7 @@ object FormMerger {
     }
 
     /** `[src:]dst[:opts]`; the `ro`/`rw` word is set from the row, the original's other words are kept. */
-    private fun bindString(row: MountRow, original: BindSpec?): String {
+    internal fun bindString(row: MountRow, original: BindSpec?): String {
         val options = original?.options.orEmpty().toMutableList()
         val flagIndex = options.indexOfFirst { it == "ro" || it == "rw" }
         if (flagIndex >= 0) {
@@ -180,7 +182,7 @@ object FormMerger {
         return if (options.isEmpty()) spec else spec + ":" + options.joinToString(",")
     }
 
-    private fun mountObject(row: MountRow, original: JsonObject?): JsonObject {
+    internal fun mountObject(row: MountRow, original: JsonObject?): JsonObject {
         val type = when (row.type) {
             MountType.Bind -> "bind"
             MountType.Volume -> "volume"
@@ -199,7 +201,7 @@ object FormMerger {
 
     /**
      * Rewrites `NetworkSettings.Networks` per network (unchanged endpoints keep their JSON, removed networks
-     * go) and points `HostConfig.NetworkMode` at a new primary network. A read-only mode (container:/host/none)
+     * go) and points `HostConfig.NetworkMode` at a new primary network, or at `bridge` when none is left. A read-only mode (container:/host/none)
      * is only written if the form itself changes it.
      */
     private fun mergeNetworks(root: MutableMap<String, JsonElement>, host: MutableMap<String, JsonElement>, before: ContainerForm, after: ContainerForm) {
@@ -225,6 +227,9 @@ object FormMerger {
             val primary = primaryRow?.name
             if (primary != null && (primary != before.primaryNetwork?.name || before.networkModeReadOnly != null)) {
                 host["NetworkMode"] = JsonPrimitive(primary)
+            } else if (primary == null && (before.primaryNetwork != null || before.networkModeReadOnly != null)) {
+                // No network left: NetworkMode would still name the removed one, so use Docker's default bridge.
+                host["NetworkMode"] = JsonPrimitive(DEFAULT_NETWORK)
             }
         }
         if (networks != originalNetworks) {
