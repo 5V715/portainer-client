@@ -31,4 +31,10 @@ data class ContainerSummary(
     val health: Health?,
     val stack: String?,
     val labels: Map<String, String>,
+    /** Full `sha256:` image id the container was created from; empty when the list omitted it. */
+    val imageId: String = "",
+    /** Names of named/anonymous volumes mounted (`Mounts[].Type == "volume"`); bind mounts are excluded. */
+    val volumeNames: List<String> = emptyList(),
+    /** Networks the container is attached to (keys of `NetworkSettings.Networks`). */
+    val networkNames: List<String> = emptyList(),
 )

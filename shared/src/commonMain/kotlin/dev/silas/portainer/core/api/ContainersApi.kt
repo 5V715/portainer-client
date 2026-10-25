@@ -34,6 +34,20 @@ private data class ContainerDto(
     @SerialName("State") val state: String? = null,
     @SerialName("Status") val status: String = "",
     @SerialName("Labels") val labels: Map<String, String>? = null,
+    @SerialName("ImageID") val imageId: String = "",
+    @SerialName("Mounts") val mounts: List<MountDto>? = null,
+    @SerialName("NetworkSettings") val networkSettings: NetworkSettingsDto? = null,
+)
+
+@Serializable
+private data class MountDto(
+    @SerialName("Type") val type: String = "",
+    @SerialName("Name") val name: String? = null,
+)
+
+@Serializable
+private data class NetworkSettingsDto(
+    @SerialName("Networks") val networks: Map<String, JsonObject?>? = null,
 )
 
 internal fun parseHealth(status: String): Health? = when {
@@ -54,6 +68,9 @@ private fun ContainerDto.toSummary(): ContainerSummary {
         health = parseHealth(status),
         stack = labels[COMPOSE_PROJECT_LABEL],
         labels = labels,
+        imageId = imageId,
+        volumeNames = mounts.orEmpty().filter { it.type == "volume" }.mapNotNull { it.name?.takeIf(String::isNotEmpty) },
+        networkNames = networkSettings?.networks?.keys?.toList().orEmpty(),
     )
 }
 

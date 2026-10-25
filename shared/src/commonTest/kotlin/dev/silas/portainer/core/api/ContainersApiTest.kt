@@ -53,6 +53,20 @@ class ContainersApiTest {
     }
 
     @Test
+    fun parsesImageIdVolumesAndNetworks() = runTest {
+        val c = PortainerClient("https://h", "k", MockEngine { respond(Fixtures.CONTAINERS, HttpStatusCode.OK, json) })
+        val list = c.containers(2)
+        assertEquals("sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90", list[0].imageId)
+        assertEquals(emptyList(), list[0].volumeNames)
+        assertEquals(listOf("bridge"), list[0].networkNames)
+        assertEquals(listOf("api-data"), list[1].volumeNames)
+        assertEquals(listOf("bridge", "backend"), list[1].networkNames)
+        assertEquals(listOf("cache"), list[2].volumeNames)
+        assertEquals(emptyList(), list[3].volumeNames) // bind mount ignored
+        assertEquals(listOf("media_default"), list[3].networkNames)
+    }
+
+    @Test
     fun startTreats304AsSuccess() = runTest {
         var method: HttpMethod? = null
         var url: String? = null

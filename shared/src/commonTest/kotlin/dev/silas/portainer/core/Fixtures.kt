@@ -31,7 +31,7 @@ object Fixtures {
     "State": "running",
     "Status": "Up 2 hours (unhealthy)",
     "HostConfig": {"NetworkMode": "bridge"},
-    "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.3", "Gateway": "172.17.0.1"}}},
+    "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.3", "Gateway": "172.17.0.1"}, "backend": {"IPAddress": "172.21.0.2", "Gateway": "172.21.0.1"}}},
     "Mounts": [{"Type": "volume", "Name": "api-data", "Source": "/var/lib/docker/volumes/api-data/_data", "Destination": "/data", "Driver": "local", "Mode": "z", "RW": true, "Propagation": ""}]
   },
   {
@@ -47,7 +47,7 @@ object Fixtures {
     "Status": "Exited (0) 2 days ago",
     "HostConfig": {"NetworkMode": "bridge"},
     "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "", "Gateway": ""}}},
-    "Mounts": []
+    "Mounts": [{"Type": "volume", "Name": "cache", "Source": "/var/lib/docker/volumes/cache/_data", "Destination": "/cache", "Driver": "local", "Mode": "z", "RW": true, "Propagation": ""}]
   },
   {
     "Id": "3e4f5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081",
