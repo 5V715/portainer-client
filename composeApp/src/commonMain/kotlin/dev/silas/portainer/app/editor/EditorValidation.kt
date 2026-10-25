@@ -113,7 +113,7 @@ fun validate(draft: EditorDraft, initial: EditorDraft, mode: EditorMode): Map<Ed
             if (m in initial.mounts) return@forEachIndexed
             val n = i + 1
             if (!isAbsolutePath(m.target)) add("Mount $n: container path must be an absolute path")
-            if (m.target.isNotEmpty() && draft.mounts.indexOfFirst { it.target == m.target } < i) add("Mount $n: ${m.target} is already mounted")
+            if (m.target.isNotEmpty() && draft.mounts.withIndex().any { (j, o) -> j != i && o.target == m.target }) add("Mount $n: ${m.target} is already mounted")
             when (m.type) {
                 MountType.Bind -> if (!isAbsolutePath(m.source)) add("Mount $n: host path must be an absolute path")
                 MountType.Volume -> if (isAbsolutePath(m.source)) add("Mount $n: a volume name can't be a path")

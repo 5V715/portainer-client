@@ -479,4 +479,12 @@ class EditorViewModelTest {
         assertEquals("1.5", formatCpus(1_500_000_000L))
         assertEquals("1536m", formatMemory(1_610_612_736L))
     }
+
+    @Test
+    fun editedRowBeforeALoadedRowWithTheSameTargetIsFlagged() = runTest {
+        val vm = loaded()
+        val first = vm.state.value.draft.mounts[0]
+        vm.updateMount(0, first.copy(target = "/cache"))
+        assertEquals(listOf("Mount 1: /cache is already mounted"), vm.state.value.errors[EditorSection.Volumes])
+    }
 }
