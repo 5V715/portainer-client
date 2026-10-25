@@ -519,8 +519,10 @@ class CleanupViewModelTest {
         val vm = preview(CleanupKind.Volumes)
         settle { !preview(vm).sizesPending }
         assertEquals("Size unknown", preview(vm).recoverableLine)
+        assertFalse(vm.phase.value.toString().contains("secret-key"))
         vm.confirm()
         val result = done(vm)
+        assertFalse(result.toString().contains("secret-key"))
         assertEquals(1, result.deleted)
         assertNull(result.error)
         assertEquals(listOf("DELETE /api/endpoints/1/docker/volumes/$anon"), deletes())
@@ -567,13 +569,70 @@ class CleanupViewModelTest {
     }
 
     @Test
-    fun closingTheSheetCancelsTheDf() = runTest {
+    fun closingTheSheetCancelsTheDfAndReopeningRefetchesNeverShowingAStalePreview() = runTest {
         dfGate = CompletableDeferred()
         val vm = preview(CleanupKind.Volumes)
+        assertTrue(preview(vm).sizesPending)
         vm.acknowledge()
+        assertEquals(CleanupPhase.Idle, vm.phase.value) // the pending preview is dropped
         dfGate!!.complete(Unit)
         advanceUntilIdle()
-        assertTrue(preview(vm).plan.toDelete.all { it.sizeBytes == null })
+        assertEquals(CleanupPhase.Idle, vm.phase.value)
+        assertEquals(1, requests.count { it.endsWith("/system/df") })
+
+        vm.open()
+        assertEquals(CleanupPhase.Loading, vm.phase.value)
+        settle { vm.phase.value is CleanupPhase.Preview && !preview(vm).sizesPending }
+        assertEquals(2, requests.count { it.endsWith("/system/df") })
+        assertEquals("2 kB can be recovered", preview(vm).recoverableLine)
+    }
+
+    @Test
+    fun confirmingBeforeDfArrivesStillReportsReclaimedOnceItLands() = runTest {
+        dfGate = CompletableDeferred()
+        deleteGate = CompletableDeferred()
+        val vm = preview(CleanupKind.Volumes)
+        vm.confirm()
+        settle { vm.phase.value is CleanupPhase.Running }
+        dfGate!!.complete(Unit) // df lands while Running
+        deleteGate!!.complete(Unit)
+        val result = done(vm)
+        settle { (vm.phase.value as? CleanupPhase.Done)?.reclaimedBytes == 2000L }
+        assertEquals(listOf(2000L), (vm.phase.value as CleanupPhase.Done).deletedItems.map { it.sizeBytes })
+        assertEquals(1, result.deleted)
+    }
+
+    @Test
+    fun dfLandingAfterTheRunFinishedUpdatesTheReclaimedFigure() = runTest {
+        dfGate = CompletableDeferred()
+        val vm = preview(CleanupKind.Volumes)
+        vm.confirm()
+        assertEquals(0L, done(vm).reclaimedBytes)
+        dfGate!!.complete(Unit)
+        settle { (vm.phase.value as? CleanupPhase.Done)?.reclaimedBytes == 2000L }
+    }
+
+    @Test
+    fun dfLandingDuringTheSecondConfirmationSizesThePreviewUnderneath() = runTest {
+        dfGate = CompletableDeferred()
+        val vm = preview(CleanupKind.Volumes)
+        vm.setIncludeNamed(true)
+        vm.confirm()
+        assertIs<CleanupPhase.ConfirmNamed>(vm.phase.value)
+        dfGate!!.complete(Unit)
+        settle { (vm.phase.value as? CleanupPhase.ConfirmNamed)?.preview?.sizesPending == false }
+        val confirming = vm.phase.value as CleanupPhase.ConfirmNamed
+        assertEquals(listOf(2000L, 1100000000L), confirming.preview.selected.map { it.sizeBytes })
+        assertTrue(confirming.preview.includeNamed)
+        vm.cancelNamed()
+        assertEquals("1.1 GB can be recovered", preview(vm).recoverableLine)
+    }
+
+    @Test
+    fun imagesWithUnknownSizesSayUpToFromKnownSizes() {
+        val r = dev.silas.portainer.core.cleanup.Recoverable(1000, 1, 2)
+        assertEquals("Up to 1 kB from known sizes (2 unknown)", recoverableLine(CleanupKind.Images, r, false))
+        assertEquals("At least 1 kB can be recovered (2 sizes unknown)", recoverableLine(CleanupKind.Volumes, r, false))
     }
 
     @Test

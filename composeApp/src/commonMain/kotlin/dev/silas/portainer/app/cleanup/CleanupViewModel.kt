@@ -101,6 +101,17 @@ class CleanupViewModel(
     /** Fetches volume sizes after the preview shows; cancelled when the sheet closes. Never blocks a cleanup. */
     private var sizesJob: Job? = null
 
+    /** The df answer (empty after a failure); null until it lands. Kept so a run confirmed earlier still counts it. */
+    private var volumeSizes: Map<String, Long?>? = null
+
+    /** A finished volume run reports the sizes df knows, even when df landed after the run started. */
+    private fun withSizes(phase: CleanupPhase): CleanupPhase {
+        val sizes = volumeSizes
+        if (kind != CleanupKind.Volumes || sizes == null || phase !is CleanupPhase.Done) return phase
+        val items = phase.deletedItems.map { if (it.sizeBytes == null) it.copy(sizeBytes = sizes[it.id]) else it }
+        return phase.copy(deletedItems = items, reclaimedBytes = items.sumOf { it.sizeBytes ?: 0L })
+    }
+
     /** Rebuilds the image plan from the lists already loaded (only set for images). */
     private var imagePlan: ((includeTagged: Boolean) -> CleanupPlan)? = null
 
@@ -115,7 +126,7 @@ class CleanupViewModel(
                 last = run
                 _phase.update { current ->
                     when {
-                        run != null -> run
+                        run != null -> withSizes(run)
                         current is CleanupPhase.Running || current is CleanupPhase.Done -> CleanupPhase.Idle
                         else -> current
                     }
@@ -136,6 +147,7 @@ class CleanupViewModel(
         }
         loadJob?.cancel()
         sizesJob?.cancel()
+        volumeSizes = null
         _phase.value = CleanupPhase.Loading
         loadJob = viewModelScope.launch {
             val next = try {
@@ -163,12 +175,14 @@ class CleanupViewModel(
             } catch (e: Exception) {
                 emptyMap()
             }
+            volumeSizes = sizes
             // Only sizes change, never which items are selected or the toggles.
             fun CleanupPhase.Preview.sized() = copy(plan = plan.withVolumeSizes(sizes), sizesPending = false)
             _phase.update {
                 when {
                     it is CleanupPhase.Preview && it.sizesPending -> it.sized()
                     it is CleanupPhase.ConfirmNamed && it.preview.sizesPending -> it.copy(preview = it.preview.sized())
+                    it is CleanupPhase.Done -> withSizes(it)
                     else -> it
                 }
             }
@@ -213,6 +227,8 @@ class CleanupViewModel(
     fun acknowledge() {
         _sheetVisible.value = false
         sizesJob?.cancel()
+        // A stale preview (maybe still "calculating") is never shown again: reopening goes through open().
+        _phase.update { if (it is CleanupPhase.Preview || it is CleanupPhase.ConfirmNamed) CleanupPhase.Idle else it }
         sessions.clear(key)
     }
 

@@ -16,6 +16,7 @@ internal fun recoverableLine(kind: CleanupKind, r: Recoverable, pending: Boolean
     if (r.knownCount == 0) return "Size unknown"
     val size = formatBytes(r.knownBytes)
     return when {
+        r.unknownCount > 0 && kind == CleanupKind.Images -> "Up to $size from known sizes (${r.unknownCount} unknown)"
         r.unknownCount > 0 -> "At least $size can be recovered (${r.unknownCount} ${if (r.unknownCount == 1) "size" else "sizes"} unknown)"
         kind == CleanupKind.Images -> "Up to $size can be recovered"
         else -> "$size can be recovered"
