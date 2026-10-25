@@ -57,4 +57,9 @@ data class RecreatePlan(
     val registryId: Int?,
     val changes: ChangeSummary,
     val warnings: List<RecreateWarning>,
+    /**
+     * The container's name before the form edits; a failed Replace renames the original back to it. Differs from
+     * [containerName] (the new container's name) only when the Name was edited.
+     */
+    val originalName: String = containerName,
 )

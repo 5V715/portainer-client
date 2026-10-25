@@ -46,7 +46,7 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
         }
 
         val epoch = nowEpochSeconds()
-        val tmpName = "${plan.containerName}-old-$epoch"
+        val tmpName = "${plan.originalName}-old-$epoch"
         val renamed = step(RecreateStep.RenameOld, onFailure = { RecreateEvent.Failed(RecreateStep.RenameOld, it.text(), rolledBack = true) }) {
             ops.rename(oldId, tmpName)
         }
@@ -55,7 +55,7 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
         // Create before stop: the new container must reference the old one's anonymous volumes while the old one
         // still exists. For AutoRemove containers Docker then can't delete those volumes on stop (they're in use)
         // instead of deleting the data.
-        val restore = Restore(oldId, plan, tmpName, failedName = "${plan.containerName}-failed-$epoch")
+        val restore = Restore(oldId, plan, tmpName, failedName = "${plan.originalName}-failed-$epoch")
         var newId = ""
         val created = step(RecreateStep.CreateNew, onFailure = { restore.beforeStop(RecreateStep.CreateNew, it.text(), newId = null) }) {
             newId = ops.create(plan.containerName, plan.createBody)
@@ -134,7 +134,11 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
      * `rolledBack` is false and the message names it.
      */
     private inner class Restore(val oldId: String, val plan: RecreatePlan, val tmpName: String, val failedName: String) {
+        /** The new container's name. */
         private val name get() = plan.containerName
+
+        /** The original's name: what a rollback renames it back to. */
+        private val originalName get() = plan.originalName
 
         /** The old container was never stopped: remove the new one (if created) and rename the old one back. */
         suspend fun beforeStop(step: RecreateStep, message: String, newId: String?): RecreateEvent.Failed =
@@ -143,7 +147,7 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
                 if (newId != null && attempt { ops.remove(newId, force = true) } != null) {
                     problems += "Removing the new container failed; it is still there as $name."
                 }
-                if (attempt { ops.rename(oldId, name) } != null) {
+                if (attempt { ops.rename(oldId, originalName) } != null) {
                     problems += "Renaming the original container back failed; it is named $tmpName."
                 }
                 failed(step, message, problems)
@@ -166,13 +170,13 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
                     listOf("Renaming the new container aside failed. Nothing was removed: the new container is $name (not started) and the original is $tmpName."),
                 )
             }
-            val renameOldError = attempt { ops.rename(oldId, name) }
+            val renameOldError = attempt { ops.rename(oldId, originalName) }
             if (renameOldError is PortainerException.NotFound) return keepNew(step, message, newId)
             val startOldError = if (plan.wasRunning) attempt { ops.start(oldId) } else null
             if (startOldError is PortainerException.NotFound) return keepNew(step, message, newId)
 
             if (renameOldError != null || startOldError != null) {
-                val oldName = if (renameOldError == null) name else tmpName
+                val oldName = if (renameOldError == null) originalName else tmpName
                 val problems = mutableListOf<String>()
                 if (renameOldError != null) problems += "Renaming the original container back failed; it is named $tmpName."
                 if (startOldError != null) problems += "Starting the original container failed; it is stopped and named $oldName."

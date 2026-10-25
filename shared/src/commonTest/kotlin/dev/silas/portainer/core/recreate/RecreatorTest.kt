@@ -66,8 +66,9 @@ private fun plan(
     pull: Boolean = true,
     extraNetworks: Map<String, JsonObject> = mapOf("backend" to JsonObject(mapOf("IPAMConfig" to JsonObject(mapOf("IPv4Address" to JsonPrimitive("172.20.0.10")))))),
     warnings: List<RecreateWarning> = listOf(RecreateWarning.ConnectionDependency),
+    containerName: String = "web",
 ) = RecreatePlan(
-    containerName = "web",
+    containerName = containerName,
     wasRunning = wasRunning,
     createBody = JsonObject(mapOf("Image" to JsonPrimitive("nginx:1.27"))),
     extraNetworks = extraNetworks,
@@ -76,6 +77,7 @@ private fun plan(
     registryId = 3,
     changes = ChangeSummary(null, emptyList(), emptyList(), emptyList(), emptyList()),
     warnings = warnings,
+    originalName = "web",
 )
 
 private val boom = PortainerException.Api(500, "boom")
@@ -135,6 +137,49 @@ class RecreatorTest {
         assertEquals(listOf("pull nginx:1.27 3", "rename $OLD $TMP", "create web", "rename $OLD web"), ops.calls)
         assertEquals(Failed(RecreateStep.CreateNew, "boom", rolledBack = true), events.last())
         assertEquals(StepStarted(RecreateStep.CreateNew), events[events.size - 2])
+    }
+
+    // ---- Name edited: the new container is "api", the original stays "web" ----
+
+    @Test
+    fun renamedReplaceSucceedsUnderTheNewName() = runTest {
+        val ops = FakeOps()
+        val events = recreator(ops).run(OLD, plan(containerName = "api")).toList()
+        assertEquals(
+            listOf("pull nginx:1.27 3", "rename $OLD $TMP", "create api", "connect backend $NEW", "stop $OLD", "start $NEW", "remove $OLD force=true"),
+            ops.calls,
+        )
+        assertEquals(Succeeded(NEW), events.last())
+    }
+
+    @Test
+    fun renamedReplaceCreateFailureRestoresTheOriginalName() = runTest {
+        val ops = FakeOps(mapOf("create api" to boom))
+        val events = recreator(ops).run(OLD, plan(containerName = "api")).toList()
+        assertEquals(listOf("pull nginx:1.27 3", "rename $OLD $TMP", "create api", "rename $OLD web"), ops.calls)
+        assertEquals(Failed(RecreateStep.CreateNew, "boom", rolledBack = true), events.last())
+    }
+
+    @Test
+    fun renamedReplaceStartFailureRestoresTheOriginalName() = runTest {
+        val ops = FakeOps(mapOf("start $NEW" to boom))
+        val events = recreator(ops).run(OLD, plan(containerName = "api")).toList()
+        assertEquals(
+            listOf(
+                "pull nginx:1.27 3", "rename $OLD $TMP", "create api", "connect backend $NEW", "stop $OLD", "start $NEW",
+                "rename $NEW $FAILED", "rename $OLD web", "start $OLD", "remove $NEW force=true",
+            ),
+            ops.calls,
+        )
+        assertEquals(Failed(RecreateStep.StartNew, "boom", rolledBack = true), events.last())
+    }
+
+    @Test
+    fun renamedReplaceAutoRemovedOriginalKeepsNewUnderTheNewName() = runTest {
+        val ops = FakeOps(mapOf("start $NEW" to boom, "rename $OLD web" to PortainerException.NotFound("gone")))
+        val events = recreator(ops).run(OLD, plan(containerName = "api")).toList()
+        assertEquals(listOf("rename $NEW $FAILED", "rename $OLD web", "rename $NEW api"), ops.calls.takeLast(3))
+        assertTrue((events.last() as Failed).message.endsWith("The new container was kept as api (not running) so you can fix and start it."))
     }
 
     @Test

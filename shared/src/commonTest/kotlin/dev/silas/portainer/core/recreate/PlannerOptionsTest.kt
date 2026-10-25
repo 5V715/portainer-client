@@ -85,6 +85,14 @@ class PlannerOptionsTest {
         }
     }
 
+    @Test
+    fun renamed_replace_keeps_the_original_name_for_rollback() {
+        val p = edit(full) { it.copy(name = "app-api") }.plan()
+        assertEquals("app-api", p.containerName)
+        assertEquals("app-web", p.originalName)
+        assertEquals("app-web", edit(full).plan().originalName)
+    }
+
     // ---- user-edited fields vs image defaults ----
 
     @Test

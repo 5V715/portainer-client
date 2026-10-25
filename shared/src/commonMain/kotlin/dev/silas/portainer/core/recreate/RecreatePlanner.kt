@@ -139,6 +139,7 @@ object RecreatePlanner {
             registryId = edits.registryId,
             changes = changeSummary(originalImage, edits, inspectedEnv, imageConfig, dropped),
             warnings = warnings,
+            originalName = (options.original ?: inspect).string("Name").orEmpty().removePrefix("/"),
         )
     }
 
