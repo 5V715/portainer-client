@@ -1,6 +1,7 @@
 package dev.silas.portainer.core.api
 
 import dev.silas.portainer.core.model.ImageRef
+import dev.silas.portainer.core.model.ImageSummary
 import dev.silas.portainer.core.registry.registryAuthHeader
 import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeoutConfig
@@ -14,6 +15,8 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.readUTF8Line
 import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -117,4 +120,29 @@ private fun PortainerClient.streamError(line: String): String? {
     val error = (obj["error"] as? JsonPrimitive)?.takeIf { it.isString }?.content
     val detail = ((obj["errorDetail"] as? JsonObject)?.get("message") as? JsonPrimitive)?.takeIf { it.isString }?.content
     return (error ?: detail)?.takeIf { it.isNotBlank() }
+}
+
+@Serializable
+private data class ImageDto(
+    @SerialName("Id") val id: String = "",
+    @SerialName("RepoTags") val repoTags: List<String>? = null,
+    @SerialName("Size") val size: Long = 0,
+    @SerialName("Created") val created: Long = 0,
+    @SerialName("Labels") val labels: Map<String, String>? = null,
+)
+
+/** Lists local images (`GET images/json`, intermediate layers excluded). */
+suspend fun PortainerClient.images(endpointId: Int): List<ImageSummary> {
+    val response = execute(dockerPath(endpointId, "images/json"))
+    return decodeBody(response) { response.body<List<ImageDto>>() }.map {
+        ImageSummary(it.id, it.repoTags.orEmpty(), it.size, it.created, it.labels.orEmpty())
+    }
+}
+
+/** Removes an image; [id] keeps its `sha256:` prefix. Docker's 409 (in use) surfaces as [PortainerException.Api]. */
+suspend fun PortainerClient.removeImage(endpointId: Int, id: String, force: Boolean = false) {
+    execute(dockerPath(endpointId, "images/$id")) {
+        method = HttpMethod.Delete
+        parameter("force", force)
+    }
 }
