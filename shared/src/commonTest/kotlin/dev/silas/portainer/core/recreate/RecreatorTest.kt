@@ -167,7 +167,7 @@ class RecreatorTest {
         assertEquals(
             listOf(
                 "pull nginx:1.27 3", "rename $OLD $TMP", "create api", "connect backend $NEW", "stop $OLD", "start $NEW",
-                "rename $NEW $FAILED", "rename $OLD web", "start $OLD", "remove $NEW force=true",
+                "rename $OLD web", "start $OLD", "remove $NEW force=true",
             ),
             ops.calls,
         )
@@ -175,10 +175,38 @@ class RecreatorTest {
     }
 
     @Test
+    fun renamedReplaceRollbackNeverRenamesTheNewContainerAside() = runTest {
+        // The new container doesn't hold the original's name, so the original goes straight back to it.
+        val failures = mapOf("start $NEW" to boom, "rename $NEW $FAILED" to boom)
+        val ops = FakeOps(failures)
+        val events = recreator(ops).run(OLD, plan(containerName = "api")).toList()
+        assertFalse(ops.calls.any { it.startsWith("rename $NEW") }, "${ops.calls}")
+        assertEquals(listOf("start $NEW", "rename $OLD web", "start $OLD", "remove $NEW force=true"), ops.calls.takeLast(4))
+        assertEquals(Failed(RecreateStep.StartNew, "boom", rolledBack = true), events.last())
+
+        val stopOps = FakeOps(mapOf("stop $OLD" to boom, "rename $NEW $FAILED" to boom))
+        val stopEvents = recreator(stopOps).run(OLD, plan(containerName = "api", pull = false, extraNetworks = emptyMap())).toList()
+        assertEquals(listOf("rename $OLD $TMP", "create api", "stop $OLD", "rename $OLD web", "start $OLD", "remove $NEW force=true"), stopOps.calls)
+        assertEquals(Failed(RecreateStep.StopOld, "boom", rolledBack = true), stopEvents.last())
+    }
+
+    @Test
+    fun renamedReplaceStartOldFailureKeepsTheNewContainerUnderItsName() = runTest {
+        val ops = FakeOps(mapOf("start $NEW" to boom, "start $OLD" to PortainerException.Api(500, "port in use")))
+        val failed = recreator(ops).run(OLD, plan(containerName = "api", pull = false, extraNetworks = emptyMap())).toList().last() as Failed
+        assertFalse(ops.calls.any { it.startsWith("remove") })
+        assertEquals(
+            "boom. Starting the original container failed; it is stopped and named web. The new container was kept as api (not running).",
+            failed.message,
+        )
+    }
+
+    @Test
     fun renamedReplaceAutoRemovedOriginalKeepsNewUnderTheNewName() = runTest {
         val ops = FakeOps(mapOf("start $NEW" to boom, "rename $OLD web" to PortainerException.NotFound("gone")))
         val events = recreator(ops).run(OLD, plan(containerName = "api")).toList()
-        assertEquals(listOf("rename $NEW $FAILED", "rename $OLD web", "rename $NEW api"), ops.calls.takeLast(3))
+        assertEquals(listOf("start $NEW", "rename $OLD web"), ops.calls.takeLast(2))
+        assertFalse(ops.calls.any { it.startsWith("rename $NEW") || it.startsWith("remove $NEW") }, "${ops.calls}")
         assertTrue((events.last() as Failed).message.endsWith("The new container was kept as api (not running) so you can fix and start it."))
     }
 

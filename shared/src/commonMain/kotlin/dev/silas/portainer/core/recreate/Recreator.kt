@@ -156,13 +156,15 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
         /**
          * The old container is stopped or may be gone: Docker's auto-remove runs asynchronously after it exits, so
          * it can vanish even after a successful rename. Order: rename new aside, rename old back, start old, and
-         * only then remove the new one.
+         * only then remove the new one. A renamed Replace's new container doesn't hold the original name, so it
+         * isn't renamed aside: the old one goes straight back to its name.
          */
         suspend fun afterStop(step: RecreateStep, message: String, newId: String): RecreateEvent.Failed =
             withContext(NonCancellable) { restoreAfterStop(step, message, newId) }
 
         private suspend fun restoreAfterStop(step: RecreateStep, message: String, newId: String): RecreateEvent.Failed {
-            if (attempt { ops.rename(newId, failedName) } != null) {
+            val holdsOriginalName = name == originalName
+            if (holdsOriginalName && attempt { ops.rename(newId, failedName) } != null) {
                 // The original name is still held by the new container, so the old one can't get it back.
                 return failed(
                     step,
@@ -170,28 +172,29 @@ class Recreator(private val ops: DockerOps, private val nowEpochSeconds: () -> L
                     listOf("Renaming the new container aside failed. Nothing was removed: the new container is $name (not started) and the original is $tmpName."),
                 )
             }
+            val newName = if (holdsOriginalName) failedName else name
             val renameOldError = attempt { ops.rename(oldId, originalName) }
-            if (renameOldError is PortainerException.NotFound) return keepNew(step, message, newId)
+            if (renameOldError is PortainerException.NotFound) return keepNew(step, message, newId, newName)
             val startOldError = if (plan.wasRunning) attempt { ops.start(oldId) } else null
-            if (startOldError is PortainerException.NotFound) return keepNew(step, message, newId)
+            if (startOldError is PortainerException.NotFound) return keepNew(step, message, newId, newName)
 
             if (renameOldError != null || startOldError != null) {
                 val oldName = if (renameOldError == null) originalName else tmpName
                 val problems = mutableListOf<String>()
                 if (renameOldError != null) problems += "Renaming the original container back failed; it is named $tmpName."
                 if (startOldError != null) problems += "Starting the original container failed; it is stopped and named $oldName."
-                problems += "The new container was kept as $failedName (not running)."
+                problems += "The new container was kept as $newName (not running)."
                 return failed(step, message, problems)
             }
             if (attempt { ops.remove(newId, force = true) } != null) {
-                return failed(step, message, listOf("Removing the new container failed; it is still there as $failedName."))
+                return failed(step, message, listOf("Removing the new container failed; it is still there as $newName."))
             }
             return RecreateEvent.Failed(step, message, rolledBack = true)
         }
 
-        /** The old container is gone: give the new one its name back and keep it. */
-        private suspend fun keepNew(step: RecreateStep, message: String, newId: String): RecreateEvent.Failed {
-            val keptAs = if (attempt { ops.rename(newId, name) } == null) name else failedName
+        /** The old container is gone: give the new one (now named [current]) its name back and keep it. */
+        private suspend fun keepNew(step: RecreateStep, message: String, newId: String, current: String): RecreateEvent.Failed {
+            val keptAs = if (current == name || attempt { ops.rename(newId, name) } == null) name else current
             val gone = if (RecreateWarning.AutoRemove in plan.warnings) {
                 "The old container was removed by Docker (auto-remove), so it can't be restored."
             } else {
