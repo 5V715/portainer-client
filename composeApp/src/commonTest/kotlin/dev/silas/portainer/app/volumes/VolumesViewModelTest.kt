@@ -16,6 +16,8 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -26,7 +28,9 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalCoroutinesApi::class)
 class VolumesViewModelTest {
     private val json = headersOf(HttpHeaders.ContentType, "application/json")
-    private val requests = mutableListOf<String>()
+    // Appended from the engine's threads while the test reads it: an atomic snapshot list.
+    private val requestLog = MutableStateFlow(emptyList<String>())
+    private val requests: List<String> get() = requestLog.value
     private var createBody = ""
     private var listCalls = 0
     private var deleteStatus = HttpStatusCode.NoContent
@@ -54,7 +58,7 @@ class VolumesViewModelTest {
     private suspend fun env(): TestEnv {
         val env = TestEnv { req ->
             val path = req.url.encodedPath
-            requests += "${req.method.value} $path"
+            requestLog.update { it + "${req.method.value} $path" }
             when {
                 req.method == HttpMethod.Get && path.endsWith("/volumes") -> {
                     listCalls++

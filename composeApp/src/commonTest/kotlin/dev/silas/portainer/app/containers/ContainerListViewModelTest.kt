@@ -20,6 +20,8 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -31,7 +33,9 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalCoroutinesApi::class)
 class ContainerListViewModelTest {
     private val json = headersOf(HttpHeaders.ContentType, "application/json")
-    private val requests = mutableListOf<String>()
+    // Appended from the engine's threads while the test reads it: an atomic snapshot list.
+    private val requestLog = MutableStateFlow(emptyList<String>())
+    private val requests: List<String> get() = requestLog.value
     private var actionStatus = HttpStatusCode.NoContent
     private var actionBody = ""
 
@@ -57,7 +61,7 @@ class ContainerListViewModelTest {
 
     private suspend fun env(): TestEnv {
         val env = TestEnv { req ->
-            requests += "${req.method.value} ${req.url.encodedPath}"
+            requestLog.update { it + "${req.method.value} ${req.url.encodedPath}" }
             queries += req.url.encodedQuery
             val path = req.url.encodedPath
             if (req.method == HttpMethod.Get && path.endsWith("/containers/json")) {
