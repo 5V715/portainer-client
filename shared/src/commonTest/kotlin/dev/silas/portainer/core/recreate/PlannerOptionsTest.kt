@@ -250,5 +250,9 @@ class PlannerOptionsTest {
             describeChanges(before, after),
         )
         assertTrue(describeChanges(before, before).isEmpty())
+        // The planner has no forms: the caller attaches the lines to the plan's summary.
+        val plan = edit(full) { after }.plan()
+        assertTrue(plan.changes.otherChanges.isEmpty())
+        assertEquals(describeChanges(before, after), plan.changes.copy(otherChanges = describeChanges(before, after)).otherChanges)
     }
 }

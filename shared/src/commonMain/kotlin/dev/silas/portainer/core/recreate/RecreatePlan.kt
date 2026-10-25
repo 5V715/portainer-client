@@ -18,6 +18,11 @@ data class ChangeSummary(
     val droppedImageDefaults: List<String>,
     /** Old-image `K=V` entries that apply again because the user removed key K (Docker merges image Env at create). */
     val envReinherited: List<String> = emptyList(),
+    /**
+     * One line per edited section other than image and env (ports, mounts, networks, labels, restart, resources…),
+     * from [dev.silas.portainer.core.editor.describeChanges]; set by the form's caller, the planner leaves it empty.
+     */
+    val otherChanges: List<String> = emptyList(),
 )
 
 sealed interface RecreateWarning {
