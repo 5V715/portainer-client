@@ -61,6 +61,7 @@ class EditorFinishTest {
     private var cleanupGate: CompletableDeferred<Unit>? = null
     private var createGate: CompletableDeferred<Unit>? = null
     private var listedName = "db"
+    private var running = true
     private var labels = "{}"
     private var registries = "[]"
     private val pullAuth = MutableStateFlow(emptyList<String?>())
@@ -69,7 +70,7 @@ class EditorFinishTest {
 
     private fun inspect() = """{
       "Id":"$fullId","Name":"/web","Image":"sha256:old",
-      "State":{"Status":"running","Running":true},
+      "State":{"Status":"${if (running) "running" else "exited"}","Running":$running},
       "Config":{"Image":"$image","Hostname":"abcdef123456","Env":["A=1"],"ExposedPorts":{"80/tcp":{}},"Labels":$labels},
       "HostConfig":{"NetworkMode":"front","PortBindings":$ports,"Binds":["data:/data"],"RestartPolicy":{"Name":"always","MaximumRetryCount":0}},
       "Mounts":[{"Type":"volume","Name":"data","Destination":"/data"}],
@@ -79,33 +80,35 @@ class EditorFinishTest {
     }"""
 
     private fun list() = """[
-      {"Id":"$fullId","Names":["/web"],"Image":"$image","State":"running","Status":"Up",
+      {"Id":"$fullId","Names":["/web"],"Image":"$image","State":"${if (running) "running" else "exited"}","Status":"Up",
        "Mounts":[{"Type":"volume","Name":"data"}],"NetworkSettings":{"Networks":{"front":{}}},
-       "Ports":[{"IP":"0.0.0.0","PrivatePort":80,"PublicPort":8080,"Type":"tcp"}]},
+       "Ports":${if (running) """[{"IP":"0.0.0.0","PrivatePort":80,"PublicPort":8080,"Type":"tcp"}]""" else "[]"}},
       {"Id":"ddd000","Names":["/$listedName"],"Image":"postgres","State":"exited","Status":"Exited",
        "Mounts":[{"Type":"volume","Name":"data"}]},
       {"Id":"ccc000","Names":["/cache"],"Image":"redis","State":"running","Status":"Up",
        "Ports":[{"IP":"0.0.0.0","PrivatePort":6379,"PublicPort":7000,"Type":"tcp"}]}
     ]"""
 
-    private val stoppedInspect = """{"Id":"ddd000","Name":"/db","HostConfig":{"PortBindings":{"5432/tcp":[{"HostIp":"","HostPort":"5432"}]}}}"""
+    private val stoppedInspect = """{"Id":"ddd000","Name":"/db","HostConfig":{"PortBindings":{"5432/tcp":[{"HostIp":"","HostPort":"5432"}]}},
+      "NetworkSettings":{"Networks":{"front":{"NetworkID":"n2","IPAMConfig":{"IPv4Address":"172.20.0.9"},"IPAddress":""}}}}"""
 
-    private val frontNetwork = """{"Id":"n2","Name":"front","Driver":"bridge",
-      "Containers":{"$fullId":{"Name":"web","IPv4Address":"172.20.0.5/16"}}}"""
+    // A network inspect lists running endpoints only.
+    private fun frontNetwork() = """{"Id":"n2","Name":"front","Driver":"bridge",
+      "Containers":${if (running) """{"$fullId":{"Name":"web","IPv4Address":"172.20.0.5/16"}}""" else "{}"}}"""
 
     private suspend fun MockRequestHandleScope.handle(r: HttpRequestData): HttpResponseData {
         val path = r.url.encodedPath
         val short = path.substringAfter("/docker", path)
         requestLog.update { it + "${r.method.value} $short" }
         return when {
-            path.endsWith("/containers/abc/json") -> respond(inspect(), HttpStatusCode.OK, json)
+            path.endsWith("/containers/abc/json") || path.endsWith("/containers/$fullId/json") -> respond(inspect(), HttpStatusCode.OK, json)
             path.endsWith("/containers/ddd000/json") -> respond(stoppedInspect, HttpStatusCode.OK, json)
             path.endsWith("/containers/json") -> respond(list(), HttpStatusCode.OK, json)
             path.endsWith("/images/sha256:old/json") -> respond("""{"Config":{"Env":[]}}""", HttpStatusCode.OK, json)
             path.endsWith("/api/registries") -> respond(registries, HttpStatusCode.OK, json)
             path.endsWith("/volumes") -> respond("""{"Volumes":[{"Name":"data","Driver":"local"}]}""", HttpStatusCode.OK, json)
             path.endsWith("/networks") -> respond("""[{"Id":"n2","Name":"front","Driver":"bridge"}]""", HttpStatusCode.OK, json)
-            path.endsWith("/networks/front") -> respond(frontNetwork, HttpStatusCode.OK, json)
+            path.endsWith("/networks/front") -> respond(frontNetwork(), HttpStatusCode.OK, json)
             path.endsWith("/images/create") -> {
                 pullAuth.update { it + r.headers["X-Registry-Auth"] }
                 respond("""{"status":"Downloading","id":"l1","progress":"[==>  ] 1MB/2MB"}""", HttpStatusCode.OK, json)
@@ -223,6 +226,22 @@ class EditorFinishTest {
         vm.setDeployName("-bad")
         assertNotNull(assertIs<FinishPhase.Review>(vm.state.value.finish).nameError)
         assertFalse(assertIs<FinishPhase.Review>(vm.state.value.finish).canConfirm)
+    }
+
+    @Test
+    fun copyOfAStoppedOriginalWithAFixedIpIsBlockedUntilTheIpChanges() = runTest {
+        running = false
+        val vm = loaded(env())
+        val review = reviewing(vm, FinishAction.Copy)
+        assertTrue(Conflict.FixedIpInUse("front", "172.20.0.5", "web") in review.blocking, "${review.conflicts}")
+        assertFalse(review.canConfirm)
+
+        vm.backToForm()
+        vm.updateNetwork(0, vm.state.value.draft.networks[0].copy(ipv4 = "172.20.0.99"))
+        val again = reviewing(vm, FinishAction.Copy)
+        assertTrue(again.conflicts.none { it is Conflict.FixedIpInUse }, "${again.conflicts}")
+        assertTrue(again.blocking.isEmpty(), "${again.blocking}")
+        assertTrue(again.canConfirm)
     }
 
     @Test
@@ -347,6 +366,18 @@ class EditorFinishTest {
         vm.confirm()
         settle { vm.state.value.navigation != null }
         assertTrue("POST /containers/new1/start" in requests)
+    }
+
+    @Test
+    fun newWithAnIpHeldByAStoppedContainerIsBlocked() = runTest {
+        val vm = loaded(env(), containerId = null)
+        vm.setImage("nginx:1")
+        vm.addNetwork()
+        val last = vm.state.value.draft.networks.lastIndex
+        vm.updateNetwork(last, NetworkDraft("front", "", "172.20.0.9", "", ""))
+        val review = reviewing(vm, FinishAction.Create)
+        assertTrue(Conflict.FixedIpInUse("front", "172.20.0.9", "db") in review.blocking, "${review.conflicts}")
+        assertFalse(review.canConfirm)
     }
 
     // ---- Replace ----

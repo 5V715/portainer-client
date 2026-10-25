@@ -37,7 +37,10 @@ object ConflictChecker {
     /**
      * Checks a create [body] (Docker create-body shape) named [name] against the other containers and networks.
      * [stoppedPortBindings] holds the `HostConfig.PortBindings` of stopped containers by name (the container list
-     * only reports published ports of running ones). [excludeContainerId] is the container a Replace overwrites.
+     * only reports published ports of running ones). [stoppedFixedIps] holds stopped containers' fixed IPs by name,
+     * as (network name, IP) pairs from their inspect's `IPAMConfig` (a network inspect only lists running
+     * endpoints, yet the IP is reserved for the stopped container: one of the two would fail to start).
+     * [excludeContainerId] is the container a Replace overwrites.
      */
     fun check(
         body: JsonObject,
@@ -46,6 +49,7 @@ object ConflictChecker {
         networks: List<Network>,
         excludeContainerId: String?,
         stoppedPortBindings: Map<String, List<PublishedPort>> = emptyMap(),
+        stoppedFixedIps: Map<String, List<Pair<String, String>>> = emptyMap(),
     ): List<Conflict> {
         val peers = others.filter { it.id != excludeContainerId }
         val excludedName = others.firstOrNull { it.id == excludeContainerId }?.name?.removePrefix("/")
@@ -54,7 +58,7 @@ object ConflictChecker {
             val wanted = name.removePrefix("/")
             if (peers.any { it.name.removePrefix("/") == wanted }) add(Conflict.NameTaken(wanted))
             addAll(portConflicts(hostConfig, peers, stoppedPortBindings.filterKeys { it.removePrefix("/") != excludedName }))
-            addAll(ipConflicts(body, networks, excludeContainerId))
+            addAll(ipConflicts(body, networks, excludeContainerId, stoppedFixedIps.filterKeys { it.removePrefix("/") != excludedName }))
             addAll(volumeConflicts(hostConfig, peers))
         }.distinct()
     }
@@ -98,7 +102,12 @@ object ConflictChecker {
         return if (start != null && end != null && start in 1..end && end <= MAX_PORT) (start..end).toList() else emptyList()
     }
 
-    private fun ipConflicts(body: JsonObject, networks: List<Network>, excludeContainerId: String?): List<Conflict> {
+    private fun ipConflicts(
+        body: JsonObject,
+        networks: List<Network>,
+        excludeContainerId: String?,
+        stopped: Map<String, List<Pair<String, String>>>,
+    ): List<Conflict> {
         val endpoints = body.obj("NetworkingConfig")?.obj("EndpointsConfig") ?: return emptyList()
         return endpoints.flatMap { (networkName, endpoint) ->
             val ipam = (endpoint as? JsonObject)?.obj("IPAMConfig") ?: return@flatMap emptyList()
@@ -107,7 +116,9 @@ object ConflictChecker {
                 .filter { it.key != excludeContainerId }
             wanted.flatMap { ip ->
                 members.filter { (_, m) -> listOfNotNull(m.ipv4, m.ipv6).any { it.substringBefore('/') == ip } }
-                    .map { (_, m) -> Conflict.FixedIpInUse(networkName, ip, m.name.removePrefix("/")) }
+                    .map { (_, m) -> Conflict.FixedIpInUse(networkName, ip, m.name.removePrefix("/")) } +
+                    stopped.filter { (_, ips) -> ips.any { (n, held) -> n == networkName && held.substringBefore('/') == ip } }
+                        .map { (holder, _) -> Conflict.FixedIpInUse(networkName, ip, holder.removePrefix("/")) }
             }
         }
     }

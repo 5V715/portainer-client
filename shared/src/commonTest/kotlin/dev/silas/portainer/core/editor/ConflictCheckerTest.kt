@@ -33,7 +33,8 @@ class ConflictCheckerTest {
         networks: List<Network> = emptyList(),
         exclude: String? = null,
         stopped: Map<String, List<PublishedPort>> = emptyMap(),
-    ) = ConflictChecker.check(body, name, others, networks, exclude, stopped)
+        stoppedIps: Map<String, List<Pair<String, String>>> = emptyMap(),
+    ) = ConflictChecker.check(body, name, others, networks, exclude, stopped, stoppedIps)
 
     private fun net(vararg members: Pair<String, NetworkMember>) =
         Network("n1", "backend", "bridge", "local", false, false, emptyList(), emptyMap(), members.toMap())
@@ -130,6 +131,20 @@ class ConflictCheckerTest {
         val b = body("""{"NetworkingConfig":{"EndpointsConfig":{"backend":{"IPAMConfig":{"IPv6Address":"fd00::5"}}}}}""")
         val n = net("id1" to NetworkMember("db", null, "fd00::5/64"))
         assertEquals(listOf(Conflict.FixedIpInUse("backend", "fd00::5", "db")), check(b, networks = listOf(n)))
+    }
+
+    @Test
+    fun fixedIpHeldByStoppedContainerBlocks() {
+        val b = body("""{"NetworkingConfig":{"EndpointsConfig":{"backend":{"IPAMConfig":{"IPv4Address":"172.18.0.5"}}}}}""")
+        val others = listOf(c("id1", "/db", state = ContainerState.Exited))
+        val stoppedIps = mapOf("/db" to listOf("backend" to "172.18.0.5"))
+        val result = check(b, others = others, networks = listOf(net()), stoppedIps = stoppedIps)
+        assertEquals(listOf(Conflict.FixedIpInUse("backend", "172.18.0.5", "db")), result)
+        assertTrue(result.single().blocking)
+        // Another network, another IP, or the container a Replace overwrites: no clash.
+        assertEquals(emptyList(), check(b, others = others, stoppedIps = mapOf("/db" to listOf("frontend" to "172.18.0.5"))))
+        assertEquals(emptyList(), check(b, others = others, stoppedIps = mapOf("/db" to listOf("backend" to "172.18.0.6"))))
+        assertEquals(emptyList(), check(b, others = others, exclude = "id1", stoppedIps = stoppedIps))
     }
 
     @Test

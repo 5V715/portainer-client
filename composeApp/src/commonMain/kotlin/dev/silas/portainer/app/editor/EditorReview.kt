@@ -32,6 +32,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 const val CONTAINER_CHANGED_NOTICE =
     "The container changed since you opened the editor — the summary reflects its current settings."
@@ -96,27 +97,42 @@ internal class ConflictInputs(
     val containers: List<ContainerSummary>,
     val networks: List<Network>,
     val stoppedPortBindings: Map<String, List<PublishedPort>>,
+    /** Stopped containers' fixed IPs by name: (network, IP) pairs; network inspects only list running members. */
+    val stoppedFixedIps: Map<String, List<Pair<String, String>>> = emptyMap(),
 ) {
     fun check(body: JsonObject, extraNetworks: Map<String, JsonObject>, name: String, excludeContainerId: String?): List<Conflict> =
-        ConflictChecker.check(withExtras(body, extraNetworks), name, containers, networks, excludeContainerId, stoppedPortBindings)
+        ConflictChecker.check(withExtras(body, extraNetworks), name, containers, networks, excludeContainerId, stoppedPortBindings, stoppedFixedIps)
 }
 
 /**
- * Lists the containers, inspects the stopped ones (the list only reports running containers' ports) and the
- * networks [networkNames] that get a fixed IP (the network list leaves their members out). An inspect that
- * fails is skipped: the check then knows less, and create would still fail on a real clash.
+ * Lists the containers, inspects the stopped ones (the list only reports running containers' ports, and a network
+ * inspect only their IPs) and the networks [networkNames] that get a fixed IP (the network list leaves their
+ * members out). An inspect that fails is skipped: the check then knows less, and create would still fail on a
+ * real clash.
  */
 internal suspend fun conflictInputs(client: PortainerClient, endpointId: Int, networkNames: Set<String>): ConflictInputs = coroutineScope {
     val containers = client.containers(endpointId)
     val stopped = containers.filter { it.state != ContainerState.Running && it.state != ContainerState.Paused }.map { c ->
-        async { optional { c.name to portBindings(client.inspectContainer(endpointId, c.id)) } }
+        async { optional { client.inspectContainer(endpointId, c.id).let { c.name to (portBindings(it) to fixedIps(it)) } } }
     }
     val networks = networkNames.map { n -> async { optional { client.inspectNetwork(endpointId, n) } } }
+    val inspected = stopped.awaitAll().filterNotNull()
     ConflictInputs(
         containers,
         networks.awaitAll().filterNotNull(),
-        stopped.awaitAll().filterNotNull().filter { it.second.isNotEmpty() }.toMap(),
+        inspected.map { (n, v) -> n to v.first }.filter { it.second.isNotEmpty() }.toMap(),
+        inspected.map { (n, v) -> n to v.second }.filter { it.second.isNotEmpty() }.toMap(),
     )
+}
+
+/** The fixed IPs an inspect's endpoints ask for (`NetworkSettings.Networks[*].IPAMConfig`), as (network, IP) pairs. */
+internal fun fixedIps(inspect: JsonObject): List<Pair<String, String>> {
+    val networks = (inspect["NetworkSettings"] as? JsonObject)?.get("Networks") as? JsonObject ?: return emptyList()
+    return networks.flatMap { (network, endpoint) ->
+        val ipam = (endpoint as? JsonObject)?.get("IPAMConfig") as? JsonObject
+        listOf("IPv4Address", "IPv6Address").mapNotNull { (ipam?.get(it) as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotEmpty) }
+            .map { network to it }
+    }
 }
 
 /** Networks of a create body (plus [extraNetworks]) whose endpoint asks for a fixed IP. */
