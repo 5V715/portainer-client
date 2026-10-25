@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#13BEF9" android:pathData="M32.5,22h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#13BEF9" android:pathData="M49.5,22h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#0A6E9E" android:pathData="M66.5,22h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#13BEF9" android:pathData="M32.5,39h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#0A6E9E" android:pathData="M66.5,39h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#13BEF9" android:pathData="M32.5,56h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#13BEF9" android:pathData="M49.5,56h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#0A6E9E" android:pathData="M66.5,56h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#13BEF9" android:pathData="M32.5,73h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#FFD23A" android:pathData="M49.5,73h9.0a2.5,2.5 0 0 1 2.5,2.5v9.0a2.5,2.5 0 0 1 -2.5,2.5h-9.0a2.5,2.5 0 0 1 -2.5,-2.5v-9.0a2.5,2.5 0 0 1 2.5,-2.5z" />
+</vector>
