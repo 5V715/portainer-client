@@ -15,6 +15,9 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -24,7 +27,9 @@ import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LogsViewModelTest {
-    private val queries = mutableListOf<Map<String, String>>()
+    // Appended from the engine's threads while the test reads it: an atomic snapshot list.
+    private val queriesLog = MutableStateFlow(emptyList<Map<String, String>>())
+    private val queries: List<Map<String, String>> get() = queriesLog.value
     private var bodyFor: (Int) -> String = { "" }
 
     @BeforeTest
@@ -40,8 +45,8 @@ class LogsViewModelTest {
 
     private suspend fun env(): TestEnv {
         val env = TestEnv { req ->
-            queries += req.url.parameters.entries().associate { it.key to it.value.first() }
-            respond(bodyFor(queries.size), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/plain"))
+            val count = queriesLog.updateAndGet { it + req.url.parameters.entries().associate { e -> e.key to e.value.first() } }.size
+            respond(bodyFor(count), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/plain"))
         }
         env.repo.save(ServerConfig("s1", "A", "https://a.example.com"), "k")
         return env
@@ -131,19 +136,22 @@ class LogsViewModelTest {
 
     // --- live collector: each request stays open until its gate is completed ---
 
-    private val gates = mutableListOf<CompletableDeferred<String>>()
-    private var outstanding = 0
+    // Appended from the engine's threads while the test reads it: an atomic snapshot list.
+    private val gatesLog = MutableStateFlow(emptyList<CompletableDeferred<String>>())
+    private val gates: List<CompletableDeferred<String>> get() = gatesLog.value
+    private val outstandingCount = MutableStateFlow(0)
+    private val outstanding: Int get() = outstandingCount.value
 
     private suspend fun gatedEnv(): TestEnv {
         val env = TestEnv { req ->
-            queries += req.url.parameters.entries().associate { it.key to it.value.first() }
+            queriesLog.update { it + req.url.parameters.entries().associate { e -> e.key to e.value.first() } }
             val gate = CompletableDeferred<String>()
-            gates += gate
-            outstanding++
+            gatesLog.update { it + gate }
+            outstandingCount.update { it + 1 }
             try {
                 respond(gate.await(), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/plain"))
             } finally {
-                outstanding--
+                outstandingCount.update { it - 1 }
             }
         }
         env.repo.save(ServerConfig("s1", "A", "https://a.example.com"), "k")

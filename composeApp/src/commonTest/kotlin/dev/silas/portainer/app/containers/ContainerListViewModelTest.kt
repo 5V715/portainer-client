@@ -44,7 +44,9 @@ class ContainerListViewModelTest {
     private var inspectStatus = HttpStatusCode.OK
     private var inspectImage = "nginx"
     private var actionDelay = 0L
-    private val queries = mutableListOf<String>()
+    // Appended from the engine's threads while the test reads it: an atomic snapshot list.
+    private val queriesLog = MutableStateFlow(emptyList<String>())
+    private val queries: List<String> get() = queriesLog.value
 
     private val listJson = """[
         {"Id":"a1","Names":["/web"],"Image":"nginx","State":"running","Status":"Up 1 hour"},
@@ -62,7 +64,7 @@ class ContainerListViewModelTest {
     private suspend fun env(): TestEnv {
         val env = TestEnv { req ->
             requestLog.update { it + "${req.method.value} ${req.url.encodedPath}" }
-            queries += req.url.encodedQuery
+            queriesLog.update { it + req.url.encodedQuery }
             val path = req.url.encodedPath
             if (req.method == HttpMethod.Get && path.endsWith("/containers/json")) {
                 val (delayMs, body) = listBody(++listCalls)

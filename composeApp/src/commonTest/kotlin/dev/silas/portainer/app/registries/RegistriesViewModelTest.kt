@@ -23,6 +23,8 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -42,7 +44,9 @@ class RegistriesViewModelTest {
 
     private class Recorded(val method: HttpMethod, val path: String, val body: JsonObject?)
 
-    private val calls = mutableListOf<Recorded>()
+    // Appended from the engine's threads while the test reads it: an atomic snapshot list.
+    private val callsLog = MutableStateFlow(emptyList<Recorded>())
+    private val calls: List<Recorded> get() = callsLog.value
 
     @BeforeTest
     fun setUp() = Dispatchers.setMain(StandardTestDispatcher())
@@ -53,7 +57,7 @@ class RegistriesViewModelTest {
     private suspend fun env(): TestEnv {
         val env = TestEnv { req ->
             val bytes = (req.body as? OutgoingContent.ByteArrayContent)?.bytes()
-            calls += Recorded(req.method, req.url.encodedPath, bytes?.let { Json.parseToJsonElement(it.decodeToString()).jsonObject })
+            callsLog.update { it + Recorded(req.method, req.url.encodedPath, bytes?.let { Json.parseToJsonElement(it.decodeToString()).jsonObject }) }
             when {
                 req.method == HttpMethod.Get -> respond(listJson, HttpStatusCode.OK, json)
                 req.method == HttpMethod.Post ->

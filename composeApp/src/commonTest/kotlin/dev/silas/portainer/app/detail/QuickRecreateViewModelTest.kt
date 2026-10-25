@@ -30,6 +30,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -40,7 +42,9 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalCoroutinesApi::class)
 class QuickRecreateViewModelTest {
     private val json = headersOf(HttpHeaders.ContentType, "application/json")
-    private val requests = mutableListOf<String>()
+    // Appended from the engine's threads while the test reads it: an atomic snapshot list.
+    private val requestLog = MutableStateFlow(emptyList<String>())
+    private val requests: List<String> get() = requestLog.value
     private var createBody = ""
     private var image = "ghcr.io/acme/app:1"
     private var autoRemove = false
@@ -60,7 +64,7 @@ class QuickRecreateViewModelTest {
 
     private suspend fun MockRequestHandleScope.handle(r: HttpRequestData): HttpResponseData {
         val path = r.url.encodedPath
-        requests += "${r.method.value} ${path.substringAfter("/docker", path)}"
+        requestLog.update { it + "${r.method.value} ${path.substringAfter("/docker", path)}" }
         return when {
             path.endsWith("/containers/abc/json") -> respond(inspect(), HttpStatusCode.OK, json)
             path.endsWith("/images/sha256:old/json") -> respond("""{"Config":{"Env":["PATH=/x"]}}""", HttpStatusCode.OK, json)
