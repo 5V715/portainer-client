@@ -96,13 +96,16 @@ fun NetworkDetailScreen(
                     }
                     HorizontalDivider()
                     Text("Connected containers", style = MaterialTheme.typography.titleMedium)
-                    if (network.containers.isEmpty()) Text("None. This network is unused.")
-                    network.containers.entries.sortedBy { it.value.name.lowercase() }.forEach { (id, m) ->
+                    if (state.connected.isEmpty()) Text("None. This network is unused.")
+                    state.connected.forEach { m ->
                         Column(
-                            Modifier.fillMaxWidth().clickable { onOpenContainer(id) }.padding(vertical = 4.dp),
+                            Modifier.fillMaxWidth().clickable { onOpenContainer(m.id) }.padding(vertical = 4.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
-                            Text(m.name.ifEmpty { id.take(12) }, style = MaterialTheme.typography.titleSmall)
+                            Text(m.name.ifEmpty { m.id.take(12) }, style = MaterialTheme.typography.titleSmall)
+                            if (!m.running) {
+                                Text("Stopped", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                             m.ipv4?.let { Text("IPv4: $it", style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace) }
                             m.ipv6?.let { Text("IPv6: $it", style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace) }
                         }
