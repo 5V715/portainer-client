@@ -9,7 +9,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.backhandler.BackHandler
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -20,8 +23,15 @@ import dev.silas.portainer.app.containers.ContainerListViewModel
 import dev.silas.portainer.app.detail.ContainerDetailScreen
 import dev.silas.portainer.app.detail.ContainerDetailViewModel
 import dev.silas.portainer.app.detail.LogsViewModel
+import dev.silas.portainer.app.environment.ComingSoonScreen
+import dev.silas.portainer.app.environment.EnvTab
+import dev.silas.portainer.app.environment.EnvironmentShell
 import dev.silas.portainer.app.environments.EnvironmentsScreen
 import dev.silas.portainer.app.environments.EnvironmentsViewModel
+import dev.silas.portainer.app.images.ImageDetailScreen
+import dev.silas.portainer.app.images.ImageDetailViewModel
+import dev.silas.portainer.app.images.ImagesScreen
+import dev.silas.portainer.app.images.ImagesViewModel
 import dev.silas.portainer.app.registries.RegistriesScreen
 import dev.silas.portainer.app.registries.RegistriesViewModel
 import dev.silas.portainer.app.registries.RegistryEditScreen
@@ -57,6 +67,8 @@ fun App() {
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
+@Suppress("DEPRECATION") // BackHandler: the NavigationEventHandler replacement is not worth another dependency here
 @Composable
 private fun AppNavHost(container: AppContainer) {
     val nav = rememberNavController()
@@ -107,12 +119,57 @@ private fun AppNavHost(container: AppContainer) {
             val vm = viewModel(key = "containers-${route.serverId}-${route.endpointId}") {
                 ContainerListViewModel(container, route.serverId, route.endpointId)
             }
-            ContainerListScreen(
+            EnvironmentShell(EnvTab.Containers, { nav.switchTab(route.serverId, route.endpointId, it) }) {
+                ContainerListScreen(
+                    viewModel = vm,
+                    onOpen = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
+                    onRegistries = { nav.navigate(Registries(route.serverId)) },
+                    onBack = { nav.popBackStack() },
+                )
+            }
+        }
+        composable<Images> { entry ->
+            val route = entry.toRoute<Images>()
+            val vm = viewModel(key = "images-${route.serverId}-${route.endpointId}") {
+                ImagesViewModel(container, route.serverId, route.endpointId)
+            }
+            val toEnvironments = { nav.popBackStack(Environments(route.serverId), inclusive = false); Unit }
+            BackHandler(onBack = toEnvironments)
+            EnvironmentShell(EnvTab.Images, { nav.switchTab(route.serverId, route.endpointId, it) }) {
+                ImagesScreen(
+                    viewModel = vm,
+                    nowEpochSeconds = container.nowEpochSeconds,
+                    onOpen = { nav.navigate(ImageDetail(route.serverId, route.endpointId, it)) },
+                    onBack = toEnvironments,
+                )
+            }
+        }
+        composable<ImageDetail> { entry ->
+            val route = entry.toRoute<ImageDetail>()
+            val vm = viewModel(key = "image-${route.serverId}-${route.endpointId}-${route.imageId}") {
+                ImageDetailViewModel(container, route.serverId, route.endpointId, route.imageId)
+            }
+            ImageDetailScreen(
                 viewModel = vm,
-                onOpen = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
-                onRegistries = { nav.navigate(Registries(route.serverId)) },
+                onOpenContainer = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
                 onBack = { nav.popBackStack() },
             )
+        }
+        composable<Volumes> { entry ->
+            val route = entry.toRoute<Volumes>()
+            val toEnvironments = { nav.popBackStack(Environments(route.serverId), inclusive = false); Unit }
+            BackHandler(onBack = toEnvironments)
+            EnvironmentShell(EnvTab.Volumes, { nav.switchTab(route.serverId, route.endpointId, it) }) {
+                ComingSoonScreen("Volumes", toEnvironments)
+            }
+        }
+        composable<Networks> { entry ->
+            val route = entry.toRoute<Networks>()
+            val toEnvironments = { nav.popBackStack(Environments(route.serverId), inclusive = false); Unit }
+            BackHandler(onBack = toEnvironments)
+            EnvironmentShell(EnvTab.Networks, { nav.switchTab(route.serverId, route.endpointId, it) }) {
+                ComingSoonScreen("Networks", toEnvironments)
+            }
         }
         composable<ContainerDetail> { entry ->
             val route = entry.toRoute<ContainerDetail>()
@@ -173,5 +230,19 @@ private fun AppNavHost(container: AppContainer) {
                 onBack = { nav.popBackStack() },
             )
         }
+    }
+}
+
+/** Switches environment tab: tabs sit on top of Containers, so Back from any tab leads to Environments. */
+private fun NavController.switchTab(serverId: String, endpointId: Int, tab: EnvTab) {
+    val route: Any = when (tab) {
+        EnvTab.Containers -> Containers(serverId, endpointId)
+        EnvTab.Images -> Images(serverId, endpointId)
+        EnvTab.Volumes -> Volumes(serverId, endpointId)
+        EnvTab.Networks -> Networks(serverId, endpointId)
+    }
+    navigate(route) {
+        popUpTo(Containers(serverId, endpointId)) { inclusive = false }
+        launchSingleTop = true
     }
 }

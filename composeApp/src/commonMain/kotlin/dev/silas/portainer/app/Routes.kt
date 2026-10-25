@@ -28,3 +28,21 @@ data class RegistryEdit(val serverId: String, val registryId: Int?)
 
 @Serializable
 object About
+
+@Serializable
+data class Images(val serverId: String, val endpointId: Int)
+
+@Serializable
+data class ImageDetail(val serverId: String, val endpointId: Int, val imageId: String)
+
+@Serializable
+data class Volumes(val serverId: String, val endpointId: Int)
+
+@Serializable
+data class VolumeDetail(val serverId: String, val endpointId: Int, val name: String)
+
+@Serializable
+data class Networks(val serverId: String, val endpointId: Int)
+
+@Serializable
+data class NetworkDetail(val serverId: String, val endpointId: Int, val networkId: String)
