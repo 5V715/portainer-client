@@ -60,8 +60,10 @@ class EditorFinishTest {
     private var failStart = false
     private var cleanupGate: CompletableDeferred<Unit>? = null
     private var createGate: CompletableDeferred<Unit>? = null
+    @kotlin.concurrent.Volatile private var inspectGate: CompletableDeferred<Unit>? = null
     private var listedName = "db"
     private var running = true
+    private var imageVolume = ""
     private var labels = "{}"
     private var registries = "[]"
     private val pullAuth = MutableStateFlow(emptyList<String?>())
@@ -73,7 +75,7 @@ class EditorFinishTest {
       "State":{"Status":"${if (running) "running" else "exited"}","Running":$running},
       "Config":{"Image":"$image","Hostname":"abcdef123456","Env":["A=1"],"ExposedPorts":{"80/tcp":{}},"Labels":$labels},
       "HostConfig":{"NetworkMode":"front","PortBindings":$ports,"Binds":["data:/data"],"RestartPolicy":{"Name":"always","MaximumRetryCount":0}},
-      "Mounts":[{"Type":"volume","Name":"data","Destination":"/data"}],
+      "Mounts":[{"Type":"volume","Name":"data","Destination":"/data"}$imageVolume],
       "NetworkSettings":{"Networks":{
         "front":{"NetworkID":"n2","Aliases":["web","abcdef123456"],"IPAMConfig":{"IPv4Address":"172.20.0.5"},"MacAddress":"02:42:ac:14:00:05"}
       }}
@@ -101,7 +103,10 @@ class EditorFinishTest {
         val short = path.substringAfter("/docker", path)
         requestLog.update { it + "${r.method.value} $short" }
         return when {
-            path.endsWith("/containers/abc/json") || path.endsWith("/containers/$fullId/json") -> respond(inspect(), HttpStatusCode.OK, json)
+            path.endsWith("/containers/abc/json") || path.endsWith("/containers/$fullId/json") -> {
+                inspectGate?.await()
+                respond(inspect(), HttpStatusCode.OK, json)
+            }
             path.endsWith("/containers/ddd000/json") -> respond(stoppedInspect, HttpStatusCode.OK, json)
             path.endsWith("/containers/json") -> respond(list(), HttpStatusCode.OK, json)
             path.endsWith("/images/sha256:old/json") -> respond("""{"Config":{"Env":[]}}""", HttpStatusCode.OK, json)
@@ -406,6 +411,26 @@ class EditorFinishTest {
     }
 
     @Test
+    fun afterAReplaceStartsTheEditorIsBackOnTheFormWithTheEdits() = runTest {
+        failCreate = true
+        val env = env()
+        val vm = loaded(env)
+        vm.updatePort(0, PortDraft("", "9090", "80", "tcp"))
+        reviewing(vm, FinishAction.Replace)
+        vm.confirm()
+        settle { vm.state.value.navigation != null }
+        assertEquals(EditorNavigation.ReplaceStarted, vm.state.value.navigation)
+        vm.navigated()
+        assertNull(vm.state.value.navigation)
+        assertNull(vm.state.value.finish, "Back from the failed Replace's progress shows the form")
+        assertEquals(PortDraft("", "9090", "80", "tcp"), vm.state.value.draft.ports[0])
+        val progress = env.container.recreateSessions.progress(SessionKey("s1", 1, "abc"))
+        settle { progress.value?.result != null }
+        assertNull(vm.state.value.finish)
+        assertEquals(PortDraft("", "9090", "80", "tcp"), vm.state.value.draft.ports[0])
+    }
+
+    @Test
     fun replaceIsRefusedWhileAContainersCleanupRuns() = runTest {
         val env = env()
         val gate = CompletableDeferred<Unit>()
@@ -456,6 +481,24 @@ class EditorFinishTest {
         val host = body().getValue("HostConfig").jsonObject
         assertEquals("7070", host.getValue("PortBindings").jsonObject.getValue("80/tcp").jsonArray[0].jsonObject.getValue("HostPort").jsonPrimitive.content)
         assertEquals("unless-stopped", host.getValue("RestartPolicy").jsonObject.getValue("Name").jsonPrimitive.content)
+    }
+
+    @Test
+    fun aCancelledCheckNeverOverwritesTheFormOrANewerCheck() = runTest {
+        val vm = loaded(env())
+        val gate = CompletableDeferred<Unit>()
+        inspectGate = gate
+        assertTrue(vm.finish(FinishAction.Copy))
+        settle { requests.count { it == "GET /containers/abc/json" } == 2 }
+        vm.backToForm()
+        assertNull(vm.state.value.finish)
+        gate.complete(Unit)
+        settle { true }
+        assertNull(vm.state.value.finish, "the cancelled check stays silent")
+
+        inspectGate = null
+        val review = reviewing(vm, FinishAction.Copy)
+        assertEquals("web-copy", review.name)
     }
 
     @Test
@@ -565,6 +608,23 @@ class EditorFinishTest {
         val review = reviewing(vm, FinishAction.Replace)
         assertTrue(review.blocking.isEmpty())
         assertTrue(review.warnings.any { it.contains("stopped container db") }, "${review.warnings}")
+    }
+
+    @Test
+    fun aRowOnAnImageVolumePathSaysTheAnonymousVolumeIsNoLongerUsedOnReplaceOnly() = runTest {
+        imageVolume = """,{"Type":"volume","Name":"${"a".repeat(64)}","Destination":"/cache"}"""
+        val vm = loaded(env())
+        assertEquals(listOf("/cache"), vm.state.value.anonymousVolumes)
+        vm.addMount()
+        val last = vm.state.value.draft.mounts.lastIndex
+        vm.updateMount(last, vm.state.value.draft.mounts[last].copy(source = "cache-vol", target = "/cache"))
+        val line = "The existing anonymous volume at /cache will no longer be used."
+        assertTrue(line in reviewing(vm, FinishAction.Replace).warnings, "${vm.state.value.finish}")
+        vm.backToForm()
+        assertTrue(line !in reviewing(vm, FinishAction.Copy).warnings)
+        vm.backToForm()
+        vm.updateMount(last, vm.state.value.draft.mounts[last].copy(target = "/other"))
+        assertTrue(line !in reviewing(vm, FinishAction.Replace).warnings)
     }
 
     @Test

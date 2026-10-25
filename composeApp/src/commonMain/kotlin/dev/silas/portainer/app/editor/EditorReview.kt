@@ -249,7 +249,14 @@ internal fun buildReview(
         }
     }
     val start = if (copy) copyStart ?: plan.wasRunning else plan.wasRunning
-    val review = review(ctx, plan.containerName, copy, summaryLines(plan.changes), plan.warnings.map(::warningText), conflicts, blocking, start, copy)
+    // Replace: a form row on an image VOLUME's path takes the place of its anonymous volume (a copy never reuses it).
+    val unusedAnonymous = if (copy) {
+        emptyList()
+    } else {
+        anonymousVolumeTargets(fresh, ctx.freshBefore?.mounts.orEmpty()).filter { t -> form.mounts.any { it.target == t } }
+    }
+    val warnings = plan.warnings.map(::warningText) + unusedAnonymous.map { "The existing anonymous volume at $it will no longer be used." }
+    val review = review(ctx, plan.containerName, copy, summaryLines(plan.changes), warnings, conflicts, blocking, start, copy)
     val request = if (copy) {
         DeployRequest(plan.containerName, plan.createBody, plan.extraNetworks, plan.image, plan.pull, plan.registryId, start = start)
     } else {

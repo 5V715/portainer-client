@@ -28,6 +28,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -396,8 +397,11 @@ class EditorViewModel(
             val phase = try {
                 check(action)
             } catch (e: Exception) {
+                // Rethrows the CancellationException of a cancelled check (Back, or a new check started).
                 FinishPhase.Failed(action, failureMessage(e))
             }
+            // A check cancelled after its last request never overwrites the form or a newer check.
+            ensureActive()
             _state.update { if (it.finish is FinishPhase.Checking) it.copy(finish = phase) else it }
         }
         return true
@@ -539,8 +543,9 @@ class EditorViewModel(
             val refused = try {
                 if (review.action == FinishAction.Replace) startReplace(checkNotNull(built.plan)) else startDeploy(checkNotNull(built.request))
             } catch (e: Exception) {
-                failureMessage(e)
+                failureMessage(e) // rethrows when this confirm was cancelled
             }
+            ensureActive()
             if (refused != null) {
                 _state.update { s ->
                     val r = s.finish as? FinishPhase.Review ?: return@update s
@@ -606,7 +611,17 @@ class EditorViewModel(
 
     /** The screen performed [EditorState.navigation]; a finished deploy's result is acknowledged. */
     fun navigated() {
+        val replaced = _state.value.navigation == EditorNavigation.ReplaceStarted
         _state.update { it.copy(navigation = null) }
+        if (replaced) {
+            // The editor stays under the progress: Back from a failed Replace returns to the form with the edits
+            // (a successful one navigates past the editor).
+            checkJob?.cancel()
+            reviewContext = null
+            built = null
+            _state.update { it.copy(finish = null) }
+            return
+        }
         val key = deployKey ?: return
         if (container.deploySessions.progress(key).value?.result != null) detach()
     }

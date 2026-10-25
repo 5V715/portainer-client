@@ -282,10 +282,11 @@ private fun AppNavHost(container: AppContainer) {
             }
             EditorScreen(
                 viewModel = vm,
-                // Back from the progress goes to where the editor was opened from.
+                // The editor stays below the progress: Back from a failed Replace returns to the form with the edits.
+                // A successful one pops past it (Recreate's onSucceeded pops up to the old container's detail).
                 onReplaceStarted = {
                     val id = checkNotNull(route.containerId)
-                    nav.navigate(Recreate(route.serverId, route.endpointId, id)) { popUpTo(route) { inclusive = true } }
+                    nav.navigate(Recreate(route.serverId, route.endpointId, id))
                 },
                 onOpenContainer = { id ->
                     nav.navigate(ContainerDetail(route.serverId, route.endpointId, id)) { popUpTo(route) { inclusive = true } }
