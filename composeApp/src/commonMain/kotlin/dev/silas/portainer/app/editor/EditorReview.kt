@@ -58,8 +58,11 @@ sealed interface FinishPhase {
         val blocking: List<Conflict>,
         val blocked: String?,
         val notice: String?,
-        /** Copy / Create: whether the new container is started. */
+        /** Copy / Create: whether the new container is started; [startEditable] for a copy (default: as the original). */
         val start: Boolean,
+        val startEditable: Boolean = false,
+        /** Sections the user edited that also changed outside the editor ([EditorViewModel.reloadCurrent]). */
+        val stale: Set<FormField> = emptySet(),
         val starting: Boolean = false,
     ) : FinishPhase {
         val canConfirm get() = blocked == null && nameError == null && blocking.isEmpty() && !starting
@@ -172,8 +175,9 @@ internal class ReviewContext(
     val inputs: ConflictInputs,
     val notice: String?,
     val blocked: String?,
+    val stale: Set<FormField> = emptySet(),
 ) {
-    fun with(inputs: ConflictInputs) = ReviewContext(action, fresh, imageConfig, freshBefore, inputs, notice, blocked)
+    fun with(inputs: ConflictInputs) = ReviewContext(action, fresh, imageConfig, freshBefore, inputs, notice, blocked, stale)
 }
 
 internal val NO_INPUTS = ConflictInputs(emptyList(), emptyList(), emptyMap())
@@ -185,7 +189,14 @@ internal class BuiltReview(val review: FinishPhase.Review, val plan: RecreatePla
  * Builds the review for [ctx] from the editor state [s]. Replace / Copy merge the form onto the fresh inspect
  * (`original` = that inspect) and plan it; Create builds the body from the form alone.
  */
-internal fun buildReview(ctx: ReviewContext, s: EditorState, name: String, typedMacs: Set<String>, typedAliases: Set<String>): BuiltReview {
+internal fun buildReview(
+    ctx: ReviewContext,
+    s: EditorState,
+    name: String,
+    typedMacs: Set<String>,
+    typedAliases: Set<String>,
+    copyStart: Boolean? = null,
+): BuiltReview {
     val fresh = ctx.fresh
     if (ctx.action == FinishAction.Create || fresh == null) {
         val form = s.form
@@ -193,7 +204,7 @@ internal fun buildReview(ctx: ReviewContext, s: EditorState, name: String, typed
         val extras = NewContainerBuilder.extraNetworks(form)
         val conflicts = ctx.inputs.check(body, extras, name, excludeContainerId = null)
         val request = DeployRequest(name, body, extras, ImageRef.parse(form.image), s.pull, s.registryId, s.startAfterCreate)
-        val review = review(ctx, name, nameEditable = false, newContainerLines(form), emptyList(), conflicts, conflicts.filter { it.blocking }, s.startAfterCreate)
+        val review = review(ctx, name, nameEditable = false, newContainerLines(form), emptyList(), conflicts, conflicts.filter { it.blocking }, s.startAfterCreate, false)
         return BuiltReview(review, null, request)
     }
     val copy = ctx.action == FinishAction.Copy
@@ -211,13 +222,20 @@ internal fun buildReview(ctx: ReviewContext, s: EditorState, name: String, typed
     val plan = planned.copy(changes = planned.changes.copy(otherChanges = other))
     val excluded = if (copy) null else (fresh["Id"] as? JsonPrimitive)?.content
     val all = ctx.inputs.check(plan.createBody, plan.extraNetworks, plan.containerName, excluded)
-    // Replace: the container already uses its volumes, and a clash only makes the start fail (the original is
-    // then restored), so only a name that can't be created blocks.
+    // Replace: the container already uses its volumes. A port / IP clash only matters when the new container is
+    // started (the original was running) next to a running holder; the start would fail and roll back.
     val conflicts = if (copy) all else all.filterNot { it is Conflict.SharedNamedVolume }
-    val blocking = if (copy) conflicts.filter { it.blocking } else conflicts.filterIsInstance<Conflict.NameTaken>()
-    val review = review(ctx, plan.containerName, copy, summaryLines(plan.changes), plan.warnings.map(::warningText), conflicts, blocking, plan.wasRunning)
+    val blocking = if (copy) {
+        conflicts.filter { it.blocking }
+    } else {
+        conflicts.filter {
+            it is Conflict.NameTaken || plan.wasRunning && (it is Conflict.FixedIpInUse || it is Conflict.HostPortInUse && it.running)
+        }
+    }
+    val start = if (copy) copyStart ?: plan.wasRunning else plan.wasRunning
+    val review = review(ctx, plan.containerName, copy, summaryLines(plan.changes), plan.warnings.map(::warningText), conflicts, blocking, start, copy)
     val request = if (copy) {
-        DeployRequest(plan.containerName, plan.createBody, plan.extraNetworks, plan.image, plan.pull, plan.registryId, start = plan.wasRunning)
+        DeployRequest(plan.containerName, plan.createBody, plan.extraNetworks, plan.image, plan.pull, plan.registryId, start = start)
     } else {
         null
     }
@@ -233,6 +251,7 @@ private fun review(
     conflicts: List<Conflict>,
     blocking: List<Conflict>,
     start: Boolean,
+    startEditable: Boolean,
 ) = FinishPhase.Review(
     action = ctx.action,
     name = name,
@@ -245,6 +264,8 @@ private fun review(
     blocked = ctx.blocked,
     notice = ctx.notice,
     start = start,
+    startEditable = startEditable,
+    stale = ctx.stale,
 )
 
 /** Create: what the new container gets (the image, then each section the form sets). */
@@ -265,4 +286,36 @@ private val FIELD_LABELS = mapOf(
 /** The user edited [fields] that also changed outside the editor: applying the edits would work on stale settings. */
 internal fun staleEditsMessage(fields: Set<FormField>): String =
     "Changed outside the editor since you opened it: ${FormField.entries.filter { it in fields }.joinToString { FIELD_LABELS.getValue(it) }}. " +
-        "Go back and open the editor again to edit the container's current settings."
+        "Reload the current settings to continue: your edits in these sections will be lost (your other edits are kept)."
+
+/** [base] with the sections [fields] taken from [edited]: carries edits over onto a reloaded form. */
+internal fun withSections(base: ContainerForm, edited: ContainerForm, fields: Set<FormField>): ContainerForm {
+    var f = base
+    for (field in fields) {
+        f = when (field) {
+            FormField.Image -> f.copy(image = edited.image)
+            FormField.Name -> f.copy(name = edited.name)
+            FormField.Command -> f.copy(command = edited.command)
+            FormField.Entrypoint -> f.copy(entrypoint = edited.entrypoint)
+            FormField.WorkingDir -> f.copy(workingDir = edited.workingDir)
+            FormField.User -> f.copy(user = edited.user)
+            FormField.Ports -> f.copy(ports = edited.ports, publishAll = edited.publishAll)
+            FormField.Mounts -> f.copy(mounts = edited.mounts)
+            FormField.Networks -> f.copy(
+                primaryNetwork = edited.primaryNetwork,
+                extraNetworks = edited.extraNetworks,
+                networkModeReadOnly = edited.networkModeReadOnly,
+            )
+            FormField.Env -> f.copy(env = edited.env)
+            FormField.Labels -> f.copy(labels = edited.labels)
+            FormField.Restart -> f.copy(restart = edited.restart)
+            FormField.Resources -> f.copy(
+                memoryBytes = edited.memoryBytes,
+                memoryReservationBytes = edited.memoryReservationBytes,
+                nanoCpus = edited.nanoCpus,
+                cpuShares = edited.cpuShares,
+            )
+        }
+    }
+    return f
+}

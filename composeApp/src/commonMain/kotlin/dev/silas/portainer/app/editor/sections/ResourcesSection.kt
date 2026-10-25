@@ -8,7 +8,7 @@ import dev.silas.portainer.app.editor.EditorViewModel
 
 @Composable
 fun ResourcesSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onToggle: () -> Unit) {
-    val enabled = !state.readOnly
+    val enabled = state.editable
     val d = state.draft
     val summary = listOfNotNull(
         d.memory.takeIf { it.isNotBlank() }?.let { "Memory $it" },

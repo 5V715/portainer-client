@@ -70,8 +70,9 @@ fun EditorScreen(
     // Image and name open by default; sections with errors open when the user tries to continue.
     var expanded by rememberSaveable { mutableStateOf(listOf(EditorSection.Image.name, EditorSection.General.name)) }
     val finishPhase = state.finish
-    // A running deploy carries on without the screen, so leaving needs no confirmation then.
-    val deploying = finishPhase is FinishPhase.Deploying
+    // A running deploy carries on without the screen, so leaving needs no confirmation then. Once it has a
+    // result, back acknowledges it (to the form after a failure, to the container after a success).
+    val deploying = finishPhase is FinishPhase.Deploying && finishPhase.progress.result == null
     val unsaved = state.hasUnsavedChanges && !deploying
     val back = {
         when {
@@ -111,6 +112,11 @@ fun EditorScreen(
         bottomBar = { if (state.phase == EditorPhase.Ready && finishPhase == null) ActionBar(state, viewModel, ::finish) },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
+            // A deploy from this source found when the editor opened is shown even before the form has loaded.
+            if (finishPhase is FinishPhase.Deploying) {
+                EditorReviewPane(finishPhase, viewModel)
+                return@Box
+            }
             when (val phase = state.phase) {
                 EditorPhase.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                 is EditorPhase.Error -> Text(phase.message, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
@@ -118,7 +124,7 @@ fun EditorScreen(
                     Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    state.readOnlyMessage?.let { ReadOnlyBanner(it) }
+                    state.protectedMessage?.let { ProtectedBanner(it) }
                     fun open(s: EditorSection) = s.name in expanded
                     ImageSection(state, viewModel, open(EditorSection.Image)) { toggle(EditorSection.Image.name) }
                     GeneralSection(state, viewModel, open(EditorSection.General)) { toggle(EditorSection.General.name) }
@@ -154,12 +160,12 @@ fun EditorScreen(
 }
 
 @Composable
-private fun ReadOnlyBanner(message: String) {
+private fun ProtectedBanner(message: String) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(message, color = MaterialTheme.colorScheme.onErrorContainer)
             Text(
-                "The form is read-only. You can still deploy a copy.",
+                "Replace isn't available. You can still edit the form and deploy a copy.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onErrorContainer,
             )

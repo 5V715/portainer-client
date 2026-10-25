@@ -21,7 +21,7 @@ import dev.silas.portainer.app.editor.envValue
 
 @Composable
 fun EnvSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onToggle: () -> Unit) {
-    val enabled = !state.readOnly
+    val enabled = state.editable
     val env = state.draft.env
     SectionCard("Environment variables", countSummary(env.size, "variable"), expanded, onToggle, state.visibleErrors(EditorSection.Env)) {
         env.forEachIndexed { i, entry ->

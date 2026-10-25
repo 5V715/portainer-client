@@ -10,7 +10,7 @@ private val POLICIES = listOf("no" to "No", "always" to "Always", "on-failure" t
 
 @Composable
 fun RestartSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onToggle: () -> Unit) {
-    val enabled = !state.readOnly
+    val enabled = state.editable
     val d = state.draft
     val summary = POLICIES.firstOrNull { it.first == d.restartName }?.second ?: d.restartName
     SectionCard("Restart policy", summary, expanded, onToggle, state.visibleErrors(EditorSection.Restart)) {

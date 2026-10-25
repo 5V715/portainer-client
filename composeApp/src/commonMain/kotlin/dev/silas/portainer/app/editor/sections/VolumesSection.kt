@@ -33,7 +33,7 @@ internal fun mountSource(row: MountRow) = when (row.type) {
 
 @Composable
 fun VolumesSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onToggle: () -> Unit) {
-    val enabled = !state.readOnly
+    val enabled = state.editable
     val mounts = state.draft.mounts
     val summary = when {
         mounts.isEmpty() && state.anonymousVolumes.isEmpty() -> "None"

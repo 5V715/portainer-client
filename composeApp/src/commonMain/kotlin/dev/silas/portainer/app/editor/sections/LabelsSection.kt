@@ -9,7 +9,7 @@ import dev.silas.portainer.app.editor.EditorViewModel
 
 @Composable
 fun LabelsSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onToggle: () -> Unit) {
-    val enabled = !state.readOnly
+    val enabled = state.editable
     val labels = state.draft.labels
     SectionCard("Labels", countSummary(labels.size, "label"), expanded, onToggle, state.visibleErrors(EditorSection.Labels)) {
         labels.forEachIndexed { i, (key, value) ->

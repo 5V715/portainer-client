@@ -11,7 +11,7 @@ private const val ARGS_HINT = "Empty = image default. Quote arguments that conta
 /** Name, command, entrypoint, working directory and user. */
 @Composable
 fun GeneralSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onToggle: () -> Unit) {
-    val enabled = !state.readOnly
+    val enabled = state.editable
     val d = state.draft
     SectionCard("Name & command", d.name.ifEmpty { "Generated name" }, expanded, onToggle, state.visibleErrors(EditorSection.General)) {
         FormTextField(

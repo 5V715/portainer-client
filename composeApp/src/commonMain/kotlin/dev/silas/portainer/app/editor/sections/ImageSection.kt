@@ -10,10 +10,10 @@ import dev.silas.portainer.core.recreate.isProtectedImage
 
 @Composable
 fun ImageSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onToggle: () -> Unit) {
-    val enabled = !state.readOnly
+    val enabled = state.editable
     SectionCard("Image", state.draft.image, expanded, onToggle, state.visibleErrors(EditorSection.Image)) {
         FormTextField(state.draft.image, vm::setImage, "Image", enabled, mono = true, placeholder = "nginx:latest")
-        if (state.mode == EditorMode.Edit && !state.readOnly && isProtectedImage(state.form.image)) {
+        if (state.mode == EditorMode.Edit && state.protectedMessage == null && isProtectedImage(state.form.image)) {
             HintText("Replace isn't available for a Portainer image; deploy a copy instead.")
         }
         SwitchRow("Pull image", state.pull, enabled, vm::setPull)

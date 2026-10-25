@@ -27,6 +27,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -59,13 +61,16 @@ class EditorFinishTest {
     private var cleanupGate: CompletableDeferred<Unit>? = null
     private var createGate: CompletableDeferred<Unit>? = null
     private var listedName = "db"
+    private var labels = "{}"
+    private var registries = "[]"
+    private val pullAuth = MutableStateFlow(emptyList<String?>())
 
     private val fullId = "abcdef1234567890aaaa"
 
     private fun inspect() = """{
       "Id":"$fullId","Name":"/web","Image":"sha256:old",
       "State":{"Status":"running","Running":true},
-      "Config":{"Image":"$image","Hostname":"abcdef123456","Env":["A=1"],"ExposedPorts":{"80/tcp":{}}},
+      "Config":{"Image":"$image","Hostname":"abcdef123456","Env":["A=1"],"ExposedPorts":{"80/tcp":{}},"Labels":$labels},
       "HostConfig":{"NetworkMode":"front","PortBindings":$ports,"Binds":["data:/data"],"RestartPolicy":{"Name":"always","MaximumRetryCount":0}},
       "Mounts":[{"Type":"volume","Name":"data","Destination":"/data"}],
       "NetworkSettings":{"Networks":{
@@ -78,7 +83,9 @@ class EditorFinishTest {
        "Mounts":[{"Type":"volume","Name":"data"}],"NetworkSettings":{"Networks":{"front":{}}},
        "Ports":[{"IP":"0.0.0.0","PrivatePort":80,"PublicPort":8080,"Type":"tcp"}]},
       {"Id":"ddd000","Names":["/$listedName"],"Image":"postgres","State":"exited","Status":"Exited",
-       "Mounts":[{"Type":"volume","Name":"data"}]}
+       "Mounts":[{"Type":"volume","Name":"data"}]},
+      {"Id":"ccc000","Names":["/cache"],"Image":"redis","State":"running","Status":"Up",
+       "Ports":[{"IP":"0.0.0.0","PrivatePort":6379,"PublicPort":7000,"Type":"tcp"}]}
     ]"""
 
     private val stoppedInspect = """{"Id":"ddd000","Name":"/db","HostConfig":{"PortBindings":{"5432/tcp":[{"HostIp":"","HostPort":"5432"}]}}}"""
@@ -95,11 +102,14 @@ class EditorFinishTest {
             path.endsWith("/containers/ddd000/json") -> respond(stoppedInspect, HttpStatusCode.OK, json)
             path.endsWith("/containers/json") -> respond(list(), HttpStatusCode.OK, json)
             path.endsWith("/images/sha256:old/json") -> respond("""{"Config":{"Env":[]}}""", HttpStatusCode.OK, json)
-            path.endsWith("/api/registries") -> respond("[]", HttpStatusCode.OK, json)
+            path.endsWith("/api/registries") -> respond(registries, HttpStatusCode.OK, json)
             path.endsWith("/volumes") -> respond("""{"Volumes":[{"Name":"data","Driver":"local"}]}""", HttpStatusCode.OK, json)
             path.endsWith("/networks") -> respond("""[{"Id":"n2","Name":"front","Driver":"bridge"}]""", HttpStatusCode.OK, json)
             path.endsWith("/networks/front") -> respond(frontNetwork, HttpStatusCode.OK, json)
-            path.endsWith("/images/create") -> respond("""{"status":"done"}""", HttpStatusCode.OK, json)
+            path.endsWith("/images/create") -> {
+                pullAuth.update { it + r.headers["X-Registry-Auth"] }
+                respond("""{"status":"Downloading","id":"l1","progress":"[==>  ] 1MB/2MB"}""", HttpStatusCode.OK, json)
+            }
             path.endsWith("/containers/create") -> {
                 val body = (r.body as? OutgoingContent.ByteArrayContent)?.bytes()?.decodeToString().orEmpty()
                 createLog.update { it + (r.url.parameters["name"].orEmpty() to body) }
@@ -216,15 +226,24 @@ class EditorFinishTest {
     }
 
     @Test
-    fun copyOfAProtectedContainerIsAllowedWithTheReviewName() = runTest {
+    fun protectedContainerCopyIsConfirmableOnceItsPortAndIpMoveAndReplaceStaysRefused() = runTest {
         image = "portainer/portainer-ce:2.21"
         val vm = loaded(env())
-        assertTrue(vm.state.value.readOnly)
+        assertNotNull(vm.state.value.protectedMessage)
         assertFalse(vm.state.value.canReplace)
-        // The form is read-only, so ports / IP can't be moved: use a stopped-holder-free setup by checking the plan only.
+        assertFalse(vm.finish(FinishAction.Replace))
+        assertNull(vm.state.value.finish)
+
+        vm.updatePort(0, PortDraft("", "9090", "80", "tcp"))
+        vm.updateNetwork(0, vm.state.value.draft.networks[0].copy(ipv4 = "172.20.0.99"))
         val review = reviewing(vm, FinishAction.Copy)
         assertEquals("web-copy", review.name)
         assertNull(review.blocked)
+        assertTrue(review.blocking.isEmpty(), "${review.blocking}")
+        assertTrue(review.canConfirm)
+        vm.confirm()
+        settle { vm.state.value.navigation != null }
+        assertTrue(touchesOriginal().isEmpty())
     }
 
     @Test
@@ -267,7 +286,7 @@ class EditorFinishTest {
     fun deploySurvivesTheViewModelAndRefusesASecondRunForTheSameName() = runTest {
         val env = env()
         val sessions = env.container.deploySessions
-        val key = DeployKey("s1", 1, "x")
+        val key = DeployKey("s1", 1, NEW_SOURCE, "x")
         val gate = CompletableDeferred<Unit>()
         createGate = gate
         val request = DeployRequest(
@@ -417,5 +436,196 @@ class EditorFinishTest {
         vm.backToForm()
         vm.setName("other")
         assertEquals("other", vm.state.value.draft.name)
+    }
+
+    // ---- fix round 1 ----
+
+    /** Starts a copy that moved off the original's port and IP; returns its view model. */
+    private suspend fun TestScope.copyStarted(env: TestEnv): EditorViewModel {
+        val vm = loaded(env)
+        vm.updatePort(0, PortDraft("", "9090", "80", "tcp"))
+        vm.updateNetwork(0, vm.state.value.draft.networks[0].copy(ipv4 = ""))
+        reviewing(vm, FinishAction.Copy)
+        vm.confirm()
+        settle { vm.state.value.finish is FinishPhase.Deploying }
+        return vm
+    }
+
+    @Test
+    fun aDeployThatFailsAfterTheUserLeftIsShownWhenTheEditorOpensAgain() = runTest {
+        val env = env()
+        failStart = true
+        val gate = CompletableDeferred<Unit>().also { createGate = it }
+        copyStarted(env) // the user leaves while Create is in flight
+        gate.complete(Unit)
+        settle { env.container.deploySessions.find("s1", 1, "abc")?.let { env.container.deploySessions.progress(it).value?.result } != null }
+
+        val again = EditorViewModel(env.container, "s1", 1, "abc")
+        settle { again.state.value.phase == EditorPhase.Ready }
+        val shown = assertIs<FinishPhase.Deploying>(again.state.value.finish)
+        val failure = assertIs<DeployResult.Failure>(shown.progress.result)
+        assertEquals("new1", failure.createdId)
+        assertTrue(deployFailureText(shown.progress).contains("was created"))
+        assertNull(again.state.value.navigation)
+
+        // Acknowledging it goes back to the form and forgets it; a New editor never sees a copy's deploy.
+        again.backToForm()
+        assertNull(again.state.value.finish)
+        assertNull(env.container.deploySessions.find("s1", 1, "abc"))
+        val other = EditorViewModel(env.container, "s1", 1, null)
+        settle { other.state.value.phase == EditorPhase.Ready }
+        assertNull(other.state.value.finish)
+    }
+
+    @Test
+    fun aRunningDeployIsShownAgainAndOpensItsContainerWhenDone() = runTest {
+        val env = env()
+        val gate = CompletableDeferred<Unit>().also { createGate = it }
+        copyStarted(env)
+        val again = EditorViewModel(env.container, "s1", 1, "abc")
+        settle { (again.state.value.finish as? FinishPhase.Deploying)?.progress?.result == null && again.state.value.finish != null }
+        gate.complete(Unit)
+        settle { again.state.value.navigation != null }
+        assertEquals(EditorNavigation.OpenContainer("new1"), again.state.value.navigation)
+        again.navigated()
+        assertNull(env.container.deploySessions.find("s1", 1, "abc"))
+    }
+
+    @Test
+    fun backOnAFailedDeployGoesToTheFormWithTheEditsKept() = runTest {
+        failStart = true
+        val vm = copyStarted(env())
+        settle { (vm.state.value.finish as? FinishPhase.Deploying)?.progress?.result != null }
+        vm.backToForm()
+        assertNull(vm.state.value.finish)
+        assertEquals("9090", vm.state.value.form.ports[0].hostPort)
+        assertTrue(vm.state.value.hasUnsavedChanges)
+    }
+
+    @Test
+    fun backOnAFinishedDeployFoundLaterOpensTheContainer() = runTest {
+        val env = env()
+        val gate = CompletableDeferred<Unit>().also { createGate = it }
+        val first = copyStarted(env)
+        // Simulate leaving: the first editor stops listening, the deploy finishes without anyone watching.
+        first.viewModelScope.cancel()
+        gate.complete(Unit)
+        settle { env.container.deploySessions.find("s1", 1, "abc")?.let { env.container.deploySessions.progress(it).value?.result } != null }
+        val again = EditorViewModel(env.container, "s1", 1, "abc")
+        settle { (again.state.value.finish as? FinishPhase.Deploying)?.progress?.result != null }
+        assertNull(again.state.value.navigation, "a result found later waits for the user")
+        again.backToForm()
+        assertEquals(EditorNavigation.OpenContainer("new1"), again.state.value.navigation)
+    }
+
+    @Test
+    fun replaceBlocksAPortHeldByARunningContainerWhenTheOriginalRuns() = runTest {
+        val vm = loaded(env())
+        vm.updatePort(0, PortDraft("", "7000", "80", "tcp"))
+        val review = reviewing(vm, FinishAction.Replace)
+        assertTrue(review.blocking.any { it is Conflict.HostPortInUse && it.byContainer == "cache" }, "${review.blocking}")
+        assertFalse(review.canConfirm)
+    }
+
+    @Test
+    fun replaceOnlyWarnsAboutAStoppedHoldersPort() = runTest {
+        val vm = loaded(env())
+        vm.updatePort(0, PortDraft("", "5432", "80", "tcp"))
+        val review = reviewing(vm, FinishAction.Replace)
+        assertTrue(review.blocking.isEmpty())
+        assertTrue(review.warnings.any { it.contains("stopped container db") }, "${review.warnings}")
+    }
+
+    @Test
+    fun reloadCurrentSettingsKeepsEditsOfSectionsThatDidNotChangeOutside() = runTest {
+        val vm = loaded(env())
+        vm.updatePort(0, PortDraft("", "9090", "80", "tcp"))
+        vm.setRestartPolicy("unless-stopped")
+        ports = """{"80/tcp":[{"HostIp":"","HostPort":"7070"}]}"""
+        val review = reviewing(vm, FinishAction.Replace)
+        assertTrue(review.blocked!!.contains("will be lost"), review.blocked)
+        assertEquals(setOf(dev.silas.portainer.core.editor.FormField.Ports), review.stale)
+
+        vm.reloadCurrent()
+        val s = vm.state.value
+        assertNull(s.finish)
+        assertEquals("7070", s.form.ports[0].hostPort, "the port edit is replaced by the current setting")
+        assertEquals("7070", s.before.ports[0].hostPort)
+        assertEquals("unless-stopped", s.form.restart.name, "the restart edit is kept")
+        assertEquals(setOf(dev.silas.portainer.core.editor.FormField.Restart), s.dirty)
+
+        val again = reviewing(vm, FinishAction.Replace)
+        assertNull(again.blocked)
+        assertTrue(again.canConfirm)
+    }
+
+    @Test
+    fun copyStartSwitchDefaultsToTheOriginalsStateAndCanBeTurnedOff() = runTest {
+        val vm = loaded(env())
+        vm.updatePort(0, PortDraft("", "9090", "80", "tcp"))
+        vm.updateNetwork(0, vm.state.value.draft.networks[0].copy(ipv4 = ""))
+        val review = reviewing(vm, FinishAction.Copy)
+        assertTrue(review.startEditable)
+        assertTrue(review.start)
+        vm.setDeployStart(false)
+        assertFalse(assertIs<FinishPhase.Review>(vm.state.value.finish).start)
+        vm.confirm()
+        settle { vm.state.value.navigation != null }
+        assertTrue(requests.none { it.endsWith("/start") }, "$requests")
+    }
+
+    @Test
+    fun copyPullUsesTheChosenRegistryAndShowsPullProgress() = runTest {
+        registries = """[{"Id":7,"Name":"GitHub","Type":8,"URL":"ghcr.io","Authentication":true,"Username":"me"}]"""
+        val env = env()
+        val vm = loaded(env)
+        vm.updatePort(0, PortDraft("", "9090", "80", "tcp"))
+        vm.updateNetwork(0, vm.state.value.draft.networks[0].copy(ipv4 = ""))
+        vm.setPull(true)
+        vm.setRegistry(7)
+        reviewing(vm, FinishAction.Copy)
+        vm.confirm()
+        settle { vm.state.value.navigation != null }
+        assertEquals(listOf<String?>(dev.silas.portainer.core.registry.registryAuthHeader(7)), pullAuth.value)
+        val key = assertNotNull(env.container.deploySessions.find("s1", 1, "abc"))
+        assertEquals("l1: Downloading [==>  ] 1MB/2MB", env.container.deploySessions.progress(key).value?.pullStatus)
+    }
+
+    @Test
+    fun unnamedNewContainersGetTheirOwnKeys() = runTest {
+        val env = env()
+        val vm = loaded(env, containerId = null)
+        vm.setImage("nginx:1")
+        vm.setStartAfterCreate(false)
+        val review = reviewing(vm, FinishAction.Create)
+        assertEquals("", review.name)
+        vm.confirm()
+        settle { vm.state.value.finish is FinishPhase.Deploying }
+        val key = assertNotNull(env.container.deploySessions.find("s1", 1, NEW_SOURCE))
+        assertTrue(key.id.startsWith("unnamed-"), key.id)
+        settle { vm.state.value.navigation != null }
+        assertEquals("", creates.single().first)
+    }
+
+    @Test
+    fun replaceIsBlockedWhenTheFreshInspectHasAProtectedImage() = runTest {
+        val vm = loaded(env())
+        vm.setRestartPolicy("unless-stopped")
+        image = "portainer/portainer-ce:2.21"
+        val review = reviewing(vm, FinishAction.Replace)
+        assertEquals(dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE, review.blocked)
+        assertFalse(review.canConfirm)
+    }
+
+    @Test
+    fun stackMemberWarningInReplaceButNotInCopy() = runTest {
+        labels = """{"com.docker.compose.project":"shop"}"""
+        val vm = loaded(env())
+        val replace = reviewing(vm, FinishAction.Replace)
+        val stackWarning = dev.silas.portainer.app.recreate.warningText(dev.silas.portainer.core.recreate.RecreateWarning.StackMember("shop"))
+        assertTrue(stackWarning in replace.warnings, "${replace.warnings}")
+        vm.backToForm()
+        val copy = reviewing(vm, FinishAction.Copy)
+        assertTrue(copy.warnings.none { it.contains("stack") }, "${copy.warnings}")
     }
 }

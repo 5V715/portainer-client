@@ -22,7 +22,7 @@ private val PREDEFINED = listOf("bridge", "host", "none")
 
 @Composable
 fun NetworksSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onToggle: () -> Unit) {
-    val enabled = !state.readOnly
+    val enabled = state.editable
     val d = state.draft
     val readOnlyMode = d.networkModeReadOnly
     val summary = readOnlyMode ?: d.networks.joinToString(", ") { it.name }.ifEmpty { "bridge (default)" }

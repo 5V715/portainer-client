@@ -18,7 +18,7 @@ private val PROTOCOLS = listOf("tcp" to "TCP", "udp" to "UDP")
 
 @Composable
 fun PortsSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onToggle: () -> Unit) {
-    val enabled = !state.readOnly
+    val enabled = state.editable
     val ports = state.draft.ports
     val summary = when {
         ports.isEmpty() -> if (state.draft.publishAll) "All exposed ports" else "None published"

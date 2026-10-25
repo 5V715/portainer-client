@@ -16,6 +16,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -65,6 +66,9 @@ private fun Review(r: FinishPhase.Review, vm: EditorViewModel) {
     Text(reviewTitle(r.action), style = MaterialTheme.typography.titleMedium)
     r.notice?.let { Banner(it, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer) }
     r.blocked?.let { Banner(it, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) }
+    if (r.stale.isNotEmpty()) {
+        OutlinedButton(onClick = vm::reloadCurrent, enabled = !r.starting, modifier = Modifier.fillMaxWidth()) { Text("Reload current settings") }
+    }
 
     if (r.nameEditable) {
         OutlinedTextField(
@@ -87,7 +91,12 @@ private fun Review(r: FinishPhase.Review, vm: EditorViewModel) {
     } else {
         r.changes.forEach { Text(it, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium) }
     }
-    if (r.action != FinishAction.Replace) {
+    if (r.startEditable) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Start after creating", Modifier.weight(1f))
+            Switch(checked = r.start, onCheckedChange = vm::setDeployStart, enabled = !r.starting)
+        }
+    } else if (r.action != FinishAction.Replace) {
         Text(
             if (r.start) "The new container will be started." else "The new container will be created but not started.",
             style = MaterialTheme.typography.bodySmall,
@@ -133,7 +142,14 @@ private fun Deploying(p: DeployProgress, vm: EditorViewModel) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(mark, color = tone.color())
-            Text(deployStepLabel(s.step))
+            Column {
+                Text(deployStepLabel(s.step))
+                if (s.step == DeployStep.Pull && s.status == StepStatus.Active) {
+                    p.pullStatus?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
         }
     }
     when (result) {
@@ -142,7 +158,9 @@ private fun Deploying(p: DeployProgress, vm: EditorViewModel) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        is DeployResult.Success -> Unit
+        is DeployResult.Success -> Button(onClick = vm::backToForm, modifier = Modifier.fillMaxWidth()) {
+            Text("Open ${p.name.ifEmpty { "the container" }}")
+        }
         is DeployResult.Failure -> {
             result.step?.let { Text("Failed at: ${deployStepLabel(it)}", color = MaterialTheme.colorScheme.error) }
             Text(deployFailureText(p))

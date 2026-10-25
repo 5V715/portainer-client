@@ -182,7 +182,7 @@ class EditorViewModelTest {
         assertEquals("db:10.0.0.5", advanced["Extra hosts"])
         assertEquals("json-file", advanced["Log driver"])
         // Actions
-        assertNull(s.readOnlyMessage)
+        assertNull(s.protectedMessage)
         assertTrue(s.canReplace)
         assertTrue(s.canCopy)
         assertFalse(s.canCreate)
@@ -290,16 +290,18 @@ class EditorViewModelTest {
     }
 
     @Test
-    fun protectedImageOpensReadOnlyWithOnlyCopy() = runTest {
+    fun protectedImageOffersOnlyCopyWithAnEditableForm() = runTest {
         image = "portainer/portainer-ce:latest"
         val vm = loaded()
         val s = vm.state.value
-        assertEquals(PROTECTED_IMAGE_MESSAGE, s.readOnlyMessage)
+        assertEquals(PROTECTED_IMAGE_MESSAGE, s.protectedMessage)
         assertFalse(s.canReplace)
         assertTrue(s.canCopy)
         vm.setName("other")
         vm.updatePort(0, s.draft.ports[0].copy(hostPort = "1"))
-        assertEquals(s.form, vm.state.value.form, "a read-only form ignores edits")
+        assertEquals("other", vm.state.value.form.name, "the form takes edits for a copy")
+        assertEquals("1", vm.state.value.form.ports[0].hostPort)
+        assertTrue(vm.state.value.hasUnsavedChanges)
         assertFalse(vm.review(FinishAction.Replace))
         assertTrue(vm.review(FinishAction.Copy))
     }

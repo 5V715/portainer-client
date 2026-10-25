@@ -72,8 +72,8 @@ data class EditorState(
     /** Sections the user changed something in: their errors show right away, the others after [EditorViewModel.review]. */
     val touched: Set<EditorSection> = emptySet(),
     val showErrors: Boolean = false,
-    /** Set for a container running Portainer: the form is read-only and only Deploy as copy is offered. */
-    val readOnlyMessage: String? = null,
+    /** Set for a container running Portainer: Replace is unavailable; the form can be edited for a copy. */
+    val protectedMessage: String? = null,
     val pull: Boolean = false,
     /** [pull] and [registryId] as loaded, to tell whether they were changed. */
     val initialPull: Boolean = false,
@@ -100,13 +100,15 @@ data class EditorState(
     private val ready get() = phase == EditorPhase.Ready
 
     /** Replace is unavailable for Portainer's own container and when the form would make it run Portainer. */
-    val canReplace get() = ready && mode == EditorMode.Edit && readOnlyMessage == null && !isProtectedImage(form.image)
+    val canReplace get() = ready && mode == EditorMode.Edit && protectedMessage == null && !isProtectedImage(form.image)
     val canCopy get() = ready && mode == EditorMode.Edit
     val canCreate get() = ready && mode == EditorMode.New
-    val readOnly get() = readOnlyMessage != null
+
+    /** The form takes edits (not while the finish step is shown). */
+    val editable get() = ready && finish == null
 
     /** Anything the user would lose by leaving: form edits, or a changed pull switch or registry. */
-    val hasUnsavedChanges get() = ready && !readOnly && (dirty.isNotEmpty() || pull != initialPull || registryId != initialRegistryId)
+    val hasUnsavedChanges get() = ready && (dirty.isNotEmpty() || pull != initialPull || registryId != initialRegistryId)
 
     /** A row whose edits couldn't be written back; shown read-only (removing it still works). */
     fun isLocked(row: MountRow) = row.origin == MountOrigin.Binds && row.originalIndex in lockedBinds
@@ -183,7 +185,7 @@ class EditorViewModel(
                 draft = initial,
                 dirty = emptySet(),
                 errors = validate(initial, initial, mode),
-                readOnlyMessage = PROTECTED_IMAGE_MESSAGE.takeIf { inspect != null && isProtectedImage(before.image) },
+                protectedMessage = PROTECTED_IMAGE_MESSAGE.takeIf { inspect != null && isProtectedImage(before.image) },
                 pull = mode == EditorMode.New,
                 initialPull = mode == EditorMode.New,
                 registries = registries,
@@ -206,7 +208,7 @@ class EditorViewModel(
 
     /** Applies [block] to the draft and recomputes the form, dirty sections and errors; ignored unless editable. */
     private fun edit(section: EditorSection, block: (EditorState) -> EditorState) = _state.update { s ->
-        if (s.phase != EditorPhase.Ready || s.readOnly || s.finish != null) return@update s
+        if (!s.editable) return@update s
         val next = block(s)
         val form = next.draft.toForm(s.before, initial)
         next.copy(
@@ -346,8 +348,7 @@ class EditorViewModel(
 
     /**
      * "Replace" / "Deploy as copy" / "Create": validates and returns whether [action] may go ahead. With errors,
-     * every section's errors are shown. Portainer's own container skips validation for a copy: its form can't
-     * be edited, so there is nothing the user could fix.
+     * every section's errors are shown.
      *
      * [finish] runs this first.
      */
@@ -359,7 +360,6 @@ class EditorViewModel(
             FinishAction.Create -> s.canCreate
         }
         if (!allowed) return false
-        if (s.readOnly) return true
         if (s.errors.isNotEmpty()) {
             _state.update { it.copy(showErrors = true) }
             return false
@@ -371,9 +371,18 @@ class EditorViewModel(
 
     private var reviewContext: ReviewContext? = null
     private var built: BuiltReview? = null
+    private var copyStart: Boolean? = null
     private var checkJob: Job? = null
     private var deployJob: Job? = null
     private var deployKey: DeployKey? = null
+
+    /** Copies are keyed by their original, new containers by [NEW_SOURCE]; the editor for that source shows them again. */
+    private val deploySource get() = containerId ?: NEW_SOURCE
+
+    init {
+        // A deploy from this source still running, or finished without being acknowledged (the user left): show it.
+        container.deploySessions.find(serverId, endpointId, deploySource)?.let { attach(it, live = false) }
+    }
 
     /**
      * "Replace" / "Deploy as copy" / "Create": validates ([review]), then re-inspects the container (Replace,
@@ -381,6 +390,7 @@ class EditorViewModel(
      */
     fun finish(action: FinishAction): Boolean {
         if (_state.value.finish != null || !review(action)) return false
+        copyStart = null
         _state.update { it.copy(finish = FinishPhase.Checking(action)) }
         checkJob = viewModelScope.launch {
             val phase = try {
@@ -412,49 +422,111 @@ class EditorViewModel(
                 else -> null
             }
             val changed = outside.isNotEmpty() || fresh["Image"] != s.original?.get("Image") || running(fresh) != running(s.original)
-            ReviewContext(action, fresh, imageConfig, freshBefore, NO_INPUTS, CONTAINER_CHANGED_NOTICE.takeIf { changed }, blocked)
+            ReviewContext(action, fresh, imageConfig, freshBefore, NO_INPUTS, CONTAINER_CHANGED_NOTICE.takeIf { changed }, blocked, stale)
         }
         val name = when (action) {
             FinishAction.Copy -> s.form.name.takeIf { it.isNotEmpty() && it != s.before.name } ?: "${s.before.name}-copy"
             else -> s.form.name
         }
         // A first build only to learn which networks get a fixed IP (those are inspected for their members).
-        val draft = buildReview(ctx, s, name, typedMacs(), typedAliases())
+        val draft = rebuild(ctx, s, name)
         val body = draft.plan?.createBody ?: draft.request?.body ?: JsonObject(emptyMap())
         val extras = draft.plan?.extraNetworks ?: draft.request?.extraNetworks.orEmpty()
         ctx = ctx.with(conflictInputs(client, endpointId, fixedIpNetworks(body, extras)))
         reviewContext = ctx
-        return buildReview(ctx, s, name, typedMacs(), typedAliases()).also { built = it }.review
+        return rebuild(ctx, s, name).also { built = it }.review
     }
+
+    private fun rebuild(ctx: ReviewContext, s: EditorState, name: String) =
+        buildReview(ctx, s, name, typedMacs(), typedAliases(), copyStart)
 
     private fun running(inspect: JsonObject?) = (inspect?.get("State") as? JsonObject)?.get("Running")
 
-    /** Deploy as copy: the copy's name, checked again against the containers already listed (no requests). */
-    fun setDeployName(name: String) {
+    /** Rebuilds the review from what was fetched (no requests). */
+    private fun updateReview(change: (FinishPhase.Review) -> String) {
         val ctx = reviewContext ?: return
         val s = _state.value
         val review = s.finish as? FinishPhase.Review ?: return
-        if (!review.nameEditable || review.starting) return
-        val next = buildReview(ctx, s, name.trim(), typedMacs(), typedAliases())
+        if (review.starting) return
+        val next = rebuild(ctx, s, change(review))
         built = next
         _state.update { it.copy(finish = next.review) }
     }
 
-    /** Back from the review, a failed check or a failed deploy to the form (edits kept). Not while deploying. */
+    /** Deploy as copy: the copy's name, checked again against the containers already listed. */
+    fun setDeployName(name: String) = updateReview { r -> if (r.nameEditable) name.trim() else r.name }
+
+    /** Deploy as copy: whether the copy is started (default: as the original). */
+    fun setDeployStart(on: Boolean) = updateReview { r ->
+        if (r.startEditable) copyStart = on
+        r.name
+    }
+
+    /**
+     * "Reload current settings" on a review blocked by edits made on outdated settings: the form is reloaded from the
+     * container's current inspect, keeping the edits of sections that didn't change outside; the others are lost.
+     */
+    fun reloadCurrent() {
+        val ctx = reviewContext ?: return
+        val fresh = ctx.fresh ?: return
+        val freshBefore = ctx.freshBefore ?: return
+        val review = _state.value.finish as? FinishPhase.Review ?: return
+        if (review.stale.isEmpty() || review.starting) return
+        initial = EditorDraft.of(freshBefore)
+        _state.update { s ->
+            val form = withSections(freshBefore, s.form, s.dirty - review.stale)
+            val draft = EditorDraft.of(form)
+            val typed = draft.toForm(freshBefore, initial)
+            s.copy(
+                original = fresh,
+                before = freshBefore,
+                form = typed,
+                draft = draft,
+                dirty = FormMerger.merge(fresh, freshBefore, typed).second,
+                errors = validate(draft, initial, s.mode),
+                protectedMessage = PROTECTED_IMAGE_MESSAGE.takeIf { isProtectedImage(freshBefore.image) },
+                lockedBinds = freshBefore.mounts.filter { r -> r.origin == MountOrigin.Binds && !FormMerger.isEditableInPlace(fresh, r) }
+                    .mapNotNull { r -> r.originalIndex }.toSet(),
+                anonymousVolumes = anonymousVolumeTargets(fresh, freshBefore.mounts),
+                advanced = advancedSummary(fresh),
+                finish = null,
+            )
+        }
+        reviewContext = null
+        built = null
+    }
+
+    /**
+     * Back from the finish step. To the form (edits kept) from the review, a failed check or a failed deploy (its
+     * result is acknowledged); a successful deploy goes on to its container. Not while starting or deploying.
+     */
     fun backToForm() {
         val finish = _state.value.finish ?: return
         when (finish) {
             is FinishPhase.Review -> if (finish.starting) return
-            is FinishPhase.Deploying -> if (finish.progress.result == null) return
+            is FinishPhase.Deploying -> when (val result = finish.progress.result) {
+                null -> return
+                is DeployResult.Success -> {
+                    _state.update { it.copy(navigation = EditorNavigation.OpenContainer(result.id)) }
+                    return
+                }
+                is DeployResult.Failure -> Unit
+            }
             else -> Unit
         }
         checkJob?.cancel()
-        deployJob?.cancel()
-        deployKey?.let(container.deploySessions::clear)
-        deployKey = null
+        detach()
         reviewContext = null
         built = null
         _state.update { it.copy(finish = null) }
+    }
+
+    /** Stops showing the deploy and forgets its finished result. */
+    private fun detach() {
+        deployJob?.cancel()
+        deployJob = null
+        deployKey?.let(container.deploySessions::clear)
+        deployKey = null
     }
 
     /** Runs the reviewed action: Replace in RecreateSessions, Copy / Create in DeploySessions. */
@@ -497,21 +569,32 @@ class EditorViewModel(
     /** @return why it couldn't start, or null once the deploy runs (its progress is then shown). */
     private suspend fun startDeploy(request: DeployRequest): String? {
         val sessions = container.deploySessions
-        val key = DeployKey(serverId, endpointId, request.name)
+        val key = DeployKey(serverId, endpointId, deploySource, request.name.ifEmpty { sessions.unnamedId() })
         if (!sessions.start(key, container.dedicatedClient(serverId), request)) {
-            return "A container named ${request.name} is being created already."
+            return if (request.name.isEmpty()) "This container is being created already." else "A container named ${request.name} is being created already."
         }
+        attach(key, live = true)
+        return null
+    }
+
+    /**
+     * Shows the deploy [key]. A [live] one (started here) opens its container on success; one found when the editor
+     * opened shows its result and waits for the user.
+     */
+    private fun attach(key: DeployKey, live: Boolean) {
+        deployJob?.cancel()
         deployKey = key
+        var sawRunning = live
         deployJob = viewModelScope.launch {
-            sessions.progress(key).collect { p ->
+            container.deploySessions.progress(key).collect { p ->
                 if (p == null) return@collect
-                val success = p.result as? DeployResult.Success
+                if (p.result == null) sawRunning = true
+                val success = (p.result as? DeployResult.Success)?.takeIf { sawRunning }
                 _state.update {
                     it.copy(finish = FinishPhase.Deploying(p), navigation = success?.let { r -> EditorNavigation.OpenContainer(r.id) } ?: it.navigation)
                 }
             }
         }
-        return null
     }
 
     /** After a failure that left the created container: open it. */
@@ -521,14 +604,10 @@ class EditorViewModel(
         _state.update { it.copy(navigation = EditorNavigation.OpenContainer(id)) }
     }
 
-    /** The screen performed [EditorState.navigation]; a finished deploy's result is forgotten. */
+    /** The screen performed [EditorState.navigation]; a finished deploy's result is acknowledged. */
     fun navigated() {
         _state.update { it.copy(navigation = null) }
-        deployKey?.let { key ->
-            if (container.deploySessions.progress(key).value?.result != null) {
-                deployJob?.cancel()
-                container.deploySessions.clear(key)
-            }
-        }
+        val key = deployKey ?: return
+        if (container.deploySessions.progress(key).value?.result != null) detach()
     }
 }
