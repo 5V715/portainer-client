@@ -8,7 +8,10 @@ A Kotlin Multiplatform + Compose Multiplatform client for managing Docker contai
 - Docker environments: local and agent. Edge and Kubernetes environments are listed as "Not supported yet".
 - Container list with search, state filters and stack filter; start, stop, restart and remove.
 - Container detail: overview and live logs (tail, search, timestamps).
+- Environment tabs for Containers, Images, Volumes and Networks, each with a detail screen. Pull and remove images; create and remove volumes and networks.
+- Clean up on each tab: a preview shows exactly what will be deleted, and items are deleted one by one. Portainer's own resources are kept. Unused named volumes are only offered through a clearly marked option and need a second confirmation.
 - Edit and recreate: change image tag and environment variables, pull latest, private registry auth via Portainer, a change summary with warnings, and a rollback that never leaves you without a container.
+- Quick Recreate next to Edit & recreate: recreates a container with its current settings, with "Pull latest image" on by default.
 - Registries management (list, add, edit, remove registries configured in Portainer).
 - Portainer's own containers are protected from stop, remove and recreate, since that would cut off the connection.
 
