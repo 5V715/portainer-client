@@ -15,3 +15,20 @@ data class CleanupPlan(
     val namedVolumes: List<CleanupItem> = emptyList(),
     val kept: List<CleanupItem> = emptyList(),
 )
+
+/** Sum of the known sizes of some items; [unknownCount] items have no size (not counted in [knownBytes]). */
+data class Recoverable(val knownBytes: Long, val knownCount: Int, val unknownCount: Int)
+
+fun List<CleanupItem>.recoverable(): Recoverable {
+    val known = mapNotNull { it.sizeBytes }
+    return Recoverable(known.sum(), known.size, size - known.size)
+}
+
+/**
+ * Fills volume sizes (by volume name) into the deletable items. Which items are selected never changes,
+ * only their [CleanupItem.sizeBytes]; kept items are left as they are.
+ */
+fun CleanupPlan.withVolumeSizes(sizes: Map<String, Long?>): CleanupPlan {
+    fun CleanupItem.sized() = if (sizeBytes == null) copy(sizeBytes = sizes[id]) else this
+    return copy(toDelete = toDelete.map { it.sized() }, namedVolumes = namedVolumes.map { it.sized() })
+}

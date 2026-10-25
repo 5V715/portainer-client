@@ -32,6 +32,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -48,6 +49,14 @@ class CleanupViewModelTest {
     /** Holds a recreate's first step (the pull) until completed, so the recreate stays in progress. */
     private val recreateGate = CompletableDeferred<Unit>()
     private var testEnv: TestEnv? = null
+    /** `GET system/df` answer; a non-OK status makes it fail. */
+    private var dfJson = """{"Volumes":[
+        {"Name":"db","UsageData":{"Size":1100000000}},
+        {"Name":"${"e".repeat(64)}","UsageData":{"Size":2000}},
+        {"Name":"portainer_data","UsageData":{"Size":7}}
+    ],"Images":[]}"""
+    private var dfStatus = HttpStatusCode.OK
+    private var dfGate: CompletableDeferred<Unit>? = null
 
     private val a = "sha256:" + "a".repeat(64)
     private val b = "sha256:" + "b".repeat(64)
@@ -117,6 +126,10 @@ class CleanupViewModelTest {
             requestLog.update { it + "${req.method.value} $path" }
             when {
                 req.method == HttpMethod.Get && path.endsWith("/images/json") -> respond(imagesJson, HttpStatusCode.OK, json)
+                req.method == HttpMethod.Get && path.endsWith("/system/df") -> {
+                    dfGate?.await()
+                    respond(dfJson, dfStatus, json)
+                }
                 req.method == HttpMethod.Get && path.endsWith("/volumes") -> respond(volumesJson, HttpStatusCode.OK, json)
                 req.method == HttpMethod.Get && path.endsWith("/networks") -> respond(networksJson, HttpStatusCode.OK, json)
                 req.method == HttpMethod.Get && path.endsWith("/containers/json") -> respond(containersJson, HttpStatusCode.OK, json)
@@ -450,5 +463,126 @@ class CleanupViewModelTest {
         assertFalse(vm.sheetVisible.value)
         settle { vm.phase.value == CleanupPhase.Idle }
         assertFalse(vm.sheetVisible.value)
+    }
+
+    private fun preview(vm: CleanupViewModel) = assertIs<CleanupPhase.Preview>(vm.phase.value)
+
+    @Test
+    fun imagesTotalIsAnUpperBoundAndFollowsTheTaggedToggle() = runTest {
+        val vm = preview(CleanupKind.Images)
+        assertEquals("Up to 20 B can be recovered", preview(vm).recoverableLine)
+        vm.setIncludeTagged(true)
+        assertEquals("Up to 1 kB can be recovered", preview(vm).recoverableLine) // b (1000) + d (20)
+        vm.setIncludeTagged(false)
+        assertEquals("Up to 20 B can be recovered", preview(vm).recoverableLine)
+        assertFalse(preview(vm).sizesPending)
+        assertTrue(requests.none { it.endsWith("/system/df") })
+    }
+
+    @Test
+    fun volumesShowCalculatingUntilDfArrivesThenTheExactTotalFollowsTheNamedToggle() = runTest {
+        dfGate = CompletableDeferred()
+        val vm = preview(CleanupKind.Volumes)
+        assertTrue(preview(vm).sizesPending)
+        assertEquals("Calculating sizes…", preview(vm).recoverableLine)
+        assertNull(preview(vm).namedSubtotal)
+        dfGate!!.complete(Unit)
+        settle { !preview(vm).sizesPending }
+        assertEquals("2 kB can be recovered", preview(vm).recoverableLine)
+        assertEquals("Named volumes: 1.1 GB", preview(vm).namedSubtotal)
+        vm.setIncludeNamed(true)
+        assertEquals("1.1 GB can be recovered", preview(vm).recoverableLine)
+        vm.setIncludeNamed(false)
+        assertEquals("2 kB can be recovered", preview(vm).recoverableLine)
+    }
+
+    @Test
+    fun unknownVolumeSizesGiveAtLeastOrSizeUnknown() = runTest {
+        dfJson = """{"Volumes":[{"Name":"db","UsageData":{"Size":-1}},{"Name":"$anon","UsageData":{"Size":2000}}]}"""
+        val vm = preview(CleanupKind.Volumes)
+        settle { !preview(vm).sizesPending }
+        assertEquals("2 kB can be recovered", preview(vm).recoverableLine)
+        vm.setIncludeNamed(true)
+        assertEquals("At least 2 kB can be recovered (1 size unknown)", preview(vm).recoverableLine)
+        assertEquals("Named volumes: size unknown", preview(vm).namedSubtotal)
+
+        dfJson = """{"Volumes":[{"Name":"db","UsageData":{"Size":-1}},{"Name":"$anon","UsageData":{"Size":-1}}]}"""
+        val none = preview(CleanupKind.Volumes)
+        settle { !preview(none).sizesPending }
+        assertEquals("Size unknown", preview(none).recoverableLine)
+    }
+
+    @Test
+    fun aDfFailureLeavesTheCleanupUsableWithUnknownSizes() = runTest {
+        dfStatus = HttpStatusCode.InternalServerError
+        dfJson = """{"message":"df exploded secret-key"}"""
+        val vm = preview(CleanupKind.Volumes)
+        settle { !preview(vm).sizesPending }
+        assertEquals("Size unknown", preview(vm).recoverableLine)
+        vm.confirm()
+        val result = done(vm)
+        assertEquals(1, result.deleted)
+        assertNull(result.error)
+        assertEquals(listOf("DELETE /api/endpoints/1/docker/volumes/$anon"), deletes())
+    }
+
+    @Test
+    fun theDfNeverBlocksOrChangesTheSelection() = runTest {
+        dfGate = CompletableDeferred() // df never answers during this test
+        val vm = preview(CleanupKind.Volumes)
+        val before = preview(vm).selected.map { it.id }
+        vm.setIncludeNamed(true)
+        vm.confirm() // second confirmation needs no df
+        assertIs<CleanupPhase.ConfirmNamed>(vm.phase.value)
+        vm.confirmNamed()
+        done(vm)
+        assertEquals(listOf(anon), before)
+        assertEquals(listOf(anon, "db").map { "DELETE /api/endpoints/1/docker/volumes/$it" }, deletes())
+        dfGate!!.complete(Unit)
+    }
+
+    @Test
+    fun theDfAnswerChangesSizesOnlyNotWhatIsSelected() = runTest {
+        dfGate = CompletableDeferred()
+        val vm = preview(CleanupKind.Volumes)
+        vm.setIncludeNamed(true)
+        val before = preview(vm)
+        dfGate!!.complete(Unit)
+        settle { !preview(vm).sizesPending }
+        val after = preview(vm)
+        assertEquals(before.selected.map { it.id }, after.selected.map { it.id })
+        assertEquals(before.plan.kept, after.plan.kept)
+        assertTrue(after.includeNamed)
+        assertEquals(listOf(2000L, 1100000000L), after.selected.map { it.sizeBytes })
+    }
+
+    @Test
+    fun reclaimedIncludesVolumeSizes() = runTest {
+        val vm = preview(CleanupKind.Volumes)
+        settle { !preview(vm).sizesPending }
+        vm.setIncludeNamed(true)
+        vm.confirm()
+        vm.confirmNamed()
+        assertEquals(1_100_002_000L, done(vm).reclaimedBytes)
+    }
+
+    @Test
+    fun closingTheSheetCancelsTheDf() = runTest {
+        dfGate = CompletableDeferred()
+        val vm = preview(CleanupKind.Volumes)
+        vm.acknowledge()
+        dfGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertTrue(preview(vm).plan.toDelete.all { it.sizeBytes == null })
+    }
+
+    @Test
+    fun containersAndNetworksShowNoTotalAndNeverCallDf() = runTest {
+        for (kind in listOf(CleanupKind.Containers, CleanupKind.Networks)) {
+            val vm = preview(kind)
+            assertNull(preview(vm).recoverableLine)
+            assertNull(preview(vm).namedSubtotal)
+        }
+        assertTrue(requests.none { it.endsWith("/system/df") })
     }
 }

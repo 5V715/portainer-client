@@ -8,14 +8,18 @@ import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.api.containers
 import dev.silas.portainer.core.api.images
 import dev.silas.portainer.core.api.networks
+import dev.silas.portainer.core.api.systemDf
 import dev.silas.portainer.core.api.volumes
 import dev.silas.portainer.core.cleanup.CleanupItem
 import dev.silas.portainer.core.cleanup.CleanupKind
 import dev.silas.portainer.core.cleanup.CleanupPlan
 import dev.silas.portainer.core.cleanup.CleanupPlanner
+import dev.silas.portainer.core.cleanup.recoverable
+import dev.silas.portainer.core.cleanup.withVolumeSizes
 import dev.silas.portainer.core.resources.ResourceProtection
 import dev.silas.portainer.core.resources.ResourceUsage
 import dev.silas.portainer.core.resources.resolveIdOnlyImages
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,10 +38,22 @@ sealed interface CleanupPhase {
     data class Error(val message: String) : CleanupPhase
 
     /** [includeTagged] applies to images, [includeNamed] to volumes. */
-    data class Preview(val plan: CleanupPlan, val includeTagged: Boolean = false, val includeNamed: Boolean = false) : CleanupPhase {
+    data class Preview(
+        val plan: CleanupPlan,
+        val includeTagged: Boolean = false,
+        val includeNamed: Boolean = false,
+        /** True while the volume sizes (`system/df`) are still being fetched. */
+        val sizesPending: Boolean = false,
+    ) : CleanupPhase {
         /** Exactly what a confirm deletes, in order. */
         val selected: List<CleanupItem> get() = plan.toDelete + if (includeNamed) plan.namedVolumes else emptyList()
         val isEmpty: Boolean get() = plan.toDelete.isEmpty() && plan.namedVolumes.isEmpty()
+
+        /** The grand-total line over [selected] (Images and Volumes only); null when there is nothing to show. */
+        val recoverableLine: String? get() = recoverableLine(plan.kind, selected.recoverable(), sizesPending)
+
+        /** Size of the named volumes, shown in their section; null while sizes are pending or for other kinds. */
+        val namedSubtotal: String? get() = namedSubtotal(plan.namedVolumes.recoverable(), sizesPending)
     }
 
     /** Second confirmation before deleting named volumes; [preview] is what goes back on cancel. */
@@ -82,6 +98,9 @@ class CleanupViewModel(
 
     private var loadJob: Job? = null
 
+    /** Fetches volume sizes after the preview shows; cancelled when the sheet closes. Never blocks a cleanup. */
+    private var sizesJob: Job? = null
+
     /** Rebuilds the image plan from the lists already loaded (only set for images). */
     private var imagePlan: ((includeTagged: Boolean) -> CleanupPlan)? = null
 
@@ -116,14 +135,43 @@ class CleanupViewModel(
             return
         }
         loadJob?.cancel()
+        sizesJob?.cancel()
         _phase.value = CleanupPhase.Loading
         loadJob = viewModelScope.launch {
             val next = try {
-                CleanupPhase.Preview(buildPlan(container.client(serverId)))
+                CleanupPhase.Preview(buildPlan(container.client(serverId)), sizesPending = kind == CleanupKind.Volumes)
             } catch (e: Exception) {
                 CleanupPhase.Error(failureMessage(e))
             }
-            _phase.update { if (it == CleanupPhase.Loading) next else it }
+            var shown = false
+            _phase.update {
+                shown = it == CleanupPhase.Loading
+                if (shown) next else it
+            }
+            if (shown && next is CleanupPhase.Preview && next.sizesPending) loadVolumeSizes()
+        }
+    }
+
+    /** A failure only leaves the sizes unknown: the cleanup itself is unaffected. */
+    private fun loadVolumeSizes() {
+        sizesJob?.cancel()
+        sizesJob = viewModelScope.launch {
+            val sizes = try {
+                container.client(serverId).systemDf(endpointId).volumeSizes
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emptyMap()
+            }
+            // Only sizes change, never which items are selected or the toggles.
+            fun CleanupPhase.Preview.sized() = copy(plan = plan.withVolumeSizes(sizes), sizesPending = false)
+            _phase.update {
+                when {
+                    it is CleanupPhase.Preview && it.sizesPending -> it.sized()
+                    it is CleanupPhase.ConfirmNamed && it.preview.sizesPending -> it.copy(preview = it.preview.sized())
+                    else -> it
+                }
+            }
         }
     }
 
@@ -164,6 +212,7 @@ class CleanupViewModel(
     /** Closes the sheet and forgets a finished result, so it isn't shown again. A running cleanup keeps going. */
     fun acknowledge() {
         _sheetVisible.value = false
+        sizesJob?.cancel()
         sessions.clear(key)
     }
 

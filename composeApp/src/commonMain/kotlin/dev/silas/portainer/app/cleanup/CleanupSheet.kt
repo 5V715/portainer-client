@@ -148,6 +148,11 @@ fun CleanupSheet(viewModel: CleanupViewModel, onDismiss: () -> Unit) {
 }
 
 private fun LazyListScope.preview(p: CleanupPhase.Preview, viewModel: CleanupViewModel, onDismiss: () -> Unit) {
+    p.recoverableLine?.let { line ->
+        item {
+            Text(line, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+        }
+    }
     if (viewModel.kind == CleanupKind.Images) {
         item { Option("Also remove unused tagged images", p.includeTagged, danger = false, onChange = viewModel::setIncludeTagged) }
     }
@@ -160,6 +165,9 @@ private fun LazyListScope.preview(p: CleanupPhase.Preview, viewModel: CleanupVie
     }
     if (p.plan.namedVolumes.isNotEmpty()) {
         item { Section("Named volumes (${p.plan.namedVolumes.size})", MaterialTheme.colorScheme.error) }
+        p.namedSubtotal?.let { subtotal ->
+            item { Text(subtotal, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error) }
+        }
         item { Text(NAMED_VOLUMES_WARNING, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
         item { Option("Also remove unused named volumes", p.includeNamed, danger = true, onChange = viewModel::setIncludeNamed) }
         items(p.plan.namedVolumes, key = { "n-" + it.id }) {
