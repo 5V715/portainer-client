@@ -3,17 +3,14 @@ package dev.silas.portainer.app.detail
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
-import dev.silas.portainer.core.api.PortainerException
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import dev.silas.portainer.core.recreate.isProtectedImage
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -79,14 +76,8 @@ class ContainerDetailViewModel(
             val overview = parseOverview(container.client(serverId).inspectContainer(endpointId, containerId))
             _state.update { it.copy(overview = overview) }
             null
-        } catch (e: CancellationException) {
-            // A client closed by invalidation cancels the call; only rethrow if this coroutine itself was cancelled.
-            if (!currentCoroutineContext().isActive) throw e
-            "The connection was interrupted"
-        } catch (e: PortainerException) {
-            e.message ?: "Request failed"
-        } catch (e: IllegalStateException) {
-            e.message ?: "Request failed"
+        } catch (e: Exception) {
+            failureMessage(e)
         }
         _state.update { it.copy(loading = false, error = message) }
     }

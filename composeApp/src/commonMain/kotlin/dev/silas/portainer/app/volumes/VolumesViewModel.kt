@@ -3,25 +3,23 @@ package dev.silas.portainer.app.volumes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.containers
 import dev.silas.portainer.core.api.createVolume
 import dev.silas.portainer.core.api.removeVolume
 import dev.silas.portainer.core.api.volumes
+import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import dev.silas.portainer.core.model.Volume
 import dev.silas.portainer.core.resources.ResourceProtection
 import dev.silas.portainer.core.resources.ResourceUsage
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 const val VOLUME_NOT_REMOVABLE_MESSAGE = "This volume is in use or belongs to Portainer and can't be removed."
-const val COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 
 data class VolumeItem(val volume: Volume, val used: Boolean, val protected: Boolean) {
     val unused: Boolean get() = !used
@@ -144,13 +142,8 @@ class VolumesViewModel(
                     labels.cleaned(),
                 )
                 CreateStatus.Done("Created ${created.name}")
-            } catch (e: CancellationException) {
-                if (!currentCoroutineContext().isActive) throw e
-                CreateStatus.Failed("The connection was interrupted")
-            } catch (e: PortainerException) {
-                CreateStatus.Failed(e.message ?: "Create failed")
-            } catch (e: IllegalStateException) {
-                CreateStatus.Failed(e.message ?: "Create failed")
+            } catch (e: Exception) {
+                CreateStatus.Failed(failureMessage(e, "Create failed"))
             }
             _state.update { it.copy(create = CreateState(status)) }
             if (status is CreateStatus.Done) refresh()
@@ -166,14 +159,7 @@ class VolumesViewModel(
     }
 
     private suspend fun failure(e: Exception) {
-        val message = when (e) {
-            is CancellationException -> {
-                if (!currentCoroutineContext().isActive) throw e
-                "The connection was interrupted"
-            }
-            is PortainerException, is IllegalStateException -> e.message ?: "Request failed"
-            else -> throw e
-        }
+        val message = failureMessage(e)
         _state.update { it.copy(error = message) }
     }
 }

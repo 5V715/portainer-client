@@ -3,18 +3,15 @@ package dev.silas.portainer.app.registries
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
-import dev.silas.portainer.core.api.PortainerException
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.deleteRegistry
 import dev.silas.portainer.core.api.registries
 import dev.silas.portainer.core.model.Registry
 import dev.silas.portainer.core.model.RegistryType
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 fun typeLabel(type: RegistryType): String = when (type) {
@@ -36,14 +33,8 @@ fun authLabel(registry: Registry): String =
 internal suspend fun runGuarded(block: suspend () -> Unit): String? = try {
     block()
     null
-} catch (e: CancellationException) {
-    // A client closed by invalidation cancels the call; only rethrow if this coroutine itself was cancelled.
-    if (!currentCoroutineContext().isActive) throw e
-    "The connection was interrupted"
-} catch (e: PortainerException) {
-    e.message ?: "Request failed"
-} catch (e: IllegalStateException) {
-    e.message ?: "Request failed"
+} catch (e: Exception) {
+    failureMessage(e)
 }
 
 data class RegistriesState(

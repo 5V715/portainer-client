@@ -3,7 +3,7 @@ package dev.silas.portainer.app.volumes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
-import dev.silas.portainer.core.api.PortainerException
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.containers
 import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.api.inspectVolume
@@ -12,11 +12,9 @@ import dev.silas.portainer.core.model.Volume
 import dev.silas.portainer.core.resources.ResourceUsage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -70,13 +68,9 @@ class VolumeDetailViewModel(
                     }
                     _state.update { s -> s.copy(users = s.users.map { if (it.container.id == c.id) it.copy(mounts = mounts) else it }) }
                 }
-            } catch (e: CancellationException) {
-                if (!currentCoroutineContext().isActive) throw e
-                _state.update { it.copy(error = "The connection was interrupted") }
-            } catch (e: PortainerException) {
-                _state.update { it.copy(error = e.message ?: "Request failed") }
-            } catch (e: IllegalStateException) {
-                _state.update { it.copy(error = e.message ?: "Request failed") }
+            } catch (e: Exception) {
+                val message = failureMessage(e)
+                _state.update { it.copy(error = message) }
             }
             _state.update { it.copy(loading = false) }
         }

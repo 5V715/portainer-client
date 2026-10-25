@@ -3,6 +3,7 @@ package dev.silas.portainer.app.detail
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.app.recreate.SessionKey
 import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.api.inspectContainer
@@ -17,12 +18,9 @@ import dev.silas.portainer.core.recreate.RecreatePlanner
 import dev.silas.portainer.core.recreate.RecreateWarning
 import dev.silas.portainer.core.recreate.isProtectedImage
 import dev.silas.portainer.core.registry.matchRegistry
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -74,9 +72,8 @@ class QuickRecreateViewModel(
                 // Registries are only a convenience; an account that can't list them still gets to recreate.
                 val registries = try {
                     client.registries()
-                } catch (e: CancellationException) {
-                    throw e
                 } catch (e: Exception) {
+                    failureMessage(e) // rethrows only when this coroutine was cancelled
                     emptyList()
                 }
                 val match = matchFor(image, registries)
@@ -86,7 +83,7 @@ class QuickRecreateViewModel(
                     else it.copy(phase = QuickPhase.Ready, registries = registries, registryId = match, warnings = plan.warnings)
                 }
             } catch (e: Exception) {
-                fail(requestFailure(e))
+                fail(failureMessage(e))
             }
         }
     }
@@ -123,7 +120,7 @@ class QuickRecreateViewModel(
                 }
                 _state.update { if (it.phase == QuickPhase.Ready && it.starting) it.copy(phase = QuickPhase.Started, starting = false) else it }
             } catch (e: Exception) {
-                fail(requestFailure(e))
+                fail(failureMessage(e))
             }
         }
     }
@@ -151,10 +148,4 @@ class QuickRecreateViewModel(
 
     private fun matchFor(image: String, registries: List<Registry>): Int? =
         if (image.isBlank()) null else matchRegistry(ImageRef.parse(image.trim()), registries)?.id
-
-    /** The message for a failed request; rethrows when this coroutine itself was cancelled. */
-    private suspend fun requestFailure(e: Exception): String = when (e) {
-        is CancellationException -> if (currentCoroutineContext().isActive) "The connection was interrupted" else throw e
-        else -> e.message ?: "Request failed"
-    }
 }

@@ -3,6 +3,7 @@ package dev.silas.portainer.app.recreate
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.api.inspectImage
@@ -15,12 +16,9 @@ import dev.silas.portainer.core.recreate.RecreatePlan
 import dev.silas.portainer.core.recreate.RecreatePlanner
 import dev.silas.portainer.core.recreate.isProtectedImage
 import dev.silas.portainer.core.registry.matchRegistry
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -128,17 +126,9 @@ class RecreateViewModel(
                 null
             }
         } catch (e: Exception) {
-            requestFailure(e)
+            failureMessage(e)
         }
         if (message != null) _state.update { it.copy(phase = RecreatePhase.Error(message)) }
-    }
-
-    /** The message for a failed request; rethrows when this coroutine itself was cancelled. */
-    private suspend fun requestFailure(e: Exception): String = when (e) {
-        // A client closed by invalidation cancels the call; only rethrow if this coroutine itself was cancelled.
-        is CancellationException -> if (currentCoroutineContext().isActive) "The connection was interrupted" else throw e
-        is PortainerException, is IllegalStateException -> e.message ?: "Request failed"
-        else -> throw e
     }
 
     private fun matchFor(image: String, registries: List<Registry>): Int? =
@@ -211,7 +201,7 @@ class RecreateViewModel(
                     RecreatePhase.Reviewing(RecreatePlanner.plan(fresh, imageConfig, edits), notice)
                 }
             } catch (e: Exception) {
-                error = requestFailure(e)
+                error = failureMessage(e)
                 null
             }
             _state.update {

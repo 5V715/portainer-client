@@ -3,6 +3,7 @@ package dev.silas.portainer.app.networks
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.NetworkInput
 import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.containers
@@ -13,13 +14,10 @@ import dev.silas.portainer.core.api.removeNetwork
 import dev.silas.portainer.core.model.Network
 import dev.silas.portainer.core.resources.ResourceProtection
 import dev.silas.portainer.core.resources.ResourceUsage
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 const val NETWORK_NOT_REMOVABLE_MESSAGE = "This network is in use, built in, or belongs to Portainer and can't be removed."
@@ -117,12 +115,8 @@ class NetworksViewModel(
         viewModelScope.launch {
             val swarm = try {
                 container.client(serverId).engineInfo(endpointId).swarmActive
-            } catch (e: CancellationException) {
-                if (!currentCoroutineContext().isActive) throw e
-                false
-            } catch (e: PortainerException) {
-                false
-            } catch (e: IllegalStateException) {
+            } catch (e: Exception) {
+                failureMessage(e) // rethrows only when this coroutine was cancelled
                 false
             }
             _state.update { it.copy(swarmActive = swarm, engineLoaded = true) }
@@ -215,13 +209,8 @@ class NetworksViewModel(
                     ),
                 )
                 CreateStatus.Done("Created ${form.name.trim()}")
-            } catch (e: CancellationException) {
-                if (!currentCoroutineContext().isActive) throw e
-                CreateStatus.Failed("The connection was interrupted")
-            } catch (e: PortainerException) {
-                CreateStatus.Failed(e.message ?: "Create failed")
-            } catch (e: IllegalStateException) {
-                CreateStatus.Failed(e.message ?: "Create failed")
+            } catch (e: Exception) {
+                CreateStatus.Failed(failureMessage(e, "Create failed"))
             }
             _state.update { it.copy(create = CreateState(status)) }
             if (status is CreateStatus.Done) refresh()
@@ -237,14 +226,7 @@ class NetworksViewModel(
     }
 
     private suspend fun failure(e: Exception) {
-        val message = when (e) {
-            is CancellationException -> {
-                if (!currentCoroutineContext().isActive) throw e
-                "The connection was interrupted"
-            }
-            is PortainerException, is IllegalStateException -> e.message ?: "Request failed"
-            else -> e.message ?: "Request failed"
-        }
+        val message = failureMessage(e)
         _state.update { it.copy(error = message) }
     }
 }

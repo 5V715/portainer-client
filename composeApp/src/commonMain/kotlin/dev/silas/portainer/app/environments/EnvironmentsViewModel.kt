@@ -6,11 +6,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
-import dev.silas.portainer.core.api.PortainerException
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.endpoints
 import dev.silas.portainer.core.model.Endpoint
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class EnvironmentItem(val endpoint: Endpoint) {
@@ -40,14 +38,8 @@ class EnvironmentsViewModel(
             state = try {
                 val list = container.client(serverId).endpoints()
                 EnvironmentsState.Loaded(list.map(::EnvironmentItem))
-            } catch (e: CancellationException) {
-                // A client closed by invalidation cancels the call; only rethrow if this load itself was cancelled.
-                if (!isActive) throw e
-                EnvironmentsState.Error("The connection was interrupted")
-            } catch (e: PortainerException) {
-                EnvironmentsState.Error(e.message ?: "Could not load environments")
-            } catch (e: IllegalStateException) {
-                EnvironmentsState.Error(e.message ?: "Could not load environments")
+            } catch (e: Exception) {
+                EnvironmentsState.Error(failureMessage(e, "Could not load environments"))
             }
         }
     }

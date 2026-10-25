@@ -3,8 +3,8 @@ package dev.silas.portainer.app.containers
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.PortainerClient
-import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.containers
 import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.api.removeContainer
@@ -16,13 +16,11 @@ import dev.silas.portainer.core.containers.applyFilter
 import dev.silas.portainer.core.model.ContainerSummary
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 import dev.silas.portainer.core.recreate.isProtectedImage
-import kotlinx.coroutines.CancellationException
+import dev.silas.portainer.core.resources.isIdOnlyImage
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -113,7 +111,7 @@ class ContainerListViewModel(
      * with the inspect error set).
      */
     private suspend fun protection(target: ContainerSummary): Protection {
-        if (!looksLikeImageId(target.image)) return protectionOf(isProtectedImage(target.image))
+        if (!isIdOnlyImage(target.image)) return protectionOf(isProtectedImage(target.image))
         var image: String? = null
         val ok = guard {
             val config = container.client(serverId).inspectContainer(endpointId, target.id)["Config"] as? JsonObject
@@ -125,9 +123,6 @@ class ContainerListViewModel(
     }
 
     private fun protectionOf(protected: Boolean) = if (protected) Protection.Protected else Protection.Unprotected
-
-    private fun looksLikeImageId(image: String) =
-        image.startsWith("sha256:") || (image.length == 64 && image.all { it in '0'..'9' || it in 'a'..'f' })
 
     private suspend fun load() {
         guard {
@@ -146,14 +141,8 @@ class ContainerListViewModel(
         val message = try {
             block()
             return true
-        } catch (e: CancellationException) {
-            // A client closed by invalidation cancels the call; only rethrow if this coroutine itself was cancelled.
-            if (!currentCoroutineContext().isActive) throw e
-            "The connection was interrupted"
-        } catch (e: PortainerException) {
-            e.message ?: "Request failed"
-        } catch (e: IllegalStateException) {
-            e.message ?: "Request failed"
+        } catch (e: Exception) {
+            failureMessage(e)
         }
         _state.update { it.copy(error = message) }
         return false

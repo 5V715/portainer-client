@@ -3,21 +3,18 @@ package dev.silas.portainer.app.detail
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
-import dev.silas.portainer.core.api.PortainerException
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.logs.LogBuffer
 import dev.silas.portainer.core.logs.LogLine
 import dev.silas.portainer.core.logs.LogOptions
 import dev.silas.portainer.core.logs.followLogs
 import dev.silas.portainer.core.logs.rfc3339EpochSeconds
 import dev.silas.portainer.core.platform.platformSupportsStreaming
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.coroutines.coroutineContext
 
@@ -135,14 +132,8 @@ class LogsViewModel(
                     }
                 }
                 null
-            } catch (e: CancellationException) {
-                // A client closed by invalidation cancels the call; only rethrow if this coroutine itself was cancelled.
-                if (!currentCoroutineContext().isActive) throw e
-                "The connection was interrupted"
-            } catch (e: PortainerException) {
-                e.message ?: "Request failed"
-            } catch (e: IllegalStateException) {
-                e.message ?: "Request failed"
+            } catch (e: Exception) {
+                failureMessage(e)
             }
             // A superseded collector must not touch state that now belongs to its successor.
             if (job === coroutineContext[Job]) _state.update { it.copy(following = false, error = message ?: it.error) }
