@@ -1,5 +1,6 @@
 package dev.silas.portainer.app.recreate
 
+import dev.silas.portainer.app.support.safeMessage
 import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.recreate.PortainerDockerOps
 import dev.silas.portainer.core.recreate.RecreateEvent
@@ -70,11 +71,16 @@ class RecreateSessions(private val scope: CoroutineScope, private val nowEpochSe
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                state.update { it?.fail(it.steps.firstOrNull { s -> s.status == StepStatus.Active }?.step, e.message ?: "Unexpected error", false) }
+                state.update { it?.fail(it.steps.firstOrNull { s -> s.status == StepStatus.Active }?.step, safeMessage(e, "Unexpected error"), false) }
             } finally {
                 client.close()
             }
         }
+    }
+
+    /** True while a recreate on [serverId]'s endpoint [endpointId] has not finished yet. */
+    fun isRunning(serverId: String, endpointId: Int): Boolean = sessions.any { (key, state) ->
+        key.serverId == serverId && key.endpointId == endpointId && state.value.let { it != null && it.result == null }
     }
 
     /** Forgets a finished result (never a running one). */

@@ -2,6 +2,7 @@ package dev.silas.portainer.app.containers
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,7 +14,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
@@ -26,13 +26,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -46,7 +46,6 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import dev.silas.portainer.app.cleanup.CleanupOverflow
-import dev.silas.portainer.app.cleanup.CleanupPhase
 import dev.silas.portainer.app.cleanup.CleanupSheet
 import dev.silas.portainer.app.cleanup.CleanupViewModel
 import dev.silas.portainer.app.theme.BackButton
@@ -77,8 +76,8 @@ fun ContainerListScreen(
         onPauseOrDispose {}
     }
     val snackbar = remember { SnackbarHostState() }
-    // Back on the screen while a cleanup runs (or finished meanwhile): show it again.
-    var showCleanup by remember { mutableStateOf(cleanup.phase.value.let { it is CleanupPhase.Running || it is CleanupPhase.Done }) }
+    // The view model reopens the sheet for a run that is going on or finished meanwhile.
+    val showCleanup by cleanup.sheetVisible.collectAsState()
     var pendingRemove by remember { mutableStateOf<ContainerSummary?>(null) }
 
     LaunchedEffect(state.error) {
@@ -97,7 +96,6 @@ fun ContainerListScreen(
                     TextButton(onClick = onRegistries) { Text("Registries") }
                     CleanupOverflow {
                         cleanup.open()
-                        showCleanup = true
                     }
                 },
             )
@@ -162,10 +160,7 @@ fun ContainerListScreen(
     }
 
     if (showCleanup) {
-        CleanupSheet(cleanup, onDismiss = {
-            showCleanup = false
-            cleanup.acknowledge()
-        })
+        CleanupSheet(cleanup, onDismiss = cleanup::acknowledge)
     }
 }
 

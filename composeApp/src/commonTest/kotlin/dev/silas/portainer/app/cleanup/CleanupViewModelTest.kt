@@ -10,6 +10,11 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import dev.silas.portainer.core.cleanup.CleanupItem
+import dev.silas.portainer.app.recreate.SessionKey
+import dev.silas.portainer.core.model.ImageRef
+import dev.silas.portainer.core.recreate.ChangeSummary
+import dev.silas.portainer.core.recreate.RecreatePlan
+import kotlinx.serialization.json.JsonObject
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -17,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -39,6 +45,8 @@ class CleanupViewModelTest {
     private val inspectImages = mutableMapOf<String, String>()
     /** When set, every DELETE waits for it, so a run can be observed while Running. */
     private var deleteGate: CompletableDeferred<Unit>? = null
+    /** Holds a recreate's first step (the pull) until completed, so the recreate stays in progress. */
+    private val recreateGate = CompletableDeferred<Unit>()
     private var testEnv: TestEnv? = null
 
     private val a = "sha256:" + "a".repeat(64)
@@ -76,7 +84,30 @@ class CleanupViewModelTest {
     fun setUp() = Dispatchers.setMain(StandardTestDispatcher())
 
     @AfterTest
-    fun tearDown() = Dispatchers.resetMain()
+    fun tearDown() {
+        recreateGate.complete(Unit)
+        Dispatchers.resetMain()
+    }
+
+    /** Starts a recreate of `c2` that stays in progress until [recreateGate] completes. */
+    private suspend fun startRecreate(): SessionKey {
+        val container = env().container
+        val key = SessionKey("s1", 1, "c2")
+        val plan = RecreatePlan(
+            containerName = "old",
+            wasRunning = false,
+            createBody = JsonObject(emptyMap()),
+            extraNetworks = emptyMap(),
+            image = ImageRef.parse("busybox"),
+            pull = true,
+            registryId = null,
+            changes = ChangeSummary(null, emptyList(), emptyList(), emptyList(), emptyList()),
+            warnings = emptyList(),
+        )
+        container.recreateSessions.start(key, container.dedicatedClient("s1"), "c2", plan)
+        assertTrue(container.recreateSessions.isRunning("s1", 1))
+        return key
+    }
 
     private suspend fun env(): TestEnv = testEnv ?: newEnv().also { testEnv = it }
 
@@ -97,6 +128,10 @@ class CleanupViewModelTest {
                     } else {
                         respond("""{"Id":"$id","Config":{"Image":"$image"}}""", HttpStatusCode.OK, json)
                     }
+                }
+                req.method == HttpMethod.Post && path.endsWith("/images/create") -> {
+                    recreateGate.await()
+                    respond("{}", HttpStatusCode.OK, json)
                 }
                 req.method == HttpMethod.Delete -> {
                     deleteGate?.await()
@@ -358,5 +393,62 @@ class CleanupViewModelTest {
         assertTrue(result.deletedItems.isEmpty())
         assertEquals("Unknown server", result.error)
         assertTrue(deletes().isEmpty())
+    }
+
+    @Test
+    fun containerCleanupIsRefusedWhileARecreateRuns() = runTest {
+        startRecreate()
+        val vm = CleanupViewModel(env().container, "s1", 1, CleanupKind.Containers)
+        vm.open()
+        assertEquals(CleanupPhase.Error(RECREATE_IN_PROGRESS_MESSAGE), vm.phase.value)
+        assertTrue(vm.sheetVisible.value)
+        assertTrue(requests.none { it.endsWith("/containers/json") })
+
+        // Other kinds are not affected; another endpoint is not affected either.
+        assertIs<CleanupPhase.Preview>(preview(CleanupKind.Networks).phase.value)
+        val other = CleanupViewModel(env().container, "s1", 2, CleanupKind.Containers)
+        other.open()
+        settle { other.phase.value is CleanupPhase.Preview }
+    }
+
+    @Test
+    fun aRecreateStartedAfterThePreviewBlocksTheRun() = runTest {
+        val vm = preview(CleanupKind.Containers)
+        assertTrue(assertIs<CleanupPhase.Preview>(vm.phase.value).selected.isNotEmpty())
+        startRecreate()
+        vm.confirm()
+        assertEquals(CleanupPhase.Error(RECREATE_IN_PROGRESS_MESSAGE), vm.phase.value)
+        advanceUntilIdle()
+        assertTrue(deletes().isEmpty())
+    }
+
+    @Test
+    fun containerCleanupWorksAgainOnceTheRecreateFinished() = runTest {
+        val key = startRecreate()
+        val sessions = env().container.recreateSessions
+        recreateGate.complete(Unit)
+        settle { sessions.progress(key).value?.result != null }
+        assertFalse(sessions.isRunning("s1", 1))
+        assertIs<CleanupPhase.Preview>(preview(CleanupKind.Containers).phase.value)
+    }
+
+    @Test
+    fun aRunThatFinishesAfterTheSheetClosedReopensIt() = runTest {
+        deleteGate = CompletableDeferred()
+        val vm = preview(CleanupKind.Networks)
+        assertTrue(vm.sheetVisible.value)
+        vm.confirm()
+        settle { vm.phase.value is CleanupPhase.Running }
+        vm.acknowledge() // closed while running
+        assertFalse(vm.sheetVisible.value)
+        deleteGate!!.complete(Unit)
+        settle { vm.phase.value is CleanupPhase.Done }
+        settle { vm.sheetVisible.value }
+        assertEquals(2, (vm.phase.value as CleanupPhase.Done).deleted)
+
+        vm.acknowledge()
+        assertFalse(vm.sheetVisible.value)
+        settle { vm.phase.value == CleanupPhase.Idle }
+        assertFalse(vm.sheetVisible.value)
     }
 }

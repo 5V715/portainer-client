@@ -3,31 +3,26 @@ package dev.silas.portainer.app.cleanup
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.api.containers
 import dev.silas.portainer.core.api.images
-import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.api.networks
 import dev.silas.portainer.core.api.volumes
 import dev.silas.portainer.core.cleanup.CleanupItem
 import dev.silas.portainer.core.cleanup.CleanupKind
 import dev.silas.portainer.core.cleanup.CleanupPlan
 import dev.silas.portainer.core.cleanup.CleanupPlanner
-import dev.silas.portainer.core.model.ContainerSummary
 import dev.silas.portainer.core.resources.ResourceProtection
 import dev.silas.portainer.core.resources.ResourceUsage
-import dev.silas.portainer.core.resources.isIdOnlyImage
-import kotlinx.coroutines.CancellationException
+import dev.silas.portainer.core.resources.resolveIdOnlyImages
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 
+const val RECREATE_IN_PROGRESS_MESSAGE = "A recreate is in progress — try again when it finishes."
 const val NAMED_VOLUMES_WARNING = "Named volumes often hold databases and app data. Everything in them is deleted permanently."
 
 data class CleanupFailure(val item: CleanupItem, val message: String)
@@ -63,7 +58,11 @@ sealed interface CleanupPhase {
  * Previews a cleanup of one resource [kind]; the run itself belongs to [AppContainer.cleanupSessions], so closing
  * the sheet, switching tabs or leaving the screen never stops it, and a new ViewModel for the same server,
  * endpoint and kind re-attaches to it. [onFinished] (the list's refresh) runs when a finished run is seen,
- * including one that finished while the screen was gone.
+ * including one that finished while the screen was gone. [sheetVisible] says whether the sheet shows; a run that
+ * finishes while it is closed opens it again with the result.
+ *
+ * Container cleanups are refused while a recreate runs on the endpoint: mid-recreate, the new container is only
+ * created and the renamed old one stopped, so both would look like stopped containers to delete.
  */
 class CleanupViewModel(
     private val container: AppContainer,
@@ -78,6 +77,9 @@ class CleanupViewModel(
     private val _phase = MutableStateFlow(session.value ?: CleanupPhase.Idle)
     val phase: StateFlow<CleanupPhase> = _phase
 
+    private val _sheetVisible = MutableStateFlow(session.value is CleanupPhase.Running || session.value is CleanupPhase.Done)
+    val sheetVisible: StateFlow<Boolean> = _sheetVisible
+
     private var loadJob: Job? = null
 
     /** Rebuilds the image plan from the lists already loaded (only set for images). */
@@ -87,7 +89,10 @@ class CleanupViewModel(
         viewModelScope.launch {
             var last: CleanupPhase? = null
             session.collect { run ->
-                if (run is CleanupPhase.Done && last !is CleanupPhase.Done) onFinished()
+                if (run is CleanupPhase.Done && last !is CleanupPhase.Done) {
+                    onFinished()
+                    _sheetVisible.value = true
+                }
                 last = run
                 _phase.update { current ->
                     when {
@@ -100,10 +105,16 @@ class CleanupViewModel(
         }
     }
 
-    /** Builds a fresh preview (forgetting a finished result); ignored while a cleanup is running. */
+    /** Shows the sheet with a fresh preview (forgetting a finished result); only shows it while a cleanup is running. */
     fun open() {
+        _sheetVisible.value = true
         if (session.value is CleanupPhase.Running) return
         sessions.clear(key)
+        if (recreateBlocks()) {
+            loadJob?.cancel()
+            _phase.value = CleanupPhase.Error(RECREATE_IN_PROGRESS_MESSAGE)
+            return
+        }
         loadJob?.cancel()
         _phase.value = CleanupPhase.Loading
         loadJob = viewModelScope.launch {
@@ -142,25 +153,35 @@ class CleanupViewModel(
     fun cancelNamed() = _phase.update { if (it is CleanupPhase.ConfirmNamed) it.preview else it }
 
     private fun run(items: List<CleanupItem>) {
+        if (recreateBlocks()) {
+            _phase.value = CleanupPhase.Error(RECREATE_IN_PROGRESS_MESSAGE)
+            return
+        }
         // Refused while a run for this key is active (a double tap, or a run started from an earlier screen).
         if (sessions.start(key, items)) _phase.value = CleanupPhase.Running(0, items.size)
     }
 
-    /** Forgets a finished result once the sheet is closed, so it isn't shown again. */
-    fun acknowledge() = sessions.clear(key)
+    /** Closes the sheet and forgets a finished result, so it isn't shown again. A running cleanup keeps going. */
+    fun acknowledge() {
+        _sheetVisible.value = false
+        sessions.clear(key)
+    }
+
+    private fun recreateBlocks(): Boolean =
+        kind == CleanupKind.Containers && container.recreateSessions.isRunning(serverId, endpointId)
 
     private suspend fun buildPlan(client: PortainerClient): CleanupPlan {
         imagePlan = null
         return when (kind) {
             CleanupKind.Containers -> {
                 val cs = client.containers(endpointId)
-                CleanupPlanner.containers(cs, ResourceProtection(cs, resolveImages(client, cs)))
+                CleanupPlanner.containers(cs, ResourceProtection(cs, client.resolveIdOnlyImages(endpointId, cs)))
             }
             CleanupKind.Images -> {
                 val images = client.images(endpointId)
                 val cs = client.containers(endpointId)
                 val usage = ResourceUsage(cs)
-                val protection = ResourceProtection(cs, resolveImages(client, cs))
+                val protection = ResourceProtection(cs, client.resolveIdOnlyImages(endpointId, cs))
                 val rebuild = { tagged: Boolean -> CleanupPlanner.images(images, usage, protection, tagged) }
                 imagePlan = rebuild
                 rebuild(false)
@@ -177,29 +198,4 @@ class CleanupViewModel(
             }
         }
     }
-
-    /**
-     * `Config.Image` for every container (running or stopped) whose list image is only an id. A failed
-     * inspect, or one that again shows only an id, leaves the container unresolved so the planner keeps it.
-     */
-    private suspend fun resolveImages(client: PortainerClient, cs: List<ContainerSummary>): Map<String, String> =
-        cs.filter { isIdOnlyImage(it.image) }.mapNotNull { c ->
-            val image = try {
-                ((client.inspectContainer(endpointId, c.id)["Config"] as? JsonObject)?.get("Image") as? JsonPrimitive)?.content
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                null
-            }
-            image?.takeIf { it.isNotBlank() && !isIdOnlyImage(it) }?.let { c.id to it }
-        }.toMap()
-
-    /** Rethrows only when this coroutine itself was cancelled (a closed client cancels the call too). */
-    private suspend fun failureMessage(e: Exception): String =
-        if (e is CancellationException) {
-            if (!currentCoroutineContext().isActive) throw e
-            "The connection was interrupted"
-        } else {
-            safeMessage(e)
-        }
 }

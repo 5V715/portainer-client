@@ -1,7 +1,7 @@
 package dev.silas.portainer.app.cleanup
 
+import dev.silas.portainer.app.support.safeMessage
 import dev.silas.portainer.core.api.PortainerClient
-import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.cleanup.CleanupExecutor
 import dev.silas.portainer.core.cleanup.CleanupItem
 import dev.silas.portainer.core.cleanup.CleanupKind
@@ -90,10 +90,4 @@ class CleanupSessions(
     }
 
     private fun flowFor(key: CleanupKey) = sessions.getOrPut(key) { MutableStateFlow(null) }
-}
-
-/** Never the raw text of unexpected exceptions, so nothing sensitive can reach the UI. */
-internal fun safeMessage(e: Exception): String = when (e) {
-    is PortainerException, is IllegalStateException -> e.message ?: "Request failed"
-    else -> "Request failed"
 }
