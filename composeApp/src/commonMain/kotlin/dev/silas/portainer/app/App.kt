@@ -23,7 +23,6 @@ import dev.silas.portainer.app.containers.ContainerListViewModel
 import dev.silas.portainer.app.detail.ContainerDetailScreen
 import dev.silas.portainer.app.detail.ContainerDetailViewModel
 import dev.silas.portainer.app.detail.LogsViewModel
-import dev.silas.portainer.app.environment.ComingSoonScreen
 import dev.silas.portainer.app.environment.EnvTab
 import dev.silas.portainer.app.environment.EnvironmentShell
 import dev.silas.portainer.app.environments.EnvironmentsScreen
@@ -32,6 +31,10 @@ import dev.silas.portainer.app.images.ImageDetailScreen
 import dev.silas.portainer.app.images.ImageDetailViewModel
 import dev.silas.portainer.app.images.ImagesScreen
 import dev.silas.portainer.app.images.ImagesViewModel
+import dev.silas.portainer.app.networks.NetworkDetailScreen
+import dev.silas.portainer.app.networks.NetworkDetailViewModel
+import dev.silas.portainer.app.networks.NetworksScreen
+import dev.silas.portainer.app.networks.NetworksViewModel
 import dev.silas.portainer.app.volumes.VolumeDetailScreen
 import dev.silas.portainer.app.volumes.VolumeDetailViewModel
 import dev.silas.portainer.app.volumes.VolumesScreen
@@ -188,11 +191,29 @@ private fun AppNavHost(container: AppContainer) {
         }
         composable<Networks> { entry ->
             val route = entry.toRoute<Networks>()
+            val vm = viewModel(key = "networks-${route.serverId}-${route.endpointId}") {
+                NetworksViewModel(container, route.serverId, route.endpointId)
+            }
             val toEnvironments = { nav.popBackStack(Environments(route.serverId), inclusive = false); Unit }
             BackHandler(onBack = toEnvironments)
             EnvironmentShell(EnvTab.Networks, { nav.switchTab(route.serverId, route.endpointId, it) }) {
-                ComingSoonScreen("Networks", toEnvironments)
+                NetworksScreen(
+                    viewModel = vm,
+                    onOpen = { nav.navigate(NetworkDetail(route.serverId, route.endpointId, it)) },
+                    onBack = toEnvironments,
+                )
             }
+        }
+        composable<NetworkDetail> { entry ->
+            val route = entry.toRoute<NetworkDetail>()
+            val vm = viewModel(key = "network-${route.serverId}-${route.endpointId}-${route.networkId}") {
+                NetworkDetailViewModel(container, route.serverId, route.endpointId, route.networkId)
+            }
+            NetworkDetailScreen(
+                viewModel = vm,
+                onOpenContainer = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
+                onBack = { nav.popBackStack() },
+            )
         }
         composable<ContainerDetail> { entry ->
             val route = entry.toRoute<ContainerDetail>()
