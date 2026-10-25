@@ -25,6 +25,8 @@ import dev.silas.portainer.app.detail.ContainerDetailScreen
 import dev.silas.portainer.app.detail.ContainerDetailViewModel
 import dev.silas.portainer.app.detail.LogsViewModel
 import dev.silas.portainer.app.detail.QuickRecreateViewModel
+import dev.silas.portainer.app.editor.EditorScreen
+import dev.silas.portainer.app.editor.EditorViewModel
 import dev.silas.portainer.app.environment.EnvTab
 import dev.silas.portainer.app.environment.EnvironmentShell
 import dev.silas.portainer.app.environments.EnvironmentsScreen
@@ -271,6 +273,14 @@ private fun AppNavHost(container: AppContainer) {
                 onToContainers = { nav.popBackStack(Containers(route.serverId, route.endpointId), inclusive = false) },
                 onBack = { nav.popBackStack() },
             )
+        }
+        composable<Editor> { entry ->
+            val route = entry.toRoute<Editor>()
+            val vm = viewModel(key = "editor-${route.serverId}-${route.endpointId}-${route.containerId}") {
+                EditorViewModel(container, route.serverId, route.endpointId, route.containerId)
+            }
+            // The finish flows (review, deploy, progress) hook in at onContinue.
+            EditorScreen(viewModel = vm, onContinue = {}, onBack = { nav.popBackStack() })
         }
         composable<Registries> { entry ->
             val route = entry.toRoute<Registries>()

@@ -46,3 +46,7 @@ data class Networks(val serverId: String, val endpointId: Int)
 
 @Serializable
 data class NetworkDetail(val serverId: String, val endpointId: Int, val networkId: String)
+
+/** The container editor; [containerId] `null` = New container. */
+@Serializable
+data class Editor(val serverId: String, val endpointId: Int, val containerId: String?)

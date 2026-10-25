@@ -1,13 +1,13 @@
 package dev.silas.portainer.app.networks
 
-private fun isIpv4(s: String): Boolean {
+internal fun isIpv4(s: String): Boolean {
     val parts = s.split('.')
     return parts.size == 4 && parts.all { p ->
         p.isNotEmpty() && p.length <= 3 && (p.length == 1 || p[0] != '0') && p.all { it in '0'..'9' } && p.toInt() in 0..255
     }
 }
 
-private fun isIpv6(s: String): Boolean {
+internal fun isIpv6(s: String): Boolean {
     if (!s.contains(':') || s.any { it != ':' && it != '.' && it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) return false
     val doubles = Regex("::").findAll(s).count()
     if (doubles > 1 || s.contains(":::")) return false
