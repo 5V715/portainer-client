@@ -88,6 +88,13 @@ class FormMergeTest {
     }
 
     @Test
+    fun ipv6_host_ip_round_trips() {
+        val (merged, _) = edit { it.copy(ports = it.ports + PortRow("::", "8443", 443, "tcp")) }
+        assertEquals(json("""[{"HostIp": "::", "HostPort": "8443"}]"""), merged.hostConfig.getValue("PortBindings").jsonObject["443/tcp"])
+        assertEquals(PortRow("::", "8443", 443, "tcp"), FormParser.fromInspect(merged).ports.last())
+    }
+
+    @Test
     fun publish_all_toggle() {
         val (merged, fields) = edit { it.copy(publishAll = true) }
         assertEquals(setOf(FormField.Ports), fields)
@@ -140,24 +147,94 @@ class FormMergeTest {
     }
 
     @Test
-    fun new_mount_rows_go_to_mounts() {
+    fun new_bind_and_volume_rows_go_to_binds_and_tmpfs_to_mounts() {
         val (merged, fields) = edit {
             it.copy(
                 mounts = it.mounts +
                     MountRow(MountType.Bind, "/srv/extra", "/extra", readOnly = true, MountOrigin.New, null) +
+                    MountRow(MountType.Volume, "app-logs", "/logs", readOnly = false, MountOrigin.New, null) +
                     MountRow(MountType.Tmpfs, "", "/tmp", readOnly = false, MountOrigin.New, null),
             )
         }
         assertEquals(setOf(FormField.Mounts), fields)
-        assertEquals(full.hostConfig["Binds"], merged.hostConfig["Binds"])
         assertEquals(
-            json(
-                """[{"Type": "volume", "Source": "app-cache", "Target": "/cache"},
-                    {"Type": "bind", "Source": "/srv/extra", "Target": "/extra", "ReadOnly": true},
-                    {"Type": "tmpfs", "Target": "/tmp"}]""",
-            ),
+            json("""["/srv/app/config:/etc/app:ro", "app-uploads:/uploads", "/srv/extra:/extra:ro", "app-logs:/logs"]"""),
+            merged.hostConfig["Binds"],
+        )
+        assertEquals(
+            json("""[{"Type": "volume", "Source": "app-cache", "Target": "/cache"}, {"Type": "tmpfs", "Target": "/tmp"}]"""),
             merged.hostConfig["Mounts"],
         )
+    }
+
+    @Test
+    fun windows_bind_parses_and_toggles_read_only() {
+        val inspect = withHostConfig(full, "Binds", """["c:\\data:c:\\app:ro", "\\\\.\\pipe\\docker_engine:\\\\.\\pipe\\docker_engine"]""")
+        val rows = FormParser.fromInspect(inspect).mounts.filter { it.origin == MountOrigin.Binds }
+        assertEquals(
+            listOf(
+                MountRow(MountType.Bind, "c:\\data", "c:\\app", readOnly = true, MountOrigin.Binds, 0),
+                MountRow(MountType.Bind, "\\\\.\\pipe\\docker_engine", "\\\\.\\pipe\\docker_engine", readOnly = false, MountOrigin.Binds, 1),
+            ),
+            rows,
+        )
+        assertTrue(rows.all { FormMerger.isEditableInPlace(inspect, it) })
+        val (merged, _) = edit(inspect) { f -> f.copy(mounts = f.mounts.map { if (it.target == "c:\\app") it.copy(readOnly = false) else it }) }
+        assertEquals(
+            json("""["c:\\data:c:\\app:rw", "\\\\.\\pipe\\docker_engine:\\\\.\\pipe\\docker_engine"]"""),
+            merged.hostConfig["Binds"],
+        )
+    }
+
+    @Test
+    fun bind_the_grammar_cannot_reproduce_is_kept_verbatim() {
+        val inspect = withHostConfig(full, "Binds", """["/a:/b:"]""")
+        val row = FormParser.fromInspect(inspect).mounts.first()
+        assertFalse(FormMerger.isEditableInPlace(inspect, row))
+        val (merged, _) = edit(inspect) { f -> f.copy(mounts = f.mounts.map { if (it.target == "/b") it.copy(readOnly = true) else it }) }
+        assertEquals(json("""["/a:/b:"]"""), merged.hostConfig["Binds"])
+    }
+
+    @Test
+    fun explicit_rw_and_propagation_survive_toggle() {
+        val inspect = withHostConfig(full, "Binds", """["/srv/x:/x:rshared", "/srv/y:/y:rw,rshared"]""")
+        val (merged, _) = edit(inspect) { f -> f.copy(mounts = f.mounts.map { if (it.origin == MountOrigin.Binds) it.copy(readOnly = true) else it }) }
+        assertEquals(json("""["/srv/x:/x:ro,rshared", "/srv/y:/y:ro,rshared"]"""), merged.hostConfig["Binds"])
+        val (back, _) = edit(withHostConfig(full, "Binds", """["/srv/y:/y:ro,rshared"]""")) { f ->
+            f.copy(mounts = f.mounts.map { if (it.origin == MountOrigin.Binds) it.copy(readOnly = false) else it })
+        }
+        assertEquals(json("""["/srv/y:/y:rw,rshared"]"""), back.hostConfig["Binds"])
+    }
+
+    @Test
+    fun deleting_an_anonymous_binds_row() {
+        val inspect = withHostConfig(full, "Binds", """["/data", "/srv/a:/a"]""")
+        assertEquals(MountRow(MountType.Volume, "", "/data", readOnly = false, MountOrigin.Binds, 0), FormParser.fromInspect(inspect).mounts.first())
+        val (merged, _) = edit(inspect) { f -> f.copy(mounts = f.mounts.filterNot { it.target == "/data" }) }
+        assertEquals(json("""["/srv/a:/a"]"""), merged.hostConfig["Binds"])
+    }
+
+    @Test
+    fun binds_indices_are_into_the_raw_array() {
+        val inspect = withHostConfig(full, "Binds", """[null, "/x:/y"]""")
+        val row = FormParser.fromInspect(inspect).mounts.first()
+        assertEquals(1, row.originalIndex)
+        val (merged, _) = edit(inspect) { f -> f.copy(mounts = f.mounts.map { if (it.target == "/y") it.copy(readOnly = true) else it }) }
+        assertEquals(json("""["/x:/y:ro"]"""), merged.hostConfig["Binds"])
+    }
+
+    @Test
+    fun uncovered_mount_types_keep_their_position() {
+        val inspect = withHostConfig(
+            full, "Mounts",
+            """[{"Type": "volume", "Source": "a", "Target": "/a"}, {"Type": "npipe", "Source": "\\\\.\\pipe\\x", "Target": "\\\\.\\pipe\\x"},
+                {"Type": "volume", "Source": "b", "Target": "/b"}]""",
+        )
+        val (merged, _) = edit(inspect) { f -> f.copy(mounts = f.mounts.map { if (it.target == "/b") it.copy(readOnly = true) else it }) }
+        val mounts = merged.hostConfig.getValue("Mounts").jsonArray
+        assertEquals(inspect.hostConfig.getValue("Mounts").jsonArray[0], mounts[0])
+        assertEquals(inspect.hostConfig.getValue("Mounts").jsonArray[1], mounts[1])
+        assertEquals(json("""{"Type": "volume", "Source": "b", "Target": "/b", "ReadOnly": true}"""), mounts[2])
     }
 
     @Test
@@ -237,6 +314,15 @@ class FormMergeTest {
     }
 
     @Test
+    fun removing_the_primary_network_promotes_the_first_extra() {
+        val (merged, fields) = edit { it.copy(primaryNetwork = null) }
+        assertEquals(setOf(FormField.Networks), fields)
+        assertEquals(JsonPrimitive("backend"), merged.hostConfig["NetworkMode"])
+        assertEquals(setOf("backend"), merged.networks.keys)
+        assertEquals(full.networks["backend"], merged.networks["backend"])
+    }
+
+    @Test
     fun read_only_network_mode_is_never_rewritten() {
         val (merged, fields) = edit(netmode) { it.copy(env = it.env + "X=1") }
         assertEquals(setOf(FormField.Env), fields)
@@ -252,6 +338,12 @@ class FormMergeTest {
         assertEquals(setOf(FormField.Restart), fields)
         assertEquals(json("""{"Name": "on-failure", "MaximumRetryCount": 5}"""), merged.hostConfig["RestartPolicy"])
         assertEquals(full.hostConfig.without("RestartPolicy"), merged.hostConfig.without("RestartPolicy"))
+    }
+
+    @Test
+    fun retry_count_only_with_on_failure() {
+        val (merged, _) = edit { it.copy(restart = RestartPolicyForm("always", 3)) }
+        assertEquals(json("""{"Name": "always", "MaximumRetryCount": 0}"""), merged.hostConfig["RestartPolicy"])
     }
 
     @Test
@@ -334,6 +426,26 @@ class FormMergeTest {
         val (merged, _) = edit { it.copy(labels = emptyList(), env = emptyList()) }
         assertNull(merged.config["Labels"])
         assertNull(merged.config["Env"])
+    }
+
+    @Test
+    fun null_label_value_reads_as_empty_and_survives_unedited() {
+        val config = JsonObject(full.config + ("Labels" to json("""{"a": null, "b": "1"}""")))
+        val inspect = JsonObject(full + ("Config" to config))
+        val form = FormParser.fromInspect(inspect)
+        assertEquals(listOf("a" to "", "b" to "1"), form.labels)
+        assertEquals(inspect, FormMerger.merge(inspect, form, form.copy(env = form.env)).first)
+        val (merged, _) = edit(inspect) { it.copy(env = it.env + "X=1") }
+        assertEquals(json("""{"a": null, "b": "1"}"""), merged.config["Labels"])
+    }
+
+    @Test
+    fun duplicate_label_keys_keep_the_last_value_and_are_reported() {
+        val labels = listOf("a" to "1", "b" to "2", "a" to "3")
+        assertEquals(setOf("a"), duplicateLabelKeys(labels))
+        assertEquals(emptySet(), duplicateLabelKeys(listOf("a" to "1")))
+        val (merged, _) = edit { it.copy(labels = labels) }
+        assertEquals(json("""{"a": "3", "b": "2"}"""), merged.config["Labels"])
     }
 
     @Test

@@ -32,7 +32,7 @@ object FormParser {
             extraNetworks = networks?.drop(1).orEmpty(),
             networkModeReadOnly = readOnlyMode,
             env = config.array("Env").strings(),
-            labels = config.obj("Labels").orEmpty().mapNotNull { (k, v) -> (v as? JsonPrimitive)?.let { k to it.content } },
+            labels = config.obj("Labels").orEmpty().mapNotNull { (k, v) -> (v as? JsonPrimitive)?.let { k to if (it is JsonNull) "" else it.content } },
             restart = RestartPolicyForm(
                 name = host.obj("RestartPolicy")?.string("Name").orEmpty().ifEmpty { "no" },
                 maxRetries = host.obj("RestartPolicy")?.long("MaximumRetryCount")?.toInt() ?: 0,
@@ -70,14 +70,17 @@ object FormParser {
     }
 
     internal fun mountRows(host: JsonObject): List<MountRow> {
-        val binds = host.array("Binds").strings().mapIndexed { i, bind -> bindRow(bind, i) }
+        // Indices are into the raw arrays, as FormMerger reads them.
+        val binds = host.array("Binds").orEmpty().mapIndexedNotNull { i, b ->
+            (b as? JsonPrimitive)?.takeIf { it.isString }?.let { bindRow(it.content, i) }
+        }
         val mounts = host.array("Mounts").orEmpty().mapIndexedNotNull { i, m -> (m as? JsonObject)?.let { mountRow(it, i) } }
         return binds + mounts
     }
 
     internal fun bindRow(bind: String, index: Int): MountRow {
         val spec = parseBind(bind)
-        val type = if (spec.source?.startsWith("/") == true) MountType.Bind else MountType.Volume
+        val type = if (spec.source?.let(::isHostPath) == true) MountType.Bind else MountType.Volume
         return MountRow(type, spec.source.orEmpty(), spec.target, readOnly = "ro" in spec.options, MountOrigin.Binds, index)
     }
 

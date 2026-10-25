@@ -1,5 +1,6 @@
 package dev.silas.portainer.core.recreate
 
+import dev.silas.portainer.core.editor.parseBind
 import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import dev.silas.portainer.core.model.ImageRef
 import kotlinx.serialization.json.JsonArray
@@ -22,12 +23,6 @@ private val CONTAINER_MODE_STRIPPED = listOf("Hostname", "Domainname", "MacAddre
  * container is stopped before the new one starts).
  */
 private val ENDPOINT_FIELDS = listOf("IPAMConfig", "Links", "Aliases", "DriverOpts", "MacAddress", "GwPriority")
-
-/** Option words Docker accepts in the mode part of a `-v` spec (`[src:]dst[:mode]`). */
-private val BIND_MODE_WORDS = setOf(
-    "ro", "rw", "z", "Z", "nocopy", "shared", "rshared", "slave", "rslave", "private", "rprivate",
-    "consistent", "cached", "delegated",
-)
 
 /**
  * Turns `docker inspect` output plus the user's edits into a `POST /containers/create` body.
@@ -175,7 +170,7 @@ object RecreatePlanner {
             covered += spec.target
             val volume = volumes[spec.target]
             if (spec.source == null && volume != null) {
-                volumeBind(volume.string("Name")!!, spec.target, spec.mode ?: mountOptions(volume))
+                volumeBind(volume.string("Name")!!, spec.target, spec.options.joinToString(",").ifEmpty { null } ?: mountOptions(volume))
             } else {
                 bind
             }
@@ -200,20 +195,6 @@ object RecreatePlanner {
         if (binds != originalBinds || added.isNotEmpty()) result["Binds"] = JsonArray((binds + added).map { JsonPrimitive(it) })
         return JsonObject(result)
     }
-
-    private class BindSpec(val source: String?, val target: String, val mode: String?)
-
-    /** Parses a Linux `-v` spec: `dst`, `dst:mode`, `src:dst`, `src:dst:mode`. */
-    private fun parseBind(bind: String): BindSpec {
-        val parts = bind.split(':')
-        return when {
-            parts.size == 1 -> BindSpec(null, parts[0], null)
-            parts.size == 2 && isBindMode(parts[1]) -> BindSpec(null, parts[0], parts[1])
-            else -> BindSpec(parts[0], parts[1], parts.getOrNull(2))
-        }
-    }
-
-    private fun isBindMode(text: String) = text.split(',').all { it in BIND_MODE_WORDS }
 
     /** `-v` options for a reattached volume: `ro` when read-only, plus the mount's `Mode` (e.g. `z`, `nocopy`). */
     private fun mountOptions(volume: JsonObject): String? {

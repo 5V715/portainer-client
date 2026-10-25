@@ -49,7 +49,8 @@ object FormMerger {
                 FormField.Restart -> {
                     val policy = host.obj("RestartPolicy").orEmpty().toMutableMap()
                     policy["Name"] = JsonPrimitive(after.restart.name)
-                    policy["MaximumRetryCount"] = JsonPrimitive(after.restart.maxRetries)
+                    // Docker only accepts a retry count with on-failure.
+                    policy["MaximumRetryCount"] = JsonPrimitive(if (after.restart.name == "on-failure") after.restart.maxRetries else 0)
                     host["RestartPolicy"] = JsonObject(policy)
                 }
                 FormField.Resources -> mergeResources(host, before, after)
@@ -122,8 +123,10 @@ object FormMerger {
 
     /**
      * Rows go back to where they came from: `Binds` rows as `-v` strings (keeping their other mode words),
-     * `Mounts` rows as objects (keeping their other keys), new rows and tmpfs rows as `Mounts` objects.
-     * Unchanged rows keep their original JSON; `Mounts` entries of types the form doesn't cover are kept.
+     * `Mounts` rows as objects (keeping their other keys). New bind / named-volume rows become `Binds`
+     * strings (`-v` semantics: Docker creates a missing host path), tmpfs rows `Mounts` objects.
+     * Unchanged rows keep their original JSON; a `Binds` string that [isEditableInPlace] rejects is kept
+     * verbatim even when edited; `Mounts` entries of types the form doesn't cover keep their positions.
      */
     private fun mergeMounts(host: MutableMap<String, JsonElement>, before: ContainerForm, after: ContainerForm) {
         val originalBinds = host.array("Binds") ?: JsonArray(emptyList())
@@ -131,20 +134,37 @@ object FormMerger {
         val beforeRows = before.mounts.filter { it.origin != MountOrigin.New }.associateBy { it.origin to it.originalIndex }
 
         val binds = mutableListOf<JsonElement>()
-        val mounts = originalMounts.filterIndexed { i, m -> m !is JsonObject || FormParser.mountRow(m, i) == null }.toMutableList()
+        val mounts = mutableListOf<JsonElement>()
         for (row in after.mounts) {
             val prior = if (row.origin == MountOrigin.New) null else beforeRows[row.origin to row.originalIndex]
-            if (row.origin == MountOrigin.Binds && row.type != MountType.Tmpfs) {
-                val orig = row.originalIndex?.let { originalBinds.getOrNull(it) }
-                val origSpec = (orig as? JsonPrimitive)?.takeIf { it.isString }?.content?.let(::parseBind)
-                binds += if (prior == row && orig != null) orig else JsonPrimitive(bindString(row, origSpec))
+            val asBind = row.type != MountType.Tmpfs && (row.origin == MountOrigin.Binds || row.origin == MountOrigin.New)
+            if (asBind) {
+                val orig = if (row.origin == MountOrigin.Binds) row.originalIndex?.let { originalBinds.getOrNull(it) } else null
+                val origText = (orig as? JsonPrimitive)?.takeIf { it.isString }?.content
+                val origSpec = origText?.let(::parseBind)
+                val keepVerbatim = orig != null && (prior == row || prior == null || bindString(prior, origSpec) != origText)
+                binds += if (keepVerbatim) orig else JsonPrimitive(bindString(row, origSpec))
             } else {
                 val orig = if (row.origin == MountOrigin.Mounts) row.originalIndex?.let { originalMounts.getOrNull(it) as? JsonObject } else null
                 mounts += if (prior == row && orig != null) orig else mountObject(row, orig)
             }
         }
+        originalMounts.forEachIndexed { i, m ->
+            if (m !is JsonObject || FormParser.mountRow(m, i) == null) mounts.add(minOf(i, mounts.size), m)
+        }
         host.putIfChanged("Binds", JsonArray(binds).takeIf { it.isNotEmpty() }, originalBinds)
         host.putIfChanged("Mounts", JsonArray(mounts).takeIf { it.isNotEmpty() }, originalMounts)
+    }
+
+    /**
+     * Whether an edit of [row] (as parsed from [original]) can be written back without losing anything: false for a `Binds` string this
+     * app's `-v` grammar doesn't reproduce exactly (the merge then keeps it verbatim; the UI should lock the row).
+     */
+    fun isEditableInPlace(original: JsonObject, row: MountRow): Boolean {
+        if (row.origin != MountOrigin.Binds) return true
+        val text = row.originalIndex?.let { original.obj("HostConfig")?.array("Binds")?.getOrNull(it) as? JsonPrimitive }?.content
+            ?: return true
+        return bindString(row, parseBind(text)) == text
     }
 
     /** `[src:]dst[:opts]`; the `ro`/`rw` word is set from the row, the original's other words are kept. */
@@ -194,13 +214,15 @@ object FormMerger {
         } else {
             val beforeByName = (listOfNotNull(before.primaryNetwork) + before.extraNetworks).associateBy { it.name }
             val out = linkedMapOf<String, JsonElement>()
+            // Removing the primary network while others remain promotes the first remaining one.
+            val primaryRow = after.primaryNetwork ?: after.extraNetworks.firstOrNull()
             for (row in listOfNotNull(after.primaryNetwork) + after.extraNetworks) {
                 val orig = originalNetworks[row.name] as? JsonObject
                 val prior = beforeByName[row.name]
                 out[row.name] = if (orig != null && prior == row) orig else endpoint(row, orig, prior)
             }
             networks = JsonObject(out)
-            val primary = after.primaryNetwork?.name
+            val primary = primaryRow?.name
             if (primary != null && (primary != before.primaryNetwork?.name || before.networkModeReadOnly != null)) {
                 host["NetworkMode"] = JsonPrimitive(primary)
             }

@@ -27,12 +27,35 @@ private val BIND_MODE_WORDS = setOf(
     "consistent", "cached", "delegated",
 )
 
-/** A parsed Linux `-v` spec; [options] are the comma-separated mode words. */
+/** A parsed `-v` spec; [options] are the comma-separated mode words. */
 internal class BindSpec(val source: String?, val target: String, val options: List<String>)
 
-/** Parses `dst`, `dst:mode`, `src:dst`, `src:dst:mode`. */
+/** True when [s] has a Windows drive path (`c:\…`, `c:/…`) at [index]. */
+internal fun isDrivePath(s: String, index: Int = 0): Boolean =
+    index + 2 < s.length && (s[index] in 'A'..'Z' || s[index] in 'a'..'z') && s[index + 1] == ':' && (s[index + 2] == '\\' || s[index + 2] == '/')
+
+/** Host paths (as opposed to volume names): absolute Linux paths, Windows drive paths, `\\.\pipe\…` / UNC. */
+internal fun isHostPath(source: String) = source.startsWith("/") || isDrivePath(source) || source.startsWith("\\\\")
+
+/** Splits a `-v` spec at `:`, except the colon of a Windows drive letter that starts a segment. */
+private fun bindSegments(bind: String): List<String> {
+    val segments = mutableListOf<String>()
+    var start = 0
+    while (true) {
+        val from = if (isDrivePath(bind, start)) start + 2 else start
+        val colon = bind.indexOf(':', from)
+        if (colon < 0) {
+            segments += bind.substring(start)
+            return segments
+        }
+        segments += bind.substring(start, colon)
+        start = colon + 1
+    }
+}
+
+/** Parses `dst`, `dst:mode`, `src:dst`, `src:dst:mode` (Linux and Windows paths). The one `-v` grammar of the app. */
 internal fun parseBind(bind: String): BindSpec {
-    val parts = bind.split(':')
+    val parts = bindSegments(bind)
     fun opts(text: String?) = text?.split(',')?.filter { it.isNotEmpty() }.orEmpty()
     return when {
         parts.size == 1 -> BindSpec(null, parts[0], emptyList())

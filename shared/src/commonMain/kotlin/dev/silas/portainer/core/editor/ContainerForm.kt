@@ -68,3 +68,7 @@ data class RestartPolicyForm(val name: String /* no|always|on-failure|unless-sto
 
 /** Form sections; [FormMerger] reports which ones the user edited. */
 enum class FormField { Image, Name, Command, Entrypoint, WorkingDir, User, Ports, Mounts, Networks, Env, Labels, Restart, Resources }
+
+/** Label keys that occur more than once; the merge keeps the last value, so the UI should flag these. */
+fun duplicateLabelKeys(labels: List<Pair<String, String>>): Set<String> =
+    labels.groupingBy { it.first }.eachCount().filterValues { it > 1 }.keys
