@@ -35,6 +35,8 @@ private val TABS = listOf("Overview", "Logs")
 fun ContainerDetailScreen(
     viewModel: ContainerDetailViewModel,
     logsViewModel: @Composable (tty: Boolean) -> LogsViewModel,
+    quickRecreate: QuickRecreateViewModel,
+    onQuickRecreated: () -> Unit,
     onEditRecreate: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -50,6 +52,15 @@ fun ContainerDetailScreen(
         }
     }
 
+    val quick by quickRecreate.state.collectAsState()
+    LaunchedEffect(quick.error) {
+        quick.error?.let {
+            snackbar.showSnackbar(it)
+            quickRecreate.clearError()
+        }
+    }
+    QuickRecreateSheet(quickRecreate, onQuickRecreated)
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -57,6 +68,7 @@ fun ContainerDetailScreen(
                 navigationIcon = { BackButton(onBack) },
                 actions = {
                     if (overview != null && !overview.protectedImage) {
+                        TextButton(onClick = quickRecreate::open) { Text("Recreate") }
                         TextButton(onClick = onEditRecreate) { Text("Edit & recreate") }
                     }
                 },

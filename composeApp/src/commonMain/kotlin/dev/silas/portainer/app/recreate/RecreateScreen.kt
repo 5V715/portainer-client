@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import dev.silas.portainer.app.theme.BackButton
 import dev.silas.portainer.app.theme.StatusTone
 import dev.silas.portainer.app.theme.color
+import dev.silas.portainer.core.model.Registry
 import dev.silas.portainer.core.recreate.ChangeSummary
 import dev.silas.portainer.core.recreate.RecreateStep
 import dev.silas.portainer.core.recreate.RecreateWarning
@@ -147,7 +148,7 @@ private fun EditForm(state: RecreateState, vm: RecreateViewModel) {
             Text("Pull latest image", Modifier.weight(1f))
             Switch(checked = state.pull, onCheckedChange = vm::setPull)
         }
-        RegistryPicker(state, vm)
+        RegistryPicker(state.registries, state.registryId, vm::setRegistry)
 
         Text("Environment variables", style = MaterialTheme.typography.titleSmall)
         state.env.forEachIndexed { index, entry ->
@@ -184,10 +185,11 @@ private fun EditForm(state: RecreateState, vm: RecreateViewModel) {
     }
 }
 
+/** "Registry used for the pull" dropdown; [onPick] gets null for none (public). */
 @Composable
-private fun RegistryPicker(state: RecreateState, vm: RecreateViewModel) {
+internal fun RegistryPicker(registries: List<Registry>, registryId: Int?, onPick: (Int?) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    val selected = state.registries.firstOrNull { it.id == state.registryId }?.name ?: NO_REGISTRY
+    val selected = registries.firstOrNull { it.id == registryId }?.name ?: NO_REGISTRY
     Column {
         Text("Registry", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Box {
@@ -195,9 +197,9 @@ private fun RegistryPicker(state: RecreateState, vm: RecreateViewModel) {
                 Text(selected, Modifier.weight(1f))
             }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                DropdownMenuItem(text = { Text(NO_REGISTRY) }, onClick = { vm.setRegistry(null); open = false })
-                state.registries.forEach { r ->
-                    DropdownMenuItem(text = { Text(r.name) }, onClick = { vm.setRegistry(r.id); open = false })
+                DropdownMenuItem(text = { Text(NO_REGISTRY) }, onClick = { onPick(null); open = false })
+                registries.forEach { r ->
+                    DropdownMenuItem(text = { Text(r.name) }, onClick = { onPick(r.id); open = false })
                 }
             }
         }

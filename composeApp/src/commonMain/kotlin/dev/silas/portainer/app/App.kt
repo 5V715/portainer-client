@@ -24,6 +24,7 @@ import dev.silas.portainer.app.containers.ContainerListViewModel
 import dev.silas.portainer.app.detail.ContainerDetailScreen
 import dev.silas.portainer.app.detail.ContainerDetailViewModel
 import dev.silas.portainer.app.detail.LogsViewModel
+import dev.silas.portainer.app.detail.QuickRecreateViewModel
 import dev.silas.portainer.app.environment.EnvTab
 import dev.silas.portainer.app.environment.EnvironmentShell
 import dev.silas.portainer.app.environments.EnvironmentsScreen
@@ -246,6 +247,10 @@ private fun AppNavHost(container: AppContainer) {
                         LogsViewModel(container, route.serverId, route.endpointId, route.containerId, tty)
                     }
                 },
+                quickRecreate = viewModel(key = "quick-$key") {
+                    QuickRecreateViewModel(container, route.serverId, route.endpointId, route.containerId)
+                },
+                onQuickRecreated = { nav.navigate(Recreate(route.serverId, route.endpointId, route.containerId)) },
                 onEditRecreate = { nav.navigate(Recreate(route.serverId, route.endpointId, route.containerId)) },
                 onBack = { nav.popBackStack() },
             )
