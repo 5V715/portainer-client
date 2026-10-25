@@ -43,6 +43,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import dev.silas.portainer.app.cleanup.CleanupOverflow
+import dev.silas.portainer.app.cleanup.CleanupPhase
 import dev.silas.portainer.app.cleanup.CleanupSheet
 import dev.silas.portainer.app.cleanup.CleanupViewModel
 import dev.silas.portainer.app.theme.BackButton
@@ -61,7 +62,8 @@ fun NetworksScreen(
         onPauseOrDispose {}
     }
     val snackbar = remember { SnackbarHostState() }
-    var showCleanup by remember { mutableStateOf(false) }
+    // Back on the screen while a cleanup runs (or finished meanwhile): show it again.
+    var showCleanup by remember { mutableStateOf(cleanup.phase.value.let { it is CleanupPhase.Running || it is CleanupPhase.Done }) }
     var pendingRemove by remember { mutableStateOf<NetworkItem?>(null) }
     var showCreate by remember { mutableStateOf(false) }
 
@@ -148,7 +150,12 @@ fun NetworksScreen(
         CreateNetworkSheet(state.create, state.drivers, viewModel::create, onDismiss = { showCreate = false })
     }
 
-    if (showCleanup) CleanupSheet(cleanup, onDismiss = { showCleanup = false })
+    if (showCleanup) {
+        CleanupSheet(cleanup, onDismiss = {
+            showCleanup = false
+            cleanup.acknowledge()
+        })
+    }
 }
 
 @Composable

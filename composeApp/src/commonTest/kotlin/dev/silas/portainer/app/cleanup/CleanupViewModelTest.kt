@@ -9,8 +9,12 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import dev.silas.portainer.core.cleanup.CleanupItem
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.resetMain
@@ -27,10 +31,15 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalCoroutinesApi::class)
 class CleanupViewModelTest {
     private val json = headersOf(HttpHeaders.ContentType, "application/json")
-    private val requests = mutableListOf<String>()
+    // Appended from the engine's threads while the test reads it: an atomic snapshot list.
+    private val requestLog = MutableStateFlow(emptyList<String>())
+    private val requests: List<String> get() = requestLog.value
     private val failingDeletes = mutableSetOf<String>()
     private val failingInspects = mutableSetOf<String>()
     private val inspectImages = mutableMapOf<String, String>()
+    /** When set, every DELETE waits for it, so a run can be observed while Running. */
+    private var deleteGate: CompletableDeferred<Unit>? = null
+    private var testEnv: TestEnv? = null
 
     private val a = "sha256:" + "a".repeat(64)
     private val b = "sha256:" + "b".repeat(64)
@@ -69,10 +78,12 @@ class CleanupViewModelTest {
     @AfterTest
     fun tearDown() = Dispatchers.resetMain()
 
-    private suspend fun env(): TestEnv {
+    private suspend fun env(): TestEnv = testEnv ?: newEnv().also { testEnv = it }
+
+    private suspend fun newEnv(): TestEnv {
         val env = TestEnv { req ->
             val path = req.url.encodedPath
-            requests += "${req.method.value} $path"
+            requestLog.update { it + "${req.method.value} $path" }
             when {
                 req.method == HttpMethod.Get && path.endsWith("/images/json") -> respond(imagesJson, HttpStatusCode.OK, json)
                 req.method == HttpMethod.Get && path.endsWith("/volumes") -> respond(volumesJson, HttpStatusCode.OK, json)
@@ -88,6 +99,7 @@ class CleanupViewModelTest {
                     }
                 }
                 req.method == HttpMethod.Delete -> {
+                    deleteGate?.await()
                     val target = path.substringAfterLast('/')
                     if (target in failingDeletes) {
                         respond("""{"message":"conflict: in use"}""", HttpStatusCode.Conflict, json)
@@ -186,6 +198,7 @@ class CleanupViewModelTest {
         assertEquals(1, result.failed)
         assertEquals(20L, result.reclaimedBytes) // only the deleted item's size
         assertEquals(listOf(b), result.failures.map { it.item.id })
+        assertEquals(listOf(CleanupItem(d, "<none> ${"d".repeat(12)}", 20L)), result.deletedItems)
         assertEquals("conflict: in use", result.failures.single().message)
         assertEquals(2, deletes().size) // the failure doesn't stop the rest
     }
@@ -268,5 +281,82 @@ class CleanupViewModelTest {
         settle { vm.phase.value is CleanupPhase.Error }
         val message = (vm.phase.value as CleanupPhase.Error).message
         assertFalse(message.contains("secret-key"), message)
+    }
+
+    @Test
+    fun aNewViewModelReattachesToARunningAndThenFinishedCleanup() = runTest {
+        deleteGate = CompletableDeferred()
+        val first = preview(CleanupKind.Networks)
+        first.confirm()
+        settle { first.phase.value is CleanupPhase.Running }
+        // The screen was left (tab switch) and opened again: a new ViewModel for the same key.
+        var refreshed = 0
+        val second = CleanupViewModel(env().container, "s1", 1, CleanupKind.Networks) { refreshed++ }
+        assertIs<CleanupPhase.Running>(second.phase.value)
+        second.open() // ignored while running
+        assertIs<CleanupPhase.Running>(second.phase.value)
+        deleteGate!!.complete(Unit)
+        val result = done(second)
+        assertEquals(listOf("n2", "n3"), result.deletedItems.map { it.id })
+        settle { refreshed == 1 }
+
+        // Finished while away: yet another ViewModel shows the result and refreshes its list.
+        var refreshedLater = 0
+        val third = CleanupViewModel(env().container, "s1", 1, CleanupKind.Networks) { refreshedLater++ }
+        assertIs<CleanupPhase.Done>(third.phase.value)
+        settle { refreshedLater == 1 }
+        third.acknowledge()
+        settle { third.phase.value == CleanupPhase.Idle }
+        assertEquals(2, deletes().size)
+    }
+
+    @Test
+    fun aSecondRunForTheSameKeyIsRefusedWhileOneIsActive() = runTest {
+        deleteGate = CompletableDeferred()
+        val first = preview(CleanupKind.Networks)
+        val items = assertIs<CleanupPhase.Preview>(first.phase.value).selected
+        first.confirm()
+        val key = CleanupKey("s1", 1, CleanupKind.Networks)
+        assertFalse(env().container.cleanupSessions.start(key, items))
+        val second = CleanupViewModel(env().container, "s1", 1, CleanupKind.Networks)
+        second.confirm()
+        deleteGate!!.complete(Unit)
+        done(first)
+        assertEquals(listOf("n2", "n3").map { "DELETE /api/endpoints/1/docker/networks/$it" }, deletes())
+    }
+
+    @Test
+    fun doubleConfirmSendsEachDeleteOnce() = runTest {
+        val vm = preview(CleanupKind.Networks)
+        vm.confirm()
+        vm.confirm()
+        done(vm)
+        assertEquals(listOf("n2", "n3").map { "DELETE /api/endpoints/1/docker/networks/$it" }, deletes())
+    }
+
+    @Test
+    fun optionTogglesAreIgnoredDuringTheSecondConfirmation() = runTest {
+        val vm = preview(CleanupKind.Volumes)
+        vm.setIncludeNamed(true)
+        vm.confirm()
+        val confirming = assertIs<CleanupPhase.ConfirmNamed>(vm.phase.value)
+        vm.setIncludeNamed(false)
+        vm.setIncludeTagged(true)
+        assertEquals(confirming, vm.phase.value)
+        vm.confirmNamed()
+        done(vm)
+        assertEquals(2, deletes().size)
+    }
+
+    @Test
+    fun aRunThatCannotStartEndsInDoneWithAnErrorNote() = runTest {
+        val vm = preview(CleanupKind.Networks)
+        env().repo.delete("s1") // the server is gone: no client for the run
+        vm.confirm()
+        val result = done(vm)
+        assertEquals(0, result.deleted)
+        assertTrue(result.deletedItems.isEmpty())
+        assertEquals("Unknown server", result.error)
+        assertTrue(deletes().isEmpty())
     }
 }

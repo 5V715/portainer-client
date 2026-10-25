@@ -11,6 +11,9 @@ const val PORTAINER_DATA_VOLUME = "portainer_data"
 
 private val ID_ONLY = Regex("sha256:.*|[0-9a-fA-F]{64}")
 
+/** True when [image] is only an image id (`sha256:...` or 64 hex), not a name that can be recognised. */
+fun isIdOnlyImage(image: String): Boolean = ID_ONLY.matches(image)
+
 /**
  * Decides what the app must never remove. [resolvedImages] maps container id to its `Config.Image`
  * for containers whose list `image` is only an id (`sha256:...` / 64 hex), so they can still be recognised.
@@ -24,7 +27,7 @@ class ResourceProtection(
     fun isContainerProtected(c: ContainerSummary): Boolean = isProtectedImage(resolvedImages[c.id] ?: c.image)
 
     /** The list shows only an image id and [resolvedImages] has no answer, so the real image is unknown. */
-    fun isImageUnresolved(c: ContainerSummary): Boolean = c.id !in resolvedImages && ID_ONLY.matches(c.image)
+    fun isImageUnresolved(c: ContainerSummary): Boolean = c.id !in resolvedImages && isIdOnlyImage(c.image)
 
     fun isImageProtected(image: ImageSummary): Boolean =
         image.isProtected() ||

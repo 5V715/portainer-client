@@ -4,6 +4,7 @@ import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.platform.httpEngine
 import dev.silas.portainer.core.storage.ServerConfig
 import dev.silas.portainer.core.storage.ServerRepository
+import dev.silas.portainer.app.cleanup.CleanupSessions
 import dev.silas.portainer.app.recreate.RecreateSessions
 import io.ktor.client.engine.HttpClientEngine
 import kotlinx.coroutines.CoroutineScope
@@ -26,6 +27,9 @@ class AppContainer(
 ) {
     /** Running and finished recreates, so screens can come and go without affecting the operation. */
     val recreateSessions = RecreateSessions(appScope, nowEpochSeconds)
+
+    /** Running and finished cleanups, so switching tabs or leaving a list never stops or loses one. */
+    val cleanupSessions = CleanupSessions(appScope) { dedicatedClient(it) }
 
     private val lock = Mutex()
     private val clients = mutableMapOf<String, PortainerClient>()

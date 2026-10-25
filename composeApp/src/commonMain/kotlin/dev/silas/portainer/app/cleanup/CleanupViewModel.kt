@@ -4,24 +4,20 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
 import dev.silas.portainer.core.api.PortainerClient
-import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.containers
 import dev.silas.portainer.core.api.images
 import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.api.networks
 import dev.silas.portainer.core.api.volumes
-import dev.silas.portainer.core.cleanup.CleanupExecutor
 import dev.silas.portainer.core.cleanup.CleanupItem
 import dev.silas.portainer.core.cleanup.CleanupKind
 import dev.silas.portainer.core.cleanup.CleanupPlan
 import dev.silas.portainer.core.cleanup.CleanupPlanner
-import dev.silas.portainer.core.cleanup.CleanupProgress
-import dev.silas.portainer.core.cleanup.deleter
 import dev.silas.portainer.core.model.ContainerSummary
 import dev.silas.portainer.core.resources.ResourceProtection
 import dev.silas.portainer.core.resources.ResourceUsage
+import dev.silas.portainer.core.resources.isIdOnlyImage
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,13 +25,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 const val NAMED_VOLUMES_WARNING = "Named volumes often hold databases and app data. Everything in them is deleted permanently."
-
-private val ID_ONLY_IMAGE = Regex("sha256:.*|[0-9a-fA-F]{64}")
 
 data class CleanupFailure(val item: CleanupItem, val message: String)
 
@@ -55,12 +48,22 @@ sealed interface CleanupPhase {
     /** Second confirmation before deleting named volumes; [preview] is what goes back on cancel. */
     data class ConfirmNamed(val preview: Preview) : CleanupPhase
     data class Running(val completed: Int, val total: Int) : CleanupPhase
-    data class Done(val deleted: Int, val failed: Int, val reclaimedBytes: Long, val failures: List<CleanupFailure>) : CleanupPhase
+    /** [error] says why the run stopped early; the counts and lists still hold what had happened by then. */
+    data class Done(
+        val deleted: Int,
+        val failed: Int,
+        val reclaimedBytes: Long,
+        val failures: List<CleanupFailure>,
+        val deletedItems: List<CleanupItem> = emptyList(),
+        val error: String? = null,
+    ) : CleanupPhase
 }
 
 /**
- * Previews a cleanup of one resource [kind] and runs it in [AppContainer.appScope], so closing the sheet or
- * leaving the screen never stops it. [onFinished] (the list's refresh) runs on the main thread afterwards.
+ * Previews a cleanup of one resource [kind]; the run itself belongs to [AppContainer.cleanupSessions], so closing
+ * the sheet, switching tabs or leaving the screen never stops it, and a new ViewModel for the same server,
+ * endpoint and kind re-attaches to it. [onFinished] (the list's refresh) runs when a finished run is seen,
+ * including one that finished while the screen was gone.
  */
 class CleanupViewModel(
     private val container: AppContainer,
@@ -69,7 +72,10 @@ class CleanupViewModel(
     val kind: CleanupKind,
     private val onFinished: () -> Unit = {},
 ) : ViewModel() {
-    private val _phase = MutableStateFlow<CleanupPhase>(CleanupPhase.Idle)
+    private val key = CleanupKey(serverId, endpointId, kind)
+    private val sessions = container.cleanupSessions
+    private val session = sessions.phase(key)
+    private val _phase = MutableStateFlow(session.value ?: CleanupPhase.Idle)
     val phase: StateFlow<CleanupPhase> = _phase
 
     private var loadJob: Job? = null
@@ -77,9 +83,27 @@ class CleanupViewModel(
     /** Rebuilds the image plan from the lists already loaded (only set for images). */
     private var imagePlan: ((includeTagged: Boolean) -> CleanupPlan)? = null
 
-    /** Builds a fresh preview; ignored while a cleanup is running. */
+    init {
+        viewModelScope.launch {
+            var last: CleanupPhase? = null
+            session.collect { run ->
+                if (run is CleanupPhase.Done && last !is CleanupPhase.Done) onFinished()
+                last = run
+                _phase.update { current ->
+                    when {
+                        run != null -> run
+                        current is CleanupPhase.Running || current is CleanupPhase.Done -> CleanupPhase.Idle
+                        else -> current
+                    }
+                }
+            }
+        }
+    }
+
+    /** Builds a fresh preview (forgetting a finished result); ignored while a cleanup is running. */
     fun open() {
-        if (_phase.value is CleanupPhase.Running) return
+        if (session.value is CleanupPhase.Running) return
+        sessions.clear(key)
         loadJob?.cancel()
         _phase.value = CleanupPhase.Loading
         loadJob = viewModelScope.launch {
@@ -118,38 +142,12 @@ class CleanupViewModel(
     fun cancelNamed() = _phase.update { if (it is CleanupPhase.ConfirmNamed) it.preview else it }
 
     private fun run(items: List<CleanupItem>) {
-        _phase.value = CleanupPhase.Running(0, items.size)
-        container.appScope.launch {
-            var client: PortainerClient? = null
-            try {
-                // A client of its own: saving or deleting the server can't close it mid-cleanup.
-                val dedicated = container.dedicatedClient(serverId).also { client = it }
-                val failures = mutableListOf<CleanupFailure>()
-                var completed = 0
-                CleanupExecutor(kind.deleter(dedicated, endpointId)).run(items).collect { event ->
-                    when (event) {
-                        is CleanupProgress.Deleted -> completed++
-                        is CleanupProgress.Failed -> {
-                            completed++
-                            failures += CleanupFailure(event.item, event.message)
-                        }
-                        is CleanupProgress.Finished -> {
-                            _phase.value = CleanupPhase.Done(event.deleted, event.failed, event.reclaimedBytes, failures.toList())
-                            return@collect
-                        }
-                    }
-                    _phase.value = CleanupPhase.Running(completed, items.size)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _phase.value = CleanupPhase.Error(safeMessage(e))
-            } finally {
-                client?.close()
-            }
-            withContext(Dispatchers.Main) { onFinished() }
-        }
+        // Refused while a run for this key is active (a double tap, or a run started from an earlier screen).
+        if (sessions.start(key, items)) _phase.value = CleanupPhase.Running(0, items.size)
     }
+
+    /** Forgets a finished result once the sheet is closed, so it isn't shown again. */
+    fun acknowledge() = sessions.clear(key)
 
     private suspend fun buildPlan(client: PortainerClient): CleanupPlan {
         imagePlan = null
@@ -185,7 +183,7 @@ class CleanupViewModel(
      * inspect, or one that again shows only an id, leaves the container unresolved so the planner keeps it.
      */
     private suspend fun resolveImages(client: PortainerClient, cs: List<ContainerSummary>): Map<String, String> =
-        cs.filter { ID_ONLY_IMAGE.matches(it.image) }.mapNotNull { c ->
+        cs.filter { isIdOnlyImage(it.image) }.mapNotNull { c ->
             val image = try {
                 ((client.inspectContainer(endpointId, c.id)["Config"] as? JsonObject)?.get("Image") as? JsonPrimitive)?.content
             } catch (e: CancellationException) {
@@ -193,7 +191,7 @@ class CleanupViewModel(
             } catch (e: Exception) {
                 null
             }
-            image?.takeIf { it.isNotBlank() && !ID_ONLY_IMAGE.matches(it) }?.let { c.id to it }
+            image?.takeIf { it.isNotBlank() && !isIdOnlyImage(it) }?.let { c.id to it }
         }.toMap()
 
     /** Rethrows only when this coroutine itself was cancelled (a closed client cancels the call too). */
@@ -204,9 +202,4 @@ class CleanupViewModel(
         } else {
             safeMessage(e)
         }
-
-    private fun safeMessage(e: Exception): String = when (e) {
-        is PortainerException, is IllegalStateException -> e.message ?: "Request failed"
-        else -> "Request failed"
-    }
 }

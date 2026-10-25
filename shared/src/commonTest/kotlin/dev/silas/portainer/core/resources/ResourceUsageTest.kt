@@ -45,4 +45,13 @@ class ResourceUsageTest {
         assertTrue(byString.isImageUsed("sha256:Q"))
         assertFalse(ResourceUsage(listOf(c("y"))).isImageUsed(""))
     }
+
+    @Test
+    fun idOnlyImages() {
+        assertTrue(isIdOnlyImage("sha256:" + "a".repeat(64)))
+        assertTrue(isIdOnlyImage("A".repeat(64)))
+        assertFalse(isIdOnlyImage("nginx:latest"))
+        assertFalse(isIdOnlyImage("a".repeat(63)))
+        assertFalse(isIdOnlyImage("portainer/portainer-ce"))
+    }
 }

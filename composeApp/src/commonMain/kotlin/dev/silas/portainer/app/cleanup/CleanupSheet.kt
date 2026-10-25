@@ -125,6 +125,11 @@ fun CleanupSheet(viewModel: CleanupViewModel, onDismiss: () -> Unit) {
                         val reclaimed = if (p.reclaimedBytes > 0) " · ${formatBytes(p.reclaimedBytes)} reclaimed" else ""
                         Text("Deleted ${p.deleted}$reclaimed", style = MaterialTheme.typography.titleMedium)
                     }
+                    p.error?.let { note -> item { Text(note, color = MaterialTheme.colorScheme.error) } }
+                    if (p.deletedItems.isNotEmpty()) {
+                        item { Section("Deleted (${p.deletedItems.size})") }
+                        items(p.deletedItems, key = { "x-" + it.id }) { ItemRow(it) }
+                    }
                     if (p.failures.isNotEmpty()) {
                         item { Section("Not deleted (${p.failed})", MaterialTheme.colorScheme.error) }
                         items(p.failures, key = { "f-" + it.item.id }) {
