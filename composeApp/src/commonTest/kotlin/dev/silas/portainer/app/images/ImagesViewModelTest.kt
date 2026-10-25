@@ -8,7 +8,9 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import io.ktor.utils.io.ByteChannel
 import io.ktor.utils.io.writeStringUtf8
@@ -204,6 +206,10 @@ class ImagesViewModelTest {
         stream.flushAndClose()
         settle { vm.state.value.pull.status is PullStatus.Done }
         assertNull(vm.state.value.pull.progress)
+        // A finished pull reloads the list on the engine's threads: let it finish so nothing touches Main after the test.
+        settle { imageListCalls == 2 && !vm.state.value.loading }
+        vm.viewModelScope.cancel()
+        advanceUntilIdle()
     }
 
     @Test
