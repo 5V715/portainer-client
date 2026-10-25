@@ -42,3 +42,33 @@ internal fun isoDate(epochSeconds: Long): String {
     val year = yoe + era * 400 + if (month <= 2) 1 else 0
     return "${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}"
 }
+
+private val RFC3339 = Regex("""(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?""")
+
+/** Unix seconds from an RFC3339 timestamp such as Docker's `2026-10-01T10:00:00Z`; null when it doesn't parse. */
+fun parseRfc3339(text: String?): Long? {
+    val m = RFC3339.matchEntire(text?.trim().orEmpty()) ?: return null
+    val (y, mo, d, h, mi, s) = m.destructured
+    val zone = m.groupValues[7]
+    val offset = if (zone.length == 6) {
+        val sign = if (zone[0] == '-') -1 else 1
+        sign * (zone.substring(1, 3).toLong() * 3600 + zone.substring(4, 6).toLong() * 60)
+    } else {
+        0L
+    }
+    return daysFromCivil(y.toLong(), mo.toLong(), d.toLong()) * DAY + h.toLong() * 3600 + mi.toLong() * 60 + s.toLong() - offset
+}
+
+/** Same wording as [formatCreated], for an RFC3339 timestamp; "unknown" when missing or unparseable. */
+fun formatCreatedRfc3339(createdAt: String?, nowEpochSeconds: Long): String =
+    formatCreated(parseRfc3339(createdAt) ?: 0, nowEpochSeconds)
+
+/** Days since 1970-01-01 for a proleptic Gregorian date (inverse of [isoDate]). */
+private fun daysFromCivil(year: Long, month: Long, day: Long): Long {
+    val y = if (month <= 2) year - 1 else year
+    val era = y.floorDiv(400L)
+    val yoe = y - era * 400
+    val doy = (153 * (if (month > 2) month - 3 else month + 9) + 2) / 5 + day - 1
+    val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146_097 + doe - 719_468
+}

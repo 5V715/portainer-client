@@ -32,6 +32,10 @@ import dev.silas.portainer.app.images.ImageDetailScreen
 import dev.silas.portainer.app.images.ImageDetailViewModel
 import dev.silas.portainer.app.images.ImagesScreen
 import dev.silas.portainer.app.images.ImagesViewModel
+import dev.silas.portainer.app.volumes.VolumeDetailScreen
+import dev.silas.portainer.app.volumes.VolumeDetailViewModel
+import dev.silas.portainer.app.volumes.VolumesScreen
+import dev.silas.portainer.app.volumes.VolumesViewModel
 import dev.silas.portainer.app.registries.RegistriesScreen
 import dev.silas.portainer.app.registries.RegistriesViewModel
 import dev.silas.portainer.app.registries.RegistryEditScreen
@@ -157,11 +161,30 @@ private fun AppNavHost(container: AppContainer) {
         }
         composable<Volumes> { entry ->
             val route = entry.toRoute<Volumes>()
+            val vm = viewModel(key = "volumes-${route.serverId}-${route.endpointId}") {
+                VolumesViewModel(container, route.serverId, route.endpointId)
+            }
             val toEnvironments = { nav.popBackStack(Environments(route.serverId), inclusive = false); Unit }
             BackHandler(onBack = toEnvironments)
             EnvironmentShell(EnvTab.Volumes, { nav.switchTab(route.serverId, route.endpointId, it) }) {
-                ComingSoonScreen("Volumes", toEnvironments)
+                VolumesScreen(
+                    viewModel = vm,
+                    nowEpochSeconds = container.nowEpochSeconds,
+                    onOpen = { nav.navigate(VolumeDetail(route.serverId, route.endpointId, it)) },
+                    onBack = toEnvironments,
+                )
             }
+        }
+        composable<VolumeDetail> { entry ->
+            val route = entry.toRoute<VolumeDetail>()
+            val vm = viewModel(key = "volume-${route.serverId}-${route.endpointId}-${route.name}") {
+                VolumeDetailViewModel(container, route.serverId, route.endpointId, route.name)
+            }
+            VolumeDetailScreen(
+                viewModel = vm,
+                onOpenContainer = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
+                onBack = { nav.popBackStack() },
+            )
         }
         composable<Networks> { entry ->
             val route = entry.toRoute<Networks>()
