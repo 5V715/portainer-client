@@ -121,7 +121,7 @@ class ConflictCheckerTest {
         val b = body("""{"NetworkingConfig":{"EndpointsConfig":{"backend":{"IPAMConfig":{"IPv4Address":"172.18.0.5"}}}}}""")
         val n = net("id1" to NetworkMember("db", "172.18.0.5/16", null), "id2" to NetworkMember("x", "172.18.0.9/16", null))
         val result = check(b, networks = listOf(n))
-        assertEquals(listOf(Conflict.FixedIpInUse("backend", "172.18.0.5", "db")), result)
+        assertEquals(listOf(Conflict.FixedIpInUse("backend", "172.18.0.5", "db", running = true)), result)
         assertTrue(result.single().blocking)
         assertEquals(emptyList(), check(b, networks = listOf(n), exclude = "id1"))
     }
@@ -130,7 +130,7 @@ class ConflictCheckerTest {
     fun fixedIpv6InUseBlocks() {
         val b = body("""{"NetworkingConfig":{"EndpointsConfig":{"backend":{"IPAMConfig":{"IPv6Address":"fd00::5"}}}}}""")
         val n = net("id1" to NetworkMember("db", null, "fd00::5/64"))
-        assertEquals(listOf(Conflict.FixedIpInUse("backend", "fd00::5", "db")), check(b, networks = listOf(n)))
+        assertEquals(listOf(Conflict.FixedIpInUse("backend", "fd00::5", "db", running = true)), check(b, networks = listOf(n)))
     }
 
     @Test
@@ -139,7 +139,8 @@ class ConflictCheckerTest {
         val others = listOf(c("id1", "/db", state = ContainerState.Exited))
         val stoppedIps = mapOf("/db" to listOf("backend" to "172.18.0.5"))
         val result = check(b, others = others, networks = listOf(net()), stoppedIps = stoppedIps)
-        assertEquals(listOf(Conflict.FixedIpInUse("backend", "172.18.0.5", "db")), result)
+        assertEquals(listOf(Conflict.FixedIpInUse("backend", "172.18.0.5", "db", running = false)), result)
+        // Copy / New: blocks even though the holder is stopped (one of the two could not start).
         assertTrue(result.single().blocking)
         // Another network, another IP, or the container a Replace overwrites: no clash.
         assertEquals(emptyList(), check(b, others = others, stoppedIps = mapOf("/db" to listOf("frontend" to "172.18.0.5"))))

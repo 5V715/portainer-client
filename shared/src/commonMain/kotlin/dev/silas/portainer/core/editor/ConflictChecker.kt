@@ -13,12 +13,16 @@ sealed interface Conflict {
 
     data class HostPortInUse(val port: String, val protocol: String, val byContainer: String, val running: Boolean) : Conflict
 
-    data class FixedIpInUse(val network: String, val ip: String, val byContainer: String) : Conflict
+    /** [running]: the holder is a running network member; false for a stopped container whose endpoint asks for [ip]. */
+    data class FixedIpInUse(val network: String, val ip: String, val byContainer: String, val running: Boolean) : Conflict
 
     data class SharedNamedVolume(val volume: String) : Conflict
 }
 
-/** Conflicts that must be resolved before deploying; the rest are warnings. */
+/**
+ * Conflicts that must be resolved before deploying a copy / new container; the rest are warnings. A fixed IP blocks
+ * even when its holder is stopped: one of the two could not start. (Replace decides on its own which ones block.)
+ */
 val Conflict.blocking: Boolean
     get() = when (this) {
         is Conflict.NameTaken, is Conflict.FixedIpInUse -> true
@@ -116,9 +120,9 @@ object ConflictChecker {
                 .filter { it.key != excludeContainerId }
             wanted.flatMap { ip ->
                 members.filter { (_, m) -> listOfNotNull(m.ipv4, m.ipv6).any { it.substringBefore('/') == ip } }
-                    .map { (_, m) -> Conflict.FixedIpInUse(networkName, ip, m.name.removePrefix("/")) } +
+                    .map { (_, m) -> Conflict.FixedIpInUse(networkName, ip, m.name.removePrefix("/"), running = true) } +
                     stopped.filter { (_, ips) -> ips.any { (n, held) -> n == networkName && held.substringBefore('/') == ip } }
-                        .map { (holder, _) -> Conflict.FixedIpInUse(networkName, ip, holder.removePrefix("/")) }
+                        .map { (holder, _) -> Conflict.FixedIpInUse(networkName, ip, holder.removePrefix("/"), running = false) }
             }
         }
     }

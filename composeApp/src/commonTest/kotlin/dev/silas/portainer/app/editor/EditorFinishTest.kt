@@ -62,6 +62,7 @@ class EditorFinishTest {
     private var createGate: CompletableDeferred<Unit>? = null
     @kotlin.concurrent.Volatile private var inspectGate: CompletableDeferred<Unit>? = null
     private var listedName = "db"
+    private var stoppedIp = "172.20.0.9"
     private var running = true
     private var imageVolume = ""
     private var labels = "{}"
@@ -91,8 +92,8 @@ class EditorFinishTest {
        "Ports":[{"IP":"0.0.0.0","PrivatePort":6379,"PublicPort":7000,"Type":"tcp"}]}
     ]"""
 
-    private val stoppedInspect = """{"Id":"ddd000","Name":"/db","HostConfig":{"PortBindings":{"5432/tcp":[{"HostIp":"","HostPort":"5432"}]}},
-      "NetworkSettings":{"Networks":{"front":{"NetworkID":"n2","IPAMConfig":{"IPv4Address":"172.20.0.9"},"IPAddress":""}}}}"""
+    private fun stoppedInspect() = """{"Id":"ddd000","Name":"/db","HostConfig":{"PortBindings":{"5432/tcp":[{"HostIp":"","HostPort":"5432"}]}},
+      "NetworkSettings":{"Networks":{"front":{"NetworkID":"n2","IPAMConfig":{"IPv4Address":"$stoppedIp"},"IPAddress":""}}}}"""
 
     // A network inspect lists running endpoints only.
     private fun frontNetwork() = """{"Id":"n2","Name":"front","Driver":"bridge",
@@ -107,7 +108,7 @@ class EditorFinishTest {
                 inspectGate?.await()
                 respond(inspect(), HttpStatusCode.OK, json)
             }
-            path.endsWith("/containers/ddd000/json") -> respond(stoppedInspect, HttpStatusCode.OK, json)
+            path.endsWith("/containers/ddd000/json") -> respond(stoppedInspect(), HttpStatusCode.OK, json)
             path.endsWith("/containers/json") -> respond(list(), HttpStatusCode.OK, json)
             path.endsWith("/images/sha256:old/json") -> respond("""{"Config":{"Env":[]}}""", HttpStatusCode.OK, json)
             path.endsWith("/api/registries") -> respond(registries, HttpStatusCode.OK, json)
@@ -238,7 +239,7 @@ class EditorFinishTest {
         running = false
         val vm = loaded(env())
         val review = reviewing(vm, FinishAction.Copy)
-        assertTrue(Conflict.FixedIpInUse("front", "172.20.0.5", "web") in review.blocking, "${review.conflicts}")
+        assertTrue(Conflict.FixedIpInUse("front", "172.20.0.5", "web", running = false) in review.blocking, "${review.conflicts}")
         assertFalse(review.canConfirm)
 
         vm.backToForm()
@@ -381,7 +382,7 @@ class EditorFinishTest {
         val last = vm.state.value.draft.networks.lastIndex
         vm.updateNetwork(last, NetworkDraft("front", "", "172.20.0.9", "", ""))
         val review = reviewing(vm, FinishAction.Create)
-        assertTrue(Conflict.FixedIpInUse("front", "172.20.0.9", "db") in review.blocking, "${review.conflicts}")
+        assertTrue(Conflict.FixedIpInUse("front", "172.20.0.9", "db", running = false) in review.blocking, "${review.conflicts}")
         assertFalse(review.canConfirm)
     }
 
@@ -608,6 +609,34 @@ class EditorFinishTest {
         val review = reviewing(vm, FinishAction.Replace)
         assertTrue(review.blocking.isEmpty())
         assertTrue(review.warnings.any { it.contains("stopped container db") }, "${review.warnings}")
+    }
+
+    @Test
+    fun replaceOnlyWarnsAboutAStoppedHolderOfItsFixedIp() = runTest {
+        // A leftover from an earlier replace, stopped, still set to the original's IP.
+        listedName = "web-old-1700000000"
+        stoppedIp = "172.20.0.5"
+        val vm = loaded(env())
+        val review = reviewing(vm, FinishAction.Replace)
+        val conflict = Conflict.FixedIpInUse("front", "172.20.0.5", "web-old-1700000000", running = false)
+        assertTrue(conflict in review.conflicts, "${review.conflicts}")
+        assertTrue(review.blocking.isEmpty(), "${review.blocking}")
+        assertTrue(
+            review.warnings.any { it.contains("stopped container web-old-1700000000") && it.contains("won't be able to start") },
+            "${review.warnings}",
+        )
+        assertTrue(review.canConfirm)
+    }
+
+    @Test
+    fun copyWithAStoppedHolderOfItsFixedIpIsBlocked() = runTest {
+        stoppedIp = "172.20.0.99"
+        val vm = loaded(env())
+        vm.updatePort(0, PortDraft("", "9090", "80", "tcp"))
+        vm.updateNetwork(0, vm.state.value.draft.networks[0].copy(ipv4 = "172.20.0.99"))
+        val review = reviewing(vm, FinishAction.Copy)
+        assertTrue(Conflict.FixedIpInUse("front", "172.20.0.99", "db", running = false) in review.blocking, "${review.conflicts}")
+        assertFalse(review.canConfirm)
     }
 
     @Test

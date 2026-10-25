@@ -88,7 +88,9 @@ fun conflictText(c: Conflict): String = when (c) {
     is Conflict.HostPortInUse ->
         if (c.running) "Host port ${c.port}/${c.protocol} is in use by running container ${c.byContainer}."
         else "Host port ${c.port}/${c.protocol} is also published by stopped container ${c.byContainer}; only one of them can run at a time."
-    is Conflict.FixedIpInUse -> "IP ${c.ip} on network ${c.network} is already used by container ${c.byContainer}."
+    is Conflict.FixedIpInUse ->
+        if (c.running) "IP ${c.ip} on network ${c.network} is already used by container ${c.byContainer}."
+        else "IP ${c.ip} on network ${c.network} is set on stopped container ${c.byContainer}; it won't be able to start while this one runs."
     is Conflict.SharedNamedVolume -> "Both containers will use volume ${c.volume}."
 }
 
@@ -239,13 +241,14 @@ internal fun buildReview(
     val excluded = if (copy) null else (fresh["Id"] as? JsonPrimitive)?.content
     val all = ctx.inputs.check(plan.createBody, plan.extraNetworks, plan.containerName, excluded)
     // Replace: the container already uses its volumes. A port / IP clash only matters when the new container is
-    // started (the original was running) next to a running holder; the start would fail and roll back.
+    // started (the original was running) next to a running holder; the start would fail and roll back. A stopped
+    // holder only warns: it is the one that can't start afterwards.
     val conflicts = if (copy) all else all.filterNot { it is Conflict.SharedNamedVolume }
     val blocking = if (copy) {
         conflicts.filter { it.blocking }
     } else {
         conflicts.filter {
-            it is Conflict.NameTaken || plan.wasRunning && (it is Conflict.FixedIpInUse || it is Conflict.HostPortInUse && it.running)
+            it is Conflict.NameTaken || plan.wasRunning && (it is Conflict.FixedIpInUse && it.running || it is Conflict.HostPortInUse && it.running)
         }
     }
     val start = if (copy) copyStart ?: plan.wasRunning else plan.wasRunning
