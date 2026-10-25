@@ -21,6 +21,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -41,7 +43,8 @@ fun QuickRecreateSheet(viewModel: QuickRecreateViewModel, onStarted: () -> Unit)
         }
     }
     if (state.phase == QuickPhase.Closed || state.phase == QuickPhase.Started) return
-    val sheetState = rememberModalBottomSheetState(confirmValueChange = { !state.starting })
+    val starting by rememberUpdatedState(state.starting)
+    val sheetState = rememberModalBottomSheetState(confirmValueChange = { !starting })
     ModalBottomSheet(onDismissRequest = viewModel::dismiss, sheetState = sheetState) {
         Column(
             Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
