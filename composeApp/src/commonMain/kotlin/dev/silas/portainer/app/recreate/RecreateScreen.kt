@@ -89,6 +89,7 @@ internal fun summaryLines(c: ChangeSummary): List<String> = buildList {
 @Composable
 fun RecreateScreen(
     viewModel: RecreateViewModel,
+    quick: Boolean = false,
     onSucceeded: (newId: String) -> Unit,
     onToContainers: () -> Unit,
     onBack: () -> Unit,
@@ -106,7 +107,7 @@ fun RecreateScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("Edit & recreate") }, navigationIcon = { BackButton(onBack) })
+            TopAppBar(title = { Text(if (quick) "Recreate" else "Edit & recreate") }, navigationIcon = { BackButton(onBack) })
         },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {

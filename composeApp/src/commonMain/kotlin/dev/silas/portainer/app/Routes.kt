@@ -18,7 +18,7 @@ data class Containers(val serverId: String, val endpointId: Int)
 data class ContainerDetail(val serverId: String, val endpointId: Int, val containerId: String)
 
 @Serializable
-data class Recreate(val serverId: String, val endpointId: Int, val containerId: String)
+data class Recreate(val serverId: String, val endpointId: Int, val containerId: String, val quick: Boolean = false)
 
 @Serializable
 data class Registries(val serverId: String)

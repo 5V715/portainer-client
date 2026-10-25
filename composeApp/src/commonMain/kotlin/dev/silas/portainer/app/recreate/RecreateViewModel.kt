@@ -94,7 +94,7 @@ class RecreateViewModel(
 
     private fun showProgress(p: RecreateProgress) {
         val phase = p.result?.let { RecreatePhase.Done(p.steps, it) } ?: RecreatePhase.Running(p.steps)
-        _state.update { it.copy(phase = phase) }
+        _state.update { it.copy(phase = phase, containerName = it.containerName.ifEmpty { p.containerName }) }
     }
 
     private suspend fun load() {

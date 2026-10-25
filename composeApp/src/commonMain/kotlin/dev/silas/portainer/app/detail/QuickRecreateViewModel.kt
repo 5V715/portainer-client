@@ -5,7 +5,6 @@ import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
 import dev.silas.portainer.app.recreate.SessionKey
 import dev.silas.portainer.core.api.PortainerClient
-import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.api.inspectImage
 import dev.silas.portainer.core.api.registries
@@ -75,7 +74,9 @@ class QuickRecreateViewModel(
                 // Registries are only a convenience; an account that can't list them still gets to recreate.
                 val registries = try {
                     client.registries()
-                } catch (e: PortainerException) {
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
                     emptyList()
                 }
                 val match = matchFor(image, registries)
@@ -108,19 +109,28 @@ class QuickRecreateViewModel(
                 val fresh = client.inspectContainer(endpointId, containerId)
                 if (isProtectedImage(fresh.configImage())) return@launch fail(PROTECTED_IMAGE_MESSAGE)
                 val plan = plan(client, fresh, current.pull, current.registryId)
-                // A client of its own, owned by the session: saving or deleting the server can't close it mid-recreate.
-                val dedicated = container.dedicatedClient(serverId)
-                container.recreateSessions.start(key, dedicated, containerId, plan)
-                _state.update { it.copy(phase = QuickPhase.Started, starting = false) }
+                if (plan.warnings != current.warnings) {
+                    // The container changed since the sheet opened: show what applies now and ask again.
+                    _state.update { it.copy(warnings = plan.warnings, starting = false) }
+                    return@launch
+                }
+                val sessions = container.recreateSessions
+                // A finished result of an earlier run would make start() ignore this one; a run in flight is just shown.
+                if (sessions.progress(key).value?.result != null) sessions.clear(key)
+                if (sessions.progress(key).value == null) {
+                    // A client of its own, owned by the session: saving or deleting the server can't close it mid-recreate.
+                    sessions.start(key, container.dedicatedClient(serverId), containerId, plan)
+                }
+                _state.update { if (it.phase == QuickPhase.Ready && it.starting) it.copy(phase = QuickPhase.Started, starting = false) else it }
             } catch (e: Exception) {
                 fail(requestFailure(e))
             }
         }
     }
 
-    /** Closes the sheet (also after the session started). */
+    /** Closes the sheet. Refused while the recreate is being started, so cancelling can't race it into running. */
     fun dismiss() {
-        _state.update { QuickRecreateState(error = it.error) }
+        _state.update { if (it.phase == QuickPhase.Ready && it.starting) it else QuickRecreateState(error = it.error) }
     }
 
     fun clearError() = _state.update { it.copy(error = null) }

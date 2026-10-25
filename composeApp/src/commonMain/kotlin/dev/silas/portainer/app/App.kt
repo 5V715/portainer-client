@@ -250,7 +250,7 @@ private fun AppNavHost(container: AppContainer) {
                 quickRecreate = viewModel(key = "quick-$key") {
                     QuickRecreateViewModel(container, route.serverId, route.endpointId, route.containerId)
                 },
-                onQuickRecreated = { nav.navigate(Recreate(route.serverId, route.endpointId, route.containerId)) },
+                onQuickRecreated = { nav.navigate(Recreate(route.serverId, route.endpointId, route.containerId, quick = true)) },
                 onEditRecreate = { nav.navigate(Recreate(route.serverId, route.endpointId, route.containerId)) },
                 onBack = { nav.popBackStack() },
             )
@@ -262,6 +262,7 @@ private fun AppNavHost(container: AppContainer) {
             }
             RecreateScreen(
                 viewModel = vm,
+                quick = route.quick,
                 onSucceeded = { newId ->
                     nav.navigate(ContainerDetail(route.serverId, route.endpointId, newId)) {
                         popUpTo(ContainerDetail(route.serverId, route.endpointId, route.containerId)) { inclusive = true }

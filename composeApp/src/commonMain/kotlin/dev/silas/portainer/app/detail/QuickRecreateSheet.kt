@@ -15,6 +15,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,7 +41,8 @@ fun QuickRecreateSheet(viewModel: QuickRecreateViewModel, onStarted: () -> Unit)
         }
     }
     if (state.phase == QuickPhase.Closed || state.phase == QuickPhase.Started) return
-    ModalBottomSheet(onDismissRequest = viewModel::dismiss) {
+    val sheetState = rememberModalBottomSheetState(confirmValueChange = { !state.starting })
+    ModalBottomSheet(onDismissRequest = viewModel::dismiss, sheetState = sheetState) {
         Column(
             Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -61,7 +63,7 @@ fun QuickRecreateSheet(viewModel: QuickRecreateViewModel, onStarted: () -> Unit)
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                    TextButton(onClick = viewModel::dismiss) { Text("Cancel") }
+                    TextButton(onClick = viewModel::dismiss, enabled = !state.starting) { Text("Cancel") }
                     Button(onClick = viewModel::confirm, enabled = !state.starting) { Text(if (state.starting) "Starting…" else "Recreate") }
                 }
             }

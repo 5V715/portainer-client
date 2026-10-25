@@ -25,7 +25,7 @@ sealed interface RecreateResult {
 }
 
 /** Progress of one recreate. [result] is null while it is still running. */
-data class RecreateProgress(val steps: List<StepState>, val result: RecreateResult? = null)
+data class RecreateProgress(val steps: List<StepState>, val result: RecreateResult? = null, val containerName: String = "")
 
 /** The steps [plan] will run, in order (optional ones only when they apply). */
 internal fun plannedSteps(plan: RecreatePlan): List<RecreateStep> = RecreateStep.entries.filter {
@@ -60,7 +60,7 @@ class RecreateSessions(private val scope: CoroutineScope, private val nowEpochSe
             client.close()
             return
         }
-        state.value = RecreateProgress(plannedSteps(plan).map { StepState(it, StepStatus.Pending) })
+        state.value = RecreateProgress(plannedSteps(plan).map { StepState(it, StepStatus.Pending) }, containerName = plan.containerName)
         val recreator = Recreator(PortainerDockerOps(client, key.endpointId), nowEpochSeconds)
         scope.launch {
             try {

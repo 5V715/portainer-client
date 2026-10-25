@@ -18,6 +18,7 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.content.OutgoingContent
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -25,6 +26,10 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -38,12 +43,14 @@ class QuickRecreateViewModelTest {
     private val requests = mutableListOf<String>()
     private var createBody = ""
     private var image = "ghcr.io/acme/app:1"
+    private var autoRemove = false
+    private var createGate: CompletableDeferred<Unit>? = null
 
     private fun inspect() = """{
       "Id":"abcdef1234567890","Name":"/web","Image":"sha256:old",
       "State":{"Status":"running","Running":true},
       "Config":{"Image":"$image","Env":["A=1","PATH=/x"],"Labels":{"com.docker.compose.project":"shop"}},
-      "HostConfig":{"NetworkMode":"bridge"},
+      "HostConfig":{"NetworkMode":"bridge","AutoRemove":$autoRemove},
       "NetworkSettings":{"Networks":{"bridge":{"NetworkID":"n1"}}}
     }"""
 
@@ -60,6 +67,7 @@ class QuickRecreateViewModelTest {
             path.endsWith("/api/registries") -> respond(registries, HttpStatusCode.OK, json)
             path.endsWith("/containers/create") -> {
                 createBody = (r.body as? OutgoingContent.ByteArrayContent)?.bytes()?.decodeToString().orEmpty()
+                createGate?.await()
                 respond("""{"Id":"new1"}""", HttpStatusCode.Created, json)
             }
             r.method == HttpMethod.Post || r.method == HttpMethod.Delete -> respond("", HttpStatusCode.NoContent)
@@ -103,8 +111,10 @@ class QuickRecreateViewModelTest {
         settle { vm.state.value.phase == QuickPhase.Started }
         settle { env.container.recreateSessions.progress(SessionKey("s1", 1, "abc")).value?.result != null }
         assertTrue("POST /images/create" in requests.map { it.substringBefore('?') }, "pull on by default: $requests")
-        assertTrue(createBody.contains("ghcr.io/acme/app:1"))
-        assertTrue(createBody.contains("A=1"))
+        val body = Json.parseToJsonElement(createBody).jsonObject
+        assertEquals("ghcr.io/acme/app:1", body["Image"]!!.jsonPrimitive.content)
+        // PATH=/x equals the image default, so the planner leaves it to the image: nothing is added, changed or removed.
+        assertEquals(listOf("A=1"), body["Env"]!!.jsonArray.map { it.jsonPrimitive.content }, "no env diff against the inspected Env")
     }
 
     @Test
@@ -132,15 +142,79 @@ class QuickRecreateViewModelTest {
         assertTrue(requests.none { it.contains("/containers/create") })
     }
 
+    private fun TestScope.creates() = requests.count { it.contains("/containers/create") }
+    private val key = SessionKey("s1", 1, "abc")
+
     @Test
     fun confirmStartsASessionOnADedicatedClientThatSurvivesServerDeletion() = runTest {
         val env = env()
+        val gate = CompletableDeferred<Unit>().also { createGate = it }
         val vm = ready(env)
         vm.confirm()
-        settle { vm.state.value.phase == QuickPhase.Started }
-        env.container.deleteServer("s1")
-        settle { env.container.recreateSessions.progress(SessionKey("s1", 1, "abc")).value?.result != null }
-        val progress: RecreateProgress = assertNotNull(env.container.recreateSessions.progress(SessionKey("s1", 1, "abc")).value)
+        settle { vm.state.value.phase == QuickPhase.Started && creates() == 1 }
+        env.container.deleteServer("s1") // while the create request is still in flight
+        gate.complete(Unit)
+        settle { env.container.recreateSessions.progress(key).value?.result != null }
+        val progress: RecreateProgress = assertNotNull(env.container.recreateSessions.progress(key).value)
         assertEquals(RecreateResult.Success("new1"), progress.result)
+    }
+
+    @Test
+    fun dismissIsRefusedWhileStartingSoTheRecreateStillRunsOnce() = runTest {
+        val env = env()
+        val vm = ready(env)
+        vm.confirm()
+        vm.dismiss() // before the start was reached
+        assertEquals(QuickPhase.Ready, vm.state.value.phase)
+        assertTrue(vm.state.value.starting)
+        settle { vm.state.value.phase == QuickPhase.Started }
+        settle { env.container.recreateSessions.progress(key).value?.result != null }
+        assertEquals(1, creates())
+        vm.dismiss()
+        assertEquals(QuickPhase.Closed, vm.state.value.phase)
+    }
+
+    @Test
+    fun changedWarningsAreShownAndNeedASecondTap() = runTest {
+        val env = env()
+        val vm = ready(env)
+        autoRemove = true // changed outside the app after the sheet opened
+        vm.confirm()
+        settle { !vm.state.value.starting }
+        assertEquals(QuickPhase.Ready, vm.state.value.phase)
+        assertTrue(RecreateWarning.AutoRemove in vm.state.value.warnings)
+        assertEquals(0, creates())
+        vm.confirm()
+        settle { vm.state.value.phase == QuickPhase.Started }
+        settle { env.container.recreateSessions.progress(key).value?.result != null }
+        assertEquals(1, creates())
+    }
+
+    @Test
+    fun aFinishedEarlierResultIsClearedSoANewRecreateRuns() = runTest {
+        val env = env()
+        val first = ready(env)
+        first.confirm()
+        settle { env.container.recreateSessions.progress(key).value?.result != null }
+        val second = ready(env)
+        second.confirm()
+        settle { second.state.value.phase == QuickPhase.Started }
+        settle { env.container.recreateSessions.progress(key).value?.result != null }
+        assertEquals(2, creates())
+    }
+
+    @Test
+    fun aRecreateAlreadyInFlightIsJustShown() = runTest {
+        val env = env()
+        val gate = CompletableDeferred<Unit>().also { createGate = it }
+        val first = ready(env)
+        val second = ready(env)
+        first.confirm()
+        settle { creates() == 1 }
+        second.confirm()
+        settle { second.state.value.phase == QuickPhase.Started }
+        gate.complete(Unit)
+        settle { env.container.recreateSessions.progress(key).value?.result != null }
+        assertEquals(1, creates())
     }
 }
