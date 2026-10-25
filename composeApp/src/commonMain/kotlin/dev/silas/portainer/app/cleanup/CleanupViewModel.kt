@@ -226,9 +226,12 @@ class CleanupViewModel(
     /** Closes the sheet and forgets a finished result, so it isn't shown again. A running cleanup keeps going. */
     fun acknowledge() {
         _sheetVisible.value = false
+        loadJob?.cancel()
         sizesJob?.cancel()
-        // A stale preview (maybe still "calculating") is never shown again: reopening goes through open().
-        _phase.update { if (it is CleanupPhase.Preview || it is CleanupPhase.ConfirmNamed) CleanupPhase.Idle else it }
+        // A stale or still-loading preview (maybe still "calculating") is never shown again: reopening goes through open().
+        _phase.update {
+            if (it is CleanupPhase.Loading || it is CleanupPhase.Preview || it is CleanupPhase.ConfirmNamed) CleanupPhase.Idle else it
+        }
         sessions.clear(key)
     }
 

@@ -57,6 +57,8 @@ class CleanupViewModelTest {
     ],"Images":[]}"""
     private var dfStatus = HttpStatusCode.OK
     private var dfGate: CompletableDeferred<Unit>? = null
+    /** When set, the volume list waits for it, so the preview stays Loading. */
+    private var volumesGate: CompletableDeferred<Unit>? = null
 
     private val a = "sha256:" + "a".repeat(64)
     private val b = "sha256:" + "b".repeat(64)
@@ -130,7 +132,10 @@ class CleanupViewModelTest {
                     dfGate?.await()
                     respond(dfJson, dfStatus, json)
                 }
-                req.method == HttpMethod.Get && path.endsWith("/volumes") -> respond(volumesJson, HttpStatusCode.OK, json)
+                req.method == HttpMethod.Get && path.endsWith("/volumes") -> {
+                    volumesGate?.await()
+                    respond(volumesJson, HttpStatusCode.OK, json)
+                }
                 req.method == HttpMethod.Get && path.endsWith("/networks") -> respond(networksJson, HttpStatusCode.OK, json)
                 req.method == HttpMethod.Get && path.endsWith("/containers/json") -> respond(containersJson, HttpStatusCode.OK, json)
                 req.method == HttpMethod.Get && path.contains("/containers/") && path.endsWith("/json") -> {
@@ -585,6 +590,22 @@ class CleanupViewModelTest {
         settle { vm.phase.value is CleanupPhase.Preview && !preview(vm).sizesPending }
         assertEquals(2, requests.count { it.endsWith("/system/df") })
         assertEquals("2 kB can be recovered", preview(vm).recoverableLine)
+    }
+
+    @Test
+    fun closingTheSheetWhileLoadingCancelsTheLoad() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        volumesGate = gate
+        val vm = CleanupViewModel(env().container, "s1", 1, CleanupKind.Volumes)
+        vm.open()
+        settle { requests.any { it.endsWith("/volumes") } }
+        assertEquals(CleanupPhase.Loading, vm.phase.value)
+        vm.acknowledge()
+        assertEquals(CleanupPhase.Idle, vm.phase.value)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(CleanupPhase.Idle, vm.phase.value, "the cancelled load never shows a preview")
+        assertTrue(requests.none { it.endsWith("/system/df") }, "$requests")
     }
 
     @Test
