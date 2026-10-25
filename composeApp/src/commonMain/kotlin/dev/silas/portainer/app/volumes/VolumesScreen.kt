@@ -42,6 +42,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import dev.silas.portainer.app.cleanup.CleanupOverflow
+import dev.silas.portainer.app.cleanup.CleanupSheet
+import dev.silas.portainer.app.cleanup.CleanupViewModel
 import dev.silas.portainer.app.images.formatCreatedRfc3339
 import dev.silas.portainer.app.theme.BackButton
 
@@ -51,6 +54,7 @@ fun VolumesScreen(
     viewModel: VolumesViewModel,
     nowEpochSeconds: () -> Long,
     onOpen: (name: String) -> Unit,
+    cleanup: CleanupViewModel,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
@@ -59,6 +63,7 @@ fun VolumesScreen(
         onPauseOrDispose {}
     }
     val snackbar = remember { SnackbarHostState() }
+    var showCleanup by remember { mutableStateOf(false) }
     var pendingRemove by remember { mutableStateOf<VolumeItem?>(null) }
     var showCreate by remember { mutableStateOf(false) }
 
@@ -79,6 +84,10 @@ fun VolumesScreen(
                         viewModel.openCreate()
                         showCreate = true
                     }) { Text("Create") }
+                    CleanupOverflow {
+                        cleanup.open()
+                        showCleanup = true
+                    }
                 },
             )
         },
@@ -141,6 +150,8 @@ fun VolumesScreen(
     if (showCreate) {
         CreateVolumeSheet(state.create, viewModel::create, onDismiss = { showCreate = false })
     }
+
+    if (showCleanup) CleanupSheet(cleanup, onDismiss = { showCleanup = false })
 }
 
 @Composable

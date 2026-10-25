@@ -43,6 +43,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import dev.silas.portainer.app.cleanup.CleanupOverflow
+import dev.silas.portainer.app.cleanup.CleanupSheet
+import dev.silas.portainer.app.cleanup.CleanupViewModel
 import dev.silas.portainer.app.theme.BackButton
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -51,6 +54,7 @@ fun ImagesScreen(
     viewModel: ImagesViewModel,
     nowEpochSeconds: () -> Long,
     onOpen: (imageId: String) -> Unit,
+    cleanup: CleanupViewModel,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
@@ -59,6 +63,7 @@ fun ImagesScreen(
         onPauseOrDispose {}
     }
     val snackbar = remember { SnackbarHostState() }
+    var showCleanup by remember { mutableStateOf(false) }
     var pendingRemove by remember { mutableStateOf<ImageItem?>(null) }
     var showPull by remember { mutableStateOf(false) }
 
@@ -79,6 +84,10 @@ fun ImagesScreen(
                         viewModel.openPull()
                         showPull = true
                     }) { Text("Pull") }
+                    CleanupOverflow {
+                        cleanup.open()
+                        showCleanup = true
+                    }
                 },
             )
         },
@@ -156,6 +165,8 @@ fun ImagesScreen(
     if (showPull) {
         PullImageSheet(state.pull, viewModel, onDismiss = { showPull = false })
     }
+
+    if (showCleanup) CleanupSheet(cleanup, onDismiss = { showCleanup = false })
 }
 
 @Composable

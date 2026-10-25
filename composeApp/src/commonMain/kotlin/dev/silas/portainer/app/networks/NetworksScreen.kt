@@ -42,6 +42,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import dev.silas.portainer.app.cleanup.CleanupOverflow
+import dev.silas.portainer.app.cleanup.CleanupSheet
+import dev.silas.portainer.app.cleanup.CleanupViewModel
 import dev.silas.portainer.app.theme.BackButton
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -49,6 +52,7 @@ import dev.silas.portainer.app.theme.BackButton
 fun NetworksScreen(
     viewModel: NetworksViewModel,
     onOpen: (id: String) -> Unit,
+    cleanup: CleanupViewModel,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
@@ -57,6 +61,7 @@ fun NetworksScreen(
         onPauseOrDispose {}
     }
     val snackbar = remember { SnackbarHostState() }
+    var showCleanup by remember { mutableStateOf(false) }
     var pendingRemove by remember { mutableStateOf<NetworkItem?>(null) }
     var showCreate by remember { mutableStateOf(false) }
 
@@ -77,6 +82,10 @@ fun NetworksScreen(
                         viewModel.openCreate()
                         showCreate = true
                     }) { Text("Create") }
+                    CleanupOverflow {
+                        cleanup.open()
+                        showCleanup = true
+                    }
                 },
             )
         },
@@ -138,6 +147,8 @@ fun NetworksScreen(
     if (showCreate) {
         CreateNetworkSheet(state.create, state.drivers, viewModel::create, onDismiss = { showCreate = false })
     }
+
+    if (showCleanup) CleanupSheet(cleanup, onDismiss = { showCleanup = false })
 }
 
 @Composable

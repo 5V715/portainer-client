@@ -18,6 +18,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import dev.silas.portainer.app.about.AboutScreen
+import dev.silas.portainer.app.cleanup.CleanupViewModel
 import dev.silas.portainer.app.containers.ContainerListScreen
 import dev.silas.portainer.app.containers.ContainerListViewModel
 import dev.silas.portainer.app.detail.ContainerDetailScreen
@@ -50,6 +51,7 @@ import dev.silas.portainer.app.servers.ServerEditViewModel
 import dev.silas.portainer.app.servers.ServerListScreen
 import dev.silas.portainer.app.servers.ServersViewModel
 import dev.silas.portainer.app.theme.PortainerTheme
+import dev.silas.portainer.core.cleanup.CleanupKind
 import dev.silas.portainer.core.storage.ServerRepository
 import dev.silas.portainer.core.storage.createSecretStore
 
@@ -126,9 +128,13 @@ private fun AppNavHost(container: AppContainer) {
             val vm = viewModel(key = "containers-${route.serverId}-${route.endpointId}") {
                 ContainerListViewModel(container, route.serverId, route.endpointId)
             }
+            val cleanup = viewModel(key = "cleanup-containers-${route.serverId}-${route.endpointId}") {
+                CleanupViewModel(container, route.serverId, route.endpointId, CleanupKind.Containers, onFinished = vm::refresh)
+            }
             EnvironmentShell(EnvTab.Containers, { nav.switchTab(route.serverId, route.endpointId, it) }) {
                 ContainerListScreen(
                     viewModel = vm,
+                    cleanup = cleanup,
                     onOpen = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
                     onRegistries = { nav.navigate(Registries(route.serverId)) },
                     onBack = { nav.popBackStack() },
@@ -140,11 +146,15 @@ private fun AppNavHost(container: AppContainer) {
             val vm = viewModel(key = "images-${route.serverId}-${route.endpointId}") {
                 ImagesViewModel(container, route.serverId, route.endpointId)
             }
+            val cleanup = viewModel(key = "cleanup-images-${route.serverId}-${route.endpointId}") {
+                CleanupViewModel(container, route.serverId, route.endpointId, CleanupKind.Images, onFinished = vm::refresh)
+            }
             val toEnvironments = { nav.popBackStack(Environments(route.serverId), inclusive = false); Unit }
             BackHandler(onBack = toEnvironments)
             EnvironmentShell(EnvTab.Images, { nav.switchTab(route.serverId, route.endpointId, it) }) {
                 ImagesScreen(
                     viewModel = vm,
+                    cleanup = cleanup,
                     nowEpochSeconds = container.nowEpochSeconds,
                     onOpen = { nav.navigate(ImageDetail(route.serverId, route.endpointId, it)) },
                     onBack = toEnvironments,
@@ -167,11 +177,15 @@ private fun AppNavHost(container: AppContainer) {
             val vm = viewModel(key = "volumes-${route.serverId}-${route.endpointId}") {
                 VolumesViewModel(container, route.serverId, route.endpointId)
             }
+            val cleanup = viewModel(key = "cleanup-volumes-${route.serverId}-${route.endpointId}") {
+                CleanupViewModel(container, route.serverId, route.endpointId, CleanupKind.Volumes, onFinished = vm::refresh)
+            }
             val toEnvironments = { nav.popBackStack(Environments(route.serverId), inclusive = false); Unit }
             BackHandler(onBack = toEnvironments)
             EnvironmentShell(EnvTab.Volumes, { nav.switchTab(route.serverId, route.endpointId, it) }) {
                 VolumesScreen(
                     viewModel = vm,
+                    cleanup = cleanup,
                     nowEpochSeconds = container.nowEpochSeconds,
                     onOpen = { nav.navigate(VolumeDetail(route.serverId, route.endpointId, it)) },
                     onBack = toEnvironments,
@@ -194,11 +208,15 @@ private fun AppNavHost(container: AppContainer) {
             val vm = viewModel(key = "networks-${route.serverId}-${route.endpointId}") {
                 NetworksViewModel(container, route.serverId, route.endpointId)
             }
+            val cleanup = viewModel(key = "cleanup-networks-${route.serverId}-${route.endpointId}") {
+                CleanupViewModel(container, route.serverId, route.endpointId, CleanupKind.Networks, onFinished = vm::refresh)
+            }
             val toEnvironments = { nav.popBackStack(Environments(route.serverId), inclusive = false); Unit }
             BackHandler(onBack = toEnvironments)
             EnvironmentShell(EnvTab.Networks, { nav.switchTab(route.serverId, route.endpointId, it) }) {
                 NetworksScreen(
                     viewModel = vm,
+                    cleanup = cleanup,
                     onOpen = { nav.navigate(NetworkDetail(route.serverId, route.endpointId, it)) },
                     onBack = toEnvironments,
                 )

@@ -45,6 +45,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import dev.silas.portainer.app.cleanup.CleanupOverflow
+import dev.silas.portainer.app.cleanup.CleanupSheet
+import dev.silas.portainer.app.cleanup.CleanupViewModel
 import dev.silas.portainer.app.theme.BackButton
 import dev.silas.portainer.app.theme.SelectableChip
 import dev.silas.portainer.app.theme.StatusLabel
@@ -63,6 +66,7 @@ fun ContainerListScreen(
     viewModel: ContainerListViewModel,
     onOpen: (containerId: String) -> Unit,
     onRegistries: () -> Unit,
+    cleanup: CleanupViewModel,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
@@ -72,6 +76,7 @@ fun ContainerListScreen(
         onPauseOrDispose {}
     }
     val snackbar = remember { SnackbarHostState() }
+    var showCleanup by remember { mutableStateOf(false) }
     var pendingRemove by remember { mutableStateOf<ContainerSummary?>(null) }
 
     LaunchedEffect(state.error) {
@@ -88,6 +93,10 @@ fun ContainerListScreen(
                 navigationIcon = { BackButton(onBack) },
                 actions = {
                     TextButton(onClick = onRegistries) { Text("Registries") }
+                    CleanupOverflow {
+                        cleanup.open()
+                        showCleanup = true
+                    }
                 },
             )
         },
@@ -149,6 +158,8 @@ fun ContainerListScreen(
             dismissButton = { TextButton(onClick = { pendingRemove = null }) { Text("Cancel") } },
         )
     }
+
+    if (showCleanup) CleanupSheet(cleanup, onDismiss = { showCleanup = false })
 }
 
 @Composable
