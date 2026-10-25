@@ -1,11 +1,15 @@
 package dev.silas.portainer.app.detail
 
 import dev.silas.portainer.app.TestEnv
+import dev.silas.portainer.app.cleanup.CleanupKey
+import dev.silas.portainer.app.recreate.CLEANUP_IN_PROGRESS_MESSAGE
 import dev.silas.portainer.app.recreate.RecreateProgress
 import dev.silas.portainer.app.recreate.RecreateResult
 import dev.silas.portainer.core.recreate.RecreateStep
 import dev.silas.portainer.app.recreate.SessionKey
 import dev.silas.portainer.app.settle
+import dev.silas.portainer.core.cleanup.CleanupItem
+import dev.silas.portainer.core.cleanup.CleanupKind
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 import dev.silas.portainer.core.recreate.RecreateWarning
 import dev.silas.portainer.core.storage.ServerConfig
@@ -37,6 +41,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -49,6 +54,7 @@ class QuickRecreateViewModelTest {
     private var image = "ghcr.io/acme/app:1"
     private var autoRemove = false
     private var createGate: CompletableDeferred<Unit>? = null
+    private var cleanupGate: CompletableDeferred<Unit>? = null
 
     private fun inspect() = """{
       "Id":"abcdef1234567890","Name":"/web","Image":"sha256:old",
@@ -73,6 +79,10 @@ class QuickRecreateViewModelTest {
                 createBody = (r.body as? OutgoingContent.ByteArrayContent)?.bytes()?.decodeToString().orEmpty()
                 createGate?.await()
                 respond("""{"Id":"new1"}""", HttpStatusCode.Created, json)
+            }
+            r.method == HttpMethod.Delete && path.endsWith("/containers/zzz") -> {
+                cleanupGate?.await()
+                respond("", HttpStatusCode.NoContent)
             }
             r.method == HttpMethod.Post || r.method == HttpMethod.Delete -> respond("", HttpStatusCode.NoContent)
             else -> respond("""{"message":"unexpected"}""", HttpStatusCode.NotFound, json)
@@ -144,6 +154,22 @@ class QuickRecreateViewModelTest {
         assertEquals(PROTECTED_IMAGE_MESSAGE, vm.state.value.error)
         vm.confirm()
         assertTrue(requests.none { it.contains("/containers/create") })
+    }
+
+    @Test
+    fun confirmIsRefusedWhileAContainersCleanupRuns() = runTest {
+        val env = env()
+        val gate = CompletableDeferred<Unit>().also { cleanupGate = it }
+        val vm = ready(env)
+        assertTrue(env.container.cleanupSessions.start(CleanupKey("s1", 1, CleanupKind.Containers), listOf(CleanupItem("zzz", "old", null))))
+        settle { requests.any { it.startsWith("DELETE /containers/zzz") } }
+        vm.confirm()
+        settle { vm.state.value.error != null }
+        assertEquals(CLEANUP_IN_PROGRESS_MESSAGE, vm.state.value.error)
+        assertEquals(QuickPhase.Closed, vm.state.value.phase)
+        assertNull(env.container.recreateSessions.progress(SessionKey("s1", 1, "abc")).value)
+        assertTrue(requests.none { it.contains("rename") || it.contains("/containers/create") })
+        gate.complete(Unit)
     }
 
     private fun TestScope.creates() = requests.count { it.contains("/containers/create") }

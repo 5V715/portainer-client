@@ -139,6 +139,7 @@ private fun AppNavHost(container: AppContainer) {
                     viewModel = vm,
                     cleanup = cleanup,
                     onOpen = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
+                    onNew = { nav.navigate(Editor(route.serverId, route.endpointId, null)) },
                     onRegistries = { nav.navigate(Registries(route.serverId)) },
                     onBack = { nav.popBackStack() },
                 )
@@ -253,7 +254,7 @@ private fun AppNavHost(container: AppContainer) {
                     QuickRecreateViewModel(container, route.serverId, route.endpointId, route.containerId)
                 },
                 onQuickRecreated = { nav.navigate(Recreate(route.serverId, route.endpointId, route.containerId, quick = true)) },
-                onEditRecreate = { nav.navigate(Recreate(route.serverId, route.endpointId, route.containerId)) },
+                onEdit = { nav.navigate(Editor(route.serverId, route.endpointId, route.containerId)) },
                 onBack = { nav.popBackStack() },
             )
         }
@@ -279,8 +280,18 @@ private fun AppNavHost(container: AppContainer) {
             val vm = viewModel(key = "editor-${route.serverId}-${route.endpointId}-${route.containerId}") {
                 EditorViewModel(container, route.serverId, route.endpointId, route.containerId)
             }
-            // The finish flows (review, deploy, progress) hook in at onContinue.
-            EditorScreen(viewModel = vm, onContinue = {}, onBack = { nav.popBackStack() })
+            EditorScreen(
+                viewModel = vm,
+                // Back from the progress goes to where the editor was opened from.
+                onReplaceStarted = {
+                    val id = checkNotNull(route.containerId)
+                    nav.navigate(Recreate(route.serverId, route.endpointId, id)) { popUpTo(route) { inclusive = true } }
+                },
+                onOpenContainer = { id ->
+                    nav.navigate(ContainerDetail(route.serverId, route.endpointId, id)) { popUpTo(route) { inclusive = true } }
+                },
+                onBack = { nav.popBackStack() },
+            )
         }
         composable<Registries> { entry ->
             val route = entry.toRoute<Registries>()

@@ -21,7 +21,11 @@ import dev.silas.portainer.core.model.Registry
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 import dev.silas.portainer.core.recreate.isProtectedImage
 import dev.silas.portainer.core.registry.matchRegistry
+import dev.silas.portainer.app.recreate.SessionKey
+import dev.silas.portainer.core.api.inspectImage
+import dev.silas.portainer.core.recreate.RecreatePlan
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -88,6 +92,10 @@ data class EditorState(
     val anonymousVolumes: List<String> = emptyList(),
     /** The read-only Advanced section. */
     val advanced: List<Pair<String, String>> = emptyList(),
+    /** The finish step (review, deploy progress); `null` while on the form. The form can't be edited meanwhile. */
+    val finish: FinishPhase? = null,
+    /** Where the screen should go now (see [EditorViewModel.navigated]). */
+    val navigation: EditorNavigation? = null,
 ) {
     private val ready get() = phase == EditorPhase.Ready
 
@@ -198,7 +206,7 @@ class EditorViewModel(
 
     /** Applies [block] to the draft and recomputes the form, dirty sections and errors; ignored unless editable. */
     private fun edit(section: EditorSection, block: (EditorState) -> EditorState) = _state.update { s ->
-        if (s.phase != EditorPhase.Ready || s.readOnly) return@update s
+        if (s.phase != EditorPhase.Ready || s.readOnly || s.finish != null) return@update s
         val next = block(s)
         val form = next.draft.toForm(s.before, initial)
         next.copy(
@@ -310,7 +318,9 @@ class EditorViewModel(
     fun setCpus(text: String) = editDraft(EditorSection.Resources) { it.copy(cpus = text) }
     fun setCpuShares(text: String) = editDraft(EditorSection.Resources) { it.copy(cpuShares = text) }
 
-    fun setStartAfterCreate(on: Boolean) = _state.update { if (it.mode == EditorMode.New) it.copy(startAfterCreate = on) else it }
+    fun setStartAfterCreate(on: Boolean) = _state.update {
+        if (it.mode == EditorMode.New && it.finish == null) it.copy(startAfterCreate = on) else it
+    }
 
     // ---- for the finish flows ----
 
@@ -339,7 +349,7 @@ class EditorViewModel(
      * every section's errors are shown. Portainer's own container skips validation for a copy: its form can't
      * be edited, so there is nothing the user could fix.
      *
-     * Hand-over point for the finish flows (review step, conflict checks, progress): they start here on `true`.
+     * [finish] runs this first.
      */
     fun review(action: FinishAction): Boolean {
         val s = _state.value
@@ -355,5 +365,170 @@ class EditorViewModel(
             return false
         }
         return true
+    }
+
+    // ---- finish: review, then Replace (RecreateSessions) or deploy (DeploySessions) ----
+
+    private var reviewContext: ReviewContext? = null
+    private var built: BuiltReview? = null
+    private var checkJob: Job? = null
+    private var deployJob: Job? = null
+    private var deployKey: DeployKey? = null
+
+    /**
+     * "Replace" / "Deploy as copy" / "Create": validates ([review]), then re-inspects the container (Replace,
+     * Copy) and the endpoint's containers and networks, and shows the review. False when the form has errors.
+     */
+    fun finish(action: FinishAction): Boolean {
+        if (_state.value.finish != null || !review(action)) return false
+        _state.update { it.copy(finish = FinishPhase.Checking(action)) }
+        checkJob = viewModelScope.launch {
+            val phase = try {
+                check(action)
+            } catch (e: Exception) {
+                FinishPhase.Failed(action, failureMessage(e))
+            }
+            _state.update { if (it.finish is FinishPhase.Checking) it.copy(finish = phase) else it }
+        }
+        return true
+    }
+
+    private suspend fun check(action: FinishAction): FinishPhase {
+        val s = _state.value
+        val client = container.client(serverId)
+        var ctx = if (action == FinishAction.Create) {
+            ReviewContext(action, null, null, null, NO_INPUTS, notice = null, blocked = null)
+        } else {
+            val fresh = client.inspectContainer(endpointId, checkNotNull(containerId))
+            val imageConfig = (fresh["Image"] as? JsonPrimitive)?.content?.let { client.inspectImage(endpointId, it) }
+            val freshBefore = FormParser.fromInspect(fresh)
+            // Sections that changed outside the editor; the edits are merged onto the fresh inspect.
+            val outside = FormMerger.merge(fresh, s.before, freshBefore).second
+            val stale = outside intersect s.dirty
+            val blocked = when {
+                action == FinishAction.Replace && isProtectedImage(freshBefore.image) -> PROTECTED_IMAGE_MESSAGE
+                stale.isNotEmpty() -> staleEditsMessage(stale)
+                action == FinishAction.Replace -> container.recreateSessions.refusal(serverId, endpointId)
+                else -> null
+            }
+            val changed = outside.isNotEmpty() || fresh["Image"] != s.original?.get("Image") || running(fresh) != running(s.original)
+            ReviewContext(action, fresh, imageConfig, freshBefore, NO_INPUTS, CONTAINER_CHANGED_NOTICE.takeIf { changed }, blocked)
+        }
+        val name = when (action) {
+            FinishAction.Copy -> s.form.name.takeIf { it.isNotEmpty() && it != s.before.name } ?: "${s.before.name}-copy"
+            else -> s.form.name
+        }
+        // A first build only to learn which networks get a fixed IP (those are inspected for their members).
+        val draft = buildReview(ctx, s, name, typedMacs(), typedAliases())
+        val body = draft.plan?.createBody ?: draft.request?.body ?: JsonObject(emptyMap())
+        val extras = draft.plan?.extraNetworks ?: draft.request?.extraNetworks.orEmpty()
+        ctx = ctx.with(conflictInputs(client, endpointId, fixedIpNetworks(body, extras)))
+        reviewContext = ctx
+        return buildReview(ctx, s, name, typedMacs(), typedAliases()).also { built = it }.review
+    }
+
+    private fun running(inspect: JsonObject?) = (inspect?.get("State") as? JsonObject)?.get("Running")
+
+    /** Deploy as copy: the copy's name, checked again against the containers already listed (no requests). */
+    fun setDeployName(name: String) {
+        val ctx = reviewContext ?: return
+        val s = _state.value
+        val review = s.finish as? FinishPhase.Review ?: return
+        if (!review.nameEditable || review.starting) return
+        val next = buildReview(ctx, s, name.trim(), typedMacs(), typedAliases())
+        built = next
+        _state.update { it.copy(finish = next.review) }
+    }
+
+    /** Back from the review, a failed check or a failed deploy to the form (edits kept). Not while deploying. */
+    fun backToForm() {
+        val finish = _state.value.finish ?: return
+        when (finish) {
+            is FinishPhase.Review -> if (finish.starting) return
+            is FinishPhase.Deploying -> if (finish.progress.result == null) return
+            else -> Unit
+        }
+        checkJob?.cancel()
+        deployJob?.cancel()
+        deployKey?.let(container.deploySessions::clear)
+        deployKey = null
+        reviewContext = null
+        built = null
+        _state.update { it.copy(finish = null) }
+    }
+
+    /** Runs the reviewed action: Replace in RecreateSessions, Copy / Create in DeploySessions. */
+    fun confirm() {
+        val review = _state.value.finish as? FinishPhase.Review ?: return
+        val built = built ?: return
+        if (!review.canConfirm) return
+        _state.update { it.copy(finish = review.copy(starting = true)) }
+        viewModelScope.launch {
+            val refused = try {
+                if (review.action == FinishAction.Replace) startReplace(checkNotNull(built.plan)) else startDeploy(checkNotNull(built.request))
+            } catch (e: Exception) {
+                failureMessage(e)
+            }
+            if (refused != null) {
+                _state.update { s ->
+                    val r = s.finish as? FinishPhase.Review ?: return@update s
+                    s.copy(finish = r.copy(blocked = refused, starting = false))
+                }
+            }
+        }
+    }
+
+    /** @return why it couldn't start, or null once the recreate runs. */
+    private suspend fun startReplace(plan: RecreatePlan): String? {
+        val id = checkNotNull(containerId)
+        val sessions = container.recreateSessions
+        sessions.refusal(serverId, endpointId)?.let { return it }
+        val key = SessionKey(serverId, endpointId, id)
+        if (sessions.progress(key).value?.result != null) sessions.clear(key)
+        if (sessions.progress(key).value != null) return "This container is being recreated already."
+        // A client of its own, owned by the session: saving or deleting the server can't close it mid-recreate.
+        if (!sessions.start(key, container.dedicatedClient(serverId), id, plan)) {
+            return sessions.refusal(serverId, endpointId) ?: "This container is being recreated already."
+        }
+        _state.update { it.copy(navigation = EditorNavigation.ReplaceStarted) }
+        return null
+    }
+
+    /** @return why it couldn't start, or null once the deploy runs (its progress is then shown). */
+    private suspend fun startDeploy(request: DeployRequest): String? {
+        val sessions = container.deploySessions
+        val key = DeployKey(serverId, endpointId, request.name)
+        if (!sessions.start(key, container.dedicatedClient(serverId), request)) {
+            return "A container named ${request.name} is being created already."
+        }
+        deployKey = key
+        deployJob = viewModelScope.launch {
+            sessions.progress(key).collect { p ->
+                if (p == null) return@collect
+                val success = p.result as? DeployResult.Success
+                _state.update {
+                    it.copy(finish = FinishPhase.Deploying(p), navigation = success?.let { r -> EditorNavigation.OpenContainer(r.id) } ?: it.navigation)
+                }
+            }
+        }
+        return null
+    }
+
+    /** After a failure that left the created container: open it. */
+    fun openCreated() {
+        val failure = (_state.value.finish as? FinishPhase.Deploying)?.progress?.result as? DeployResult.Failure ?: return
+        val id = failure.createdId ?: return
+        _state.update { it.copy(navigation = EditorNavigation.OpenContainer(id)) }
+    }
+
+    /** The screen performed [EditorState.navigation]; a finished deploy's result is forgotten. */
+    fun navigated() {
+        _state.update { it.copy(navigation = null) }
+        deployKey?.let { key ->
+            if (container.deploySessions.progress(key).value?.result != null) {
+                deployJob?.cancel()
+                container.deploySessions.clear(key)
+            }
+        }
     }
 }

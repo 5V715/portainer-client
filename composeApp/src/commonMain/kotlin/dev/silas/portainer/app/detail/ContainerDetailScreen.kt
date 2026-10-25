@@ -37,7 +37,7 @@ fun ContainerDetailScreen(
     logsViewModel: @Composable (tty: Boolean) -> LogsViewModel,
     quickRecreate: QuickRecreateViewModel,
     onQuickRecreated: () -> Unit,
-    onEditRecreate: () -> Unit,
+    onEdit: () -> Unit,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
@@ -67,10 +67,9 @@ fun ContainerDetailScreen(
                 title = { Text(overview?.name ?: "Container") },
                 navigationIcon = { BackButton(onBack) },
                 actions = {
-                    if (overview != null && !overview.protectedImage) {
-                        TextButton(onClick = quickRecreate::open) { Text("Recreate") }
-                        TextButton(onClick = onEditRecreate) { Text("Edit & recreate") }
-                    }
+                    // Portainer's own container can't be recreated, but it can be duplicated.
+                    if (overview != null && !overview.protectedImage) TextButton(onClick = quickRecreate::open) { Text("Recreate") }
+                    if (overview != null) TextButton(onClick = onEdit) { Text("Edit / Duplicate") }
                 },
             )
         },

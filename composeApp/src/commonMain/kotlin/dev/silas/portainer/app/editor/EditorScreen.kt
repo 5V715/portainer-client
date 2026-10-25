@@ -26,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,28 +53,50 @@ private const val ADVANCED = "Advanced"
 
 /**
  * The Edit / Duplicate / New container form: collapsible sections, actions in a bottom bar within thumb reach.
- * [onContinue] gets the action once the form validates (the finish flows take over from there).
+ * Finishing shows the review in place of the form; then [onReplaceStarted] (show the recreate's progress) or
+ * [onOpenContainer] (the new container) navigates on.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Suppress("DEPRECATION") // BackHandler, as in App.kt
 @Composable
-fun EditorScreen(viewModel: EditorViewModel, onContinue: (FinishAction) -> Unit, onBack: () -> Unit) {
+fun EditorScreen(
+    viewModel: EditorViewModel,
+    onReplaceStarted: () -> Unit,
+    onOpenContainer: (id: String) -> Unit,
+    onBack: () -> Unit,
+) {
     val state by viewModel.state.collectAsState()
     var confirmDiscard by rememberSaveable { mutableStateOf(false) }
     // Image and name open by default; sections with errors open when the user tries to continue.
     var expanded by rememberSaveable { mutableStateOf(listOf(EditorSection.Image.name, EditorSection.General.name)) }
-    val unsaved = state.hasUnsavedChanges
-    val back = { if (unsaved) confirmDiscard = true else onBack() }
-    BackHandler(enabled = unsaved) { confirmDiscard = true }
+    val finishPhase = state.finish
+    // A running deploy carries on without the screen, so leaving needs no confirmation then.
+    val deploying = finishPhase is FinishPhase.Deploying
+    val unsaved = state.hasUnsavedChanges && !deploying
+    val back = {
+        when {
+            finishPhase != null && !deploying -> viewModel.backToForm()
+            unsaved -> confirmDiscard = true
+            else -> onBack()
+        }
+    }
+    BackHandler(enabled = unsaved || (finishPhase != null && !deploying)) { back() }
+
+    LaunchedEffect(state.navigation) {
+        when (val nav = state.navigation) {
+            null -> Unit
+            EditorNavigation.ReplaceStarted -> onReplaceStarted()
+            is EditorNavigation.OpenContainer -> onOpenContainer(nav.id)
+        }
+        if (state.navigation != null) viewModel.navigated()
+    }
 
     fun toggle(key: String) {
         expanded = if (key in expanded) expanded - key else expanded + key
     }
 
     fun finish(action: FinishAction) {
-        if (viewModel.review(action)) {
-            onContinue(action)
-        } else {
+        if (!viewModel.finish(action)) {
             expanded = (expanded + viewModel.state.value.errors.keys.map { it.name }).distinct()
         }
     }
@@ -85,13 +108,13 @@ fun EditorScreen(viewModel: EditorViewModel, onContinue: (FinishAction) -> Unit,
                 navigationIcon = { BackButton(back) },
             )
         },
-        bottomBar = { if (state.phase == EditorPhase.Ready) ActionBar(state, viewModel, ::finish) },
+        bottomBar = { if (state.phase == EditorPhase.Ready && finishPhase == null) ActionBar(state, viewModel, ::finish) },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (val phase = state.phase) {
                 EditorPhase.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                 is EditorPhase.Error -> Text(phase.message, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
-                EditorPhase.Ready -> Column(
+                EditorPhase.Ready -> if (finishPhase != null) EditorReviewPane(finishPhase, viewModel) else Column(
                     Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {

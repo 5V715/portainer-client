@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
 import dev.silas.portainer.app.support.failureMessage
+import dev.silas.portainer.app.recreate.CLEANUP_IN_PROGRESS_MESSAGE
 import dev.silas.portainer.app.recreate.SessionKey
 import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.api.inspectContainer
@@ -112,11 +113,16 @@ class QuickRecreateViewModel(
                     return@launch
                 }
                 val sessions = container.recreateSessions
+                sessions.refusal(serverId, endpointId)?.let { return@launch fail(it) }
                 // A finished result of an earlier run would make start() ignore this one; a run in flight is just shown.
                 if (sessions.progress(key).value?.result != null) sessions.clear(key)
                 if (sessions.progress(key).value == null) {
                     // A client of its own, owned by the session: saving or deleting the server can't close it mid-recreate.
-                    sessions.start(key, container.dedicatedClient(serverId), containerId, plan)
+                    val started = sessions.start(key, container.dedicatedClient(serverId), containerId, plan)
+                    // Refused meanwhile (a cleanup started while the client was made): say why, start nothing.
+                    if (!started && sessions.progress(key).value == null) {
+                        return@launch fail(sessions.refusal(serverId, endpointId) ?: CLEANUP_IN_PROGRESS_MESSAGE)
+                    }
                 }
                 _state.update { if (it.phase == QuickPhase.Ready && it.starting) it.copy(phase = QuickPhase.Started, starting = false) else it }
             } catch (e: Exception) {

@@ -5,6 +5,8 @@ import dev.silas.portainer.core.platform.httpEngine
 import dev.silas.portainer.core.storage.ServerConfig
 import dev.silas.portainer.core.storage.ServerRepository
 import dev.silas.portainer.app.cleanup.CleanupSessions
+import dev.silas.portainer.app.editor.DeploySessions
+import dev.silas.portainer.core.cleanup.CleanupKind
 import dev.silas.portainer.app.recreate.RecreateSessions
 import io.ktor.client.engine.HttpClientEngine
 import kotlinx.coroutines.CoroutineScope
@@ -26,10 +28,15 @@ class AppContainer(
     val engineFactory: () -> HttpClientEngine = ::httpEngine,
 ) {
     /** Running and finished recreates, so screens can come and go without affecting the operation. */
-    val recreateSessions = RecreateSessions(appScope, nowEpochSeconds)
+    val recreateSessions = RecreateSessions(appScope, nowEpochSeconds) { serverId, endpointId ->
+        cleanupSessions.isRunning(serverId, endpointId, CleanupKind.Containers)
+    }
 
     /** Running and finished cleanups, so switching tabs or leaving a list never stops or loses one. */
     val cleanupSessions = CleanupSessions(appScope) { dedicatedClient(it) }
+
+    /** Running and finished copies / new containers, so leaving the editor never stops one. */
+    val deploySessions = DeploySessions(appScope)
 
     private val lock = Mutex()
     private val clients = mutableMapOf<String, PortainerClient>()

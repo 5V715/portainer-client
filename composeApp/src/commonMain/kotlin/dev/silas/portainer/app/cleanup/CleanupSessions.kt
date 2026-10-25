@@ -83,6 +83,10 @@ class CleanupSessions(
         return true
     }
 
+    /** True while a cleanup of [kind] on [serverId]'s endpoint [endpointId] has not finished yet. */
+    fun isRunning(serverId: String, endpointId: Int, kind: CleanupKind): Boolean =
+        sessions[CleanupKey(serverId, endpointId, kind)]?.value is CleanupPhase.Running
+
     /** Forgets a finished result (never a running one). */
     fun clear(key: CleanupKey) {
         val state = sessions[key] ?: return

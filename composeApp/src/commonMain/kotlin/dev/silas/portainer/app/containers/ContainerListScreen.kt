@@ -15,12 +15,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -65,6 +67,7 @@ private val FILTER_STATES = listOf(ContainerState.Running, ContainerState.Exited
 fun ContainerListScreen(
     viewModel: ContainerListViewModel,
     onOpen: (containerId: String) -> Unit,
+    onNew: () -> Unit,
     onRegistries: () -> Unit,
     cleanup: CleanupViewModel,
     onBack: () -> Unit,
@@ -101,6 +104,9 @@ fun ContainerListScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
+        floatingActionButton = {
+            FloatingActionButton(onClick = onNew) { Icon(Icons.Default.Add, contentDescription = "New container") }
+        },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             OutlinedTextField(

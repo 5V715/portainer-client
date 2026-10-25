@@ -61,6 +61,13 @@ internal fun parseShares(text: String): Long? = text.trim().takeIf { t -> t.isNo
 
 internal fun parseRetries(text: String): Int? = text.trim().takeIf { t -> t.isNotEmpty() && t.all { it in '0'..'9' } }?.toIntOrNull()
 
+/** Why [name] can't be a container name, or null. */
+internal fun containerNameProblem(name: String): String? = when {
+    name.isEmpty() -> "Name is required"
+    !CONTAINER_NAME.matches(name) -> "Name: use at least 2 letters, digits, '_', '.' or '-', starting with a letter or digit"
+    else -> null
+}
+
 /** Linux absolute path, Windows drive path or UNC / named pipe. */
 internal fun isAbsolutePath(s: String) = s.startsWith("/") || DRIVE_PATH.containsMatchIn(s) || s.startsWith("\\\\")
 
@@ -87,11 +94,8 @@ fun validate(draft: EditorDraft, initial: EditorDraft, mode: EditorMode): Map<Ed
 
     section(EditorSection.General) {
         val name = draft.name.trim()
-        when {
-            name.isEmpty() -> if (mode == EditorMode.Edit) add("Name is required")
-            !CONTAINER_NAME.matches(name) ->
-                add("Name: use at least 2 letters, digits, '_', '.' or '-', starting with a letter or digit")
-        }
+        // New: a blank name lets Docker pick one.
+        if (name.isNotEmpty() || mode == EditorMode.Edit) containerNameProblem(name)?.let(::add)
     }
 
     section(EditorSection.Ports) {

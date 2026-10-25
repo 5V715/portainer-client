@@ -14,6 +14,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/** Why a recreate can't start now: a Containers cleanup could delete the renamed original (its rollback). */
+const val CLEANUP_IN_PROGRESS_MESSAGE = "A cleanup is in progress — try again when it finishes."
+
 data class SessionKey(val serverId: String, val endpointId: Int, val containerId: String)
 
 enum class StepStatus { Pending, Active, Done, Failed }
@@ -42,8 +45,13 @@ internal fun plannedSteps(plan: RecreatePlan): List<RecreateStep> = RecreateStep
  * Holds recreates in flight, keyed by container, and collects them in [scope] (an application-level scope),
  * so leaving the screen, rotating or recreating a ViewModel never cancels the operation.
  * Call from one thread (the UI thread); the progress flows themselves are safe to read anywhere.
+ * [cleanupRunning] tells whether a Containers cleanup runs on a server's endpoint; no recreate starts meanwhile.
  */
-class RecreateSessions(private val scope: CoroutineScope, private val nowEpochSeconds: () -> Long) {
+class RecreateSessions(
+    private val scope: CoroutineScope,
+    private val nowEpochSeconds: () -> Long,
+    private val cleanupRunning: (serverId: String, endpointId: Int) -> Boolean = { _, _ -> false },
+) {
     private val sessions = mutableMapOf<SessionKey, MutableStateFlow<RecreateProgress?>>()
 
     /** Null when nothing has been started (or the last result was cleared). */
@@ -52,14 +60,14 @@ class RecreateSessions(private val scope: CoroutineScope, private val nowEpochSe
     /**
      * Recreates [oldId] on [key]'s endpoint through [client], which this session takes ownership of: it is
      * closed when the recreate finishes, and nothing else may close it (so a server save/delete can't cut the
-     * recreate or its rollback off). Ignored, closing [client], while one is already running or its result is
-     * still uncleared.
+     * recreate or its rollback off). Refused (false), closing [client], while one is already running or its
+     * result is still uncleared, and while [refusal] gives a reason.
      */
-    fun start(key: SessionKey, client: PortainerClient, oldId: String, plan: RecreatePlan) {
+    fun start(key: SessionKey, client: PortainerClient, oldId: String, plan: RecreatePlan): Boolean {
         val state = flowFor(key)
-        if (state.value != null) {
+        if (state.value != null || refusal(key.serverId, key.endpointId) != null) {
             client.close()
-            return
+            return false
         }
         state.value = RecreateProgress(plannedSteps(plan).map { StepState(it, StepStatus.Pending) }, containerName = plan.containerName)
         val recreator = Recreator(PortainerDockerOps(client, key.endpointId), nowEpochSeconds)
@@ -76,7 +84,12 @@ class RecreateSessions(private val scope: CoroutineScope, private val nowEpochSe
                 client.close()
             }
         }
+        return true
     }
+
+    /** Why no recreate may start on [serverId]'s endpoint [endpointId] now, or null. */
+    fun refusal(serverId: String, endpointId: Int): String? =
+        CLEANUP_IN_PROGRESS_MESSAGE.takeIf { cleanupRunning(serverId, endpointId) }
 
     /** True while a recreate on [serverId]'s endpoint [endpointId] has not finished yet. */
     fun isRunning(serverId: String, endpointId: Int): Boolean = sessions.any { (key, state) ->
