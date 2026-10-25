@@ -44,7 +44,6 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import dev.silas.portainer.app.cleanup.CleanupOverflow
-import dev.silas.portainer.app.cleanup.CleanupPhase
 import dev.silas.portainer.app.cleanup.CleanupSheet
 import dev.silas.portainer.app.cleanup.CleanupViewModel
 import dev.silas.portainer.app.theme.BackButton
@@ -64,8 +63,8 @@ fun ImagesScreen(
         onPauseOrDispose {}
     }
     val snackbar = remember { SnackbarHostState() }
-    // Back on the screen while a cleanup runs (or finished meanwhile): show it again.
-    var showCleanup by remember { mutableStateOf(cleanup.phase.value.let { it is CleanupPhase.Running || it is CleanupPhase.Done }) }
+    // The view model reopens the sheet for a run that is going on or finished meanwhile.
+    val showCleanup by cleanup.sheetVisible.collectAsState()
     var pendingRemove by remember { mutableStateOf<ImageItem?>(null) }
     var showPull by remember { mutableStateOf(false) }
 
@@ -88,7 +87,6 @@ fun ImagesScreen(
                     }) { Text("Pull") }
                     CleanupOverflow {
                         cleanup.open()
-                        showCleanup = true
                     }
                 },
             )
@@ -153,7 +151,12 @@ fun ImagesScreen(
         AlertDialog(
             onDismissRequest = viewModel::dismissForce,
             title = { Text("Can't remove ${prompt.label}", style = MaterialTheme.typography.headlineSmall) },
-            text = { Text(prompt.message) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(prompt.message)
+                    Text(FORCE_REMOVE_EXPLANATION)
+                }
+            },
             confirmButton = {
                 TextButton(
                     onClick = viewModel::confirmForce,
@@ -169,10 +172,7 @@ fun ImagesScreen(
     }
 
     if (showCleanup) {
-        CleanupSheet(cleanup, onDismiss = {
-            showCleanup = false
-            cleanup.acknowledge()
-        })
+        CleanupSheet(cleanup, onDismiss = cleanup::acknowledge)
     }
 }
 

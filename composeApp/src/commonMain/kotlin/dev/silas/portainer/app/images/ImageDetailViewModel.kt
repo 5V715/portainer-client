@@ -3,19 +3,19 @@ package dev.silas.portainer.app.images
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
-import dev.silas.portainer.core.api.PortainerException
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.containers
 import dev.silas.portainer.core.api.inspectImage
 import dev.silas.portainer.core.model.ContainerSummary
+import dev.silas.portainer.core.model.ImageSummary
 import dev.silas.portainer.core.recreate.isProtectedImage
+import dev.silas.portainer.core.resources.ResourceProtection
 import dev.silas.portainer.core.resources.ResourceUsage
-import kotlinx.coroutines.CancellationException
+import dev.silas.portainer.core.resources.resolveIdOnlyImages
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -68,16 +68,17 @@ class ImageDetailViewModel(
                 if (inspect == null) {
                     _state.update { it.copy(detail = null, error = "Image not found") }
                 } else {
-                    val using = ResourceUsage(client.containers(endpointId)).containersUsingImage(imageId)
-                    _state.update { it.copy(detail = parseDetail(inspect, using), error = null) }
+                    val containers = client.containers(endpointId)
+                    val protection = ResourceProtection(containers, client.resolveIdOnlyImages(endpointId, containers))
+                    val using = ResourceUsage(containers).containersUsingImage(imageId)
+                    val detail = parseDetail(inspect, using)
+                    val summary = ImageSummary(id = detail.id.ifEmpty { imageId }, repoTags = detail.tags)
+                    val protectedImage = protection.isImageProtected(summary) || using.any(protection::isImageUnresolved)
+                    _state.update { it.copy(detail = detail.copy(protectedImage = protectedImage), error = null) }
                 }
-            } catch (e: CancellationException) {
-                if (!currentCoroutineContext().isActive) throw e
-                _state.update { it.copy(error = "The connection was interrupted") }
-            } catch (e: PortainerException) {
-                _state.update { it.copy(error = e.message ?: "Request failed") }
-            } catch (e: IllegalStateException) {
-                _state.update { it.copy(error = e.message ?: "Request failed") }
+            } catch (e: Exception) {
+                val message = failureMessage(e)
+                _state.update { it.copy(error = message) }
             }
             _state.update { it.copy(loading = false) }
         }
@@ -109,6 +110,7 @@ internal fun parseDetail(inspect: JsonObject, using: List<ContainerSummary>): Im
         os = inspect["Os"].text().orEmpty(),
         config = rows,
         containers = using,
+        // Tag check only; the view model adds the containers that run Portainer.
         protectedImage = inspect["RepoTags"].strings().any(::isProtectedImage),
     )
 }

@@ -3,6 +3,7 @@ package dev.silas.portainer.app.images
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.containers
 import dev.silas.portainer.core.api.images
@@ -12,22 +13,24 @@ import dev.silas.portainer.core.api.removeImage
 import dev.silas.portainer.core.model.ImageRef
 import dev.silas.portainer.core.model.ImageSummary
 import dev.silas.portainer.core.model.Registry
-import dev.silas.portainer.core.model.isProtected
 import dev.silas.portainer.core.registry.matchRegistry
+import dev.silas.portainer.core.resources.ResourceProtection
 import dev.silas.portainer.core.resources.ResourceUsage
-import kotlinx.coroutines.CancellationException
+import dev.silas.portainer.core.resources.resolveIdOnlyImages
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 const val PROTECTED_IMAGE_REMOVE_MESSAGE = "This image runs Portainer and can't be removed from this app."
+const val FORCE_REMOVE_EXPLANATION = "Force removes all tags; a stopped container using it can no longer be recreated from it."
 
-data class ImageItem(val image: ImageSummary, val used: Boolean) {
-    val protected: Boolean get() = image.isProtected()
+/**
+ * [protected]: a Portainer tag, or used by a container that runs Portainer (even stopped, even once the image lost
+ * its tag), or used by a container whose image could not be recognised.
+ */
+data class ImageItem(val image: ImageSummary, val used: Boolean, val protected: Boolean) {
     val label: String get() = imageLabel(image)
 }
 
@@ -52,6 +55,8 @@ data class PullState(
     val registries: List<Registry> = emptyList(),
     val registryId: Int? = null,
     val status: PullStatus = PullStatus.Idle,
+    /** Latest line of Docker's pull stream while [PullStatus.Pulling]. */
+    val progress: String? = null,
 )
 
 data class ImagesState(
@@ -108,8 +113,13 @@ class ImagesViewModel(
         guard {
             val client = container.client(serverId)
             val images = client.images(endpointId)
-            val usage = ResourceUsage(client.containers(endpointId))
-            val items = images.map { ImageItem(it, usage.isImageUsed(it.id)) }
+            val containers = client.containers(endpointId)
+            val usage = ResourceUsage(containers)
+            val protection = ResourceProtection(containers, client.resolveIdOnlyImages(endpointId, containers))
+            val items = images.map { image ->
+                val using = usage.containersUsingImage(image.id)
+                ImageItem(image, using.isNotEmpty(), protection.isImageProtected(image) || using.any(protection::isImageUnresolved))
+            }
             _state.update { it.copy(items = items) }
         }
         _state.update { it.copy(loading = false) }
@@ -117,7 +127,8 @@ class ImagesViewModel(
 
     /**
      * Removes [id] (never forced unless [force]). Protected images are refused without any API call. Docker's 409
-     * (in use) becomes a [ForcePrompt] showing Docker's message, so the user can confirm a forced removal.
+     * (in use) becomes a [ForcePrompt] showing Docker's message, so the user can confirm a forced removal, unless
+     * Docker says force can't help (a running container uses it). Any failure reloads the list, which is probably stale.
      */
     fun remove(id: String, force: Boolean) {
         val target = _state.value.items.firstOrNull { it.image.id == id } ?: return
@@ -135,13 +146,17 @@ class ImagesViewModel(
                 } catch (e: PortainerException.Api) {
                     if (e.status == 409 && !force) e.message ?: "The image is in use" else throw e
                 }
-                if (conflict != null) {
-                    _state.update { it.copy(forcePrompt = ForcePrompt(id, target.label, conflict)) }
-                } else {
-                    refresh()
+                when {
+                    conflict == null -> refresh()
+                    cannotBeForced(conflict) -> {
+                        _state.update { it.copy(error = conflict) }
+                        refresh()
+                    }
+                    else -> _state.update { it.copy(forcePrompt = ForcePrompt(id, target.label, conflict)) }
                 }
             } catch (e: Exception) {
                 failure(e)
+                refresh()
             } finally {
                 _state.update { it.copy(busyIds = it.busyIds - id) }
             }
@@ -167,12 +182,8 @@ class ImagesViewModel(
         viewModelScope.launch {
             val registries = try {
                 container.client(serverId).registries()
-            } catch (e: CancellationException) {
-                if (!currentCoroutineContext().isActive) throw e
-                emptyList()
-            } catch (e: PortainerException) {
-                emptyList()
-            } catch (e: IllegalStateException) {
+            } catch (e: Exception) {
+                failureMessage(e) // rethrows only when this coroutine was cancelled
                 emptyList()
             }
             _state.update { it.copy(pull = it.pull.copy(registries = registries, registryId = autoMatch(it.pull.reference, registries, it.pull.registryId))) }
@@ -201,20 +212,17 @@ class ImagesViewModel(
     fun pull(reference: String, registryId: Int?) {
         val ref = reference.trim()
         if (ref.isEmpty() || _state.value.pull.status == PullStatus.Pulling) return
-        _state.update { it.copy(pull = it.pull.copy(status = PullStatus.Pulling)) }
+        _state.update { it.copy(pull = it.pull.copy(status = PullStatus.Pulling, progress = null)) }
         viewModelScope.launch {
             val status = try {
-                container.client(serverId).pullImage(endpointId, ImageRef.parse(ref), registryId)
+                container.client(serverId).pullImage(endpointId, ImageRef.parse(ref), registryId) { line ->
+                    _state.update { if (it.pull.status == PullStatus.Pulling) it.copy(pull = it.pull.copy(progress = line)) else it }
+                }
                 PullStatus.Done("Pulled $ref")
-            } catch (e: CancellationException) {
-                if (!currentCoroutineContext().isActive) throw e
-                PullStatus.Failed("The connection was interrupted")
-            } catch (e: PortainerException) {
-                PullStatus.Failed(e.message ?: "Pull failed")
-            } catch (e: IllegalStateException) {
-                PullStatus.Failed(e.message ?: "Pull failed")
+            } catch (e: Exception) {
+                PullStatus.Failed(failureMessage(e, "Pull failed"))
             }
-            _state.update { it.copy(pull = it.pull.copy(status = status)) }
+            _state.update { it.copy(pull = it.pull.copy(status = status, progress = null)) }
             if (status is PullStatus.Done) refresh()
         }
     }
@@ -228,15 +236,11 @@ class ImagesViewModel(
     }
 
     private suspend fun failure(e: Exception) {
-        val message = when (e) {
-            is CancellationException -> {
-                // A client closed by invalidation cancels the call; only rethrow if this coroutine itself was cancelled.
-                if (!currentCoroutineContext().isActive) throw e
-                "The connection was interrupted"
-            }
-            is PortainerException, is IllegalStateException -> e.message ?: "Request failed"
-            else -> throw e
-        }
+        val message = failureMessage(e)
         _state.update { it.copy(error = message) }
     }
 }
+
+/** Docker's 409 text when even a forced removal would be refused (the image is used by a running container). */
+internal fun cannotBeForced(dockerMessage: String): Boolean =
+    dockerMessage.contains("cannot be forced", ignoreCase = true) || dockerMessage.contains("running container", ignoreCase = true)

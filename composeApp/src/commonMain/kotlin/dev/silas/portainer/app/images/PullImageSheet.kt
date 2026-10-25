@@ -21,6 +21,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 
 private const val NO_REGISTRY = "None (public)"
@@ -51,7 +52,18 @@ fun PullImageSheet(state: PullState, viewModel: ImagesViewModel, onDismiss: () -
             ) { Text("Pull") }
             when (val s = state.status) {
                 PullStatus.Idle -> Unit
-                PullStatus.Pulling -> Text("Pulling…")
+                PullStatus.Pulling -> {
+                    Text("Pulling…")
+                    state.progress?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                        )
+                    }
+                }
                 is PullStatus.Done -> Text(s.text)
                 is PullStatus.Failed -> Text(s.text, color = MaterialTheme.colorScheme.error)
             }
