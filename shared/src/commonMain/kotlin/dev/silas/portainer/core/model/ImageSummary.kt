@@ -2,7 +2,7 @@ package dev.silas.portainer.core.model
 
 import dev.silas.portainer.core.recreate.isProtectedImage
 
-private const val NONE_TAG = "<none>:<none>"
+internal const val NONE_TAG = "<none>:<none>"
 
 /** One entry of Docker's `GET images/json`. [created] is unix seconds. */
 data class ImageSummary(

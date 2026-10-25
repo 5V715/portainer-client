@@ -52,6 +52,17 @@ class CleanupExecutorTest {
     }
 
     @Test
+    fun unexpectedExceptionIsFailedAndRestStillRun() = runTest {
+        val out = CleanupExecutor {
+            if (it.id == "a") throw IllegalStateException()
+        }.run(listOf(a, b)).toList()
+        assertEquals(
+            listOf(CleanupProgress.Failed(a, "Delete failed"), CleanupProgress.Deleted(b), CleanupProgress.Finished(1, 1, 50)),
+            out,
+        )
+    }
+
+    @Test
     fun cancellationIsRethrown() = runTest {
         assertFailsWith<CancellationException> {
             CleanupExecutor { throw CancellationException("stop") }.run(listOf(a)).toList()

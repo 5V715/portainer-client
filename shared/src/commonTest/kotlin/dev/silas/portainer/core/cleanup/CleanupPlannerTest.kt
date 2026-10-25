@@ -45,11 +45,36 @@ class CleanupPlannerTest {
     }
 
     @Test
-    fun containerWithIdOnlyImageIsProtectedViaResolvedImages() {
+    fun unresolvedIdOnlyImageFailsSafe() {
+        val cs = listOf(c("x", image = "sha256:$hex"), c("y", image = hex), c("z"))
+        val plan = CleanupPlanner.containers(cs, ResourceProtection(cs))
+        assertEquals(listOf("z"), ids(plan.toDelete))
+        assertEquals(listOf("x", "y"), ids(plan.kept))
+        assertEquals("n-x (image unknown)", plan.kept[0].label)
+    }
+
+    @Test
+    fun resolvedIdOnlyImageUsesNormalProtection() {
         val cs = listOf(c("x", image = "sha256:$hex"), c("y", image = hex))
-        val plan = CleanupPlanner.containers(cs, ResourceProtection(cs, mapOf("x" to "docker.io/portainer/portainer-ee:2")))
+        val resolved = mapOf("x" to "docker.io/portainer/portainer-ee:2", "y" to "nginx:1")
+        val plan = CleanupPlanner.containers(cs, ResourceProtection(cs, resolved))
         assertEquals(listOf("y"), ids(plan.toDelete))
         assertEquals(listOf("x"), ids(plan.kept))
+        assertEquals("n-x", plan.kept[0].label)
+    }
+
+    @Test
+    fun restartingContainerIsNotSelected() {
+        val cs = listOf(c("r", ContainerState.Restarting))
+        assertEquals(emptyList(), CleanupPlanner.containers(cs, ResourceProtection(cs)).toDelete)
+    }
+
+    @Test
+    fun namedVolumeUsedOnlyByStoppedContainerIsNotOffered() {
+        val cs = listOf(c("s", volumes = listOf("db")))
+        val plan = CleanupPlanner.volumes(listOf(Volume(name = "db")), ResourceUsage(cs), ResourceProtection(cs))
+        assertEquals(emptyList(), plan.namedVolumes)
+        assertEquals(emptyList(), plan.toDelete)
     }
 
     @Test

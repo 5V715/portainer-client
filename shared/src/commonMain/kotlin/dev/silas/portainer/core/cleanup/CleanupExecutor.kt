@@ -33,9 +33,9 @@ class CleanupExecutor(private val delete: suspend (CleanupItem) -> Unit) {
             } catch (e: PortainerException.NotFound) {
                 failed++
                 emit(CleanupProgress.Failed(item, "Already removed"))
-            } catch (e: PortainerException) {
+            } catch (e: Exception) {
                 failed++
-                emit(CleanupProgress.Failed(item, e.message ?: "Failed"))
+                emit(CleanupProgress.Failed(item, e.message ?: "Delete failed"))
             }
         }
         emit(CleanupProgress.Finished(deleted, failed, reclaimed))

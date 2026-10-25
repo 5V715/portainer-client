@@ -3,23 +3,25 @@ package dev.silas.portainer.core.cleanup
 import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.ContainerSummary
 import dev.silas.portainer.core.model.ImageSummary
+import dev.silas.portainer.core.model.NONE_TAG
 import dev.silas.portainer.core.model.Network
 import dev.silas.portainer.core.model.Volume
 import dev.silas.portainer.core.resources.ResourceProtection
 import dev.silas.portainer.core.resources.ResourceUsage
 
-private const val NONE_TAG = "<none>:<none>"
 private val STOPPED = setOf(ContainerState.Exited, ContainerState.Created, ContainerState.Dead)
 
 /** Builds the previewed cleanup lists. Nothing here deletes anything; protection always wins over selection. */
 object CleanupPlanner {
     fun containers(cs: List<ContainerSummary>, protection: ResourceProtection): CleanupPlan {
         val stopped = cs.filter { it.state in STOPPED }
-        val (kept, candidates) = stopped.partition(protection::isContainerProtected)
+        // Fail safe: a container whose image is only an unresolved id might be Portainer, so never select it.
+        val kept = stopped.filter { protection.isContainerProtected(it) || protection.isImageUnresolved(it) }
+        val candidates = stopped - kept.toSet()
         return CleanupPlan(
             CleanupKind.Containers,
             toDelete = candidates.map(::item),
-            kept = kept.map(::item),
+            kept = kept.map { if (protection.isImageUnresolved(it)) CleanupItem(it.id, "${it.name} (image unknown)", null) else item(it) },
         )
     }
 
