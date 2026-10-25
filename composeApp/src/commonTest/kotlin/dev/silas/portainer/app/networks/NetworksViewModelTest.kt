@@ -180,6 +180,19 @@ class NetworksViewModelTest {
     }
 
     @Test
+    fun malformedIpv6AndLeadingZerosRejected() {
+        listOf("1::2::3", ":::", "1:2:3:4:5:6:7:8:9", ":1::", "a.b::1.2.3.4", "1::2:", ":1:2:3:4:5:6:7").forEach {
+            assertFalse(isValidIp(it), it)
+        }
+        assertTrue(isValidIp("::ffff:1.2.3.4"))
+        assertTrue(isValidIp("::1"))
+        assertTrue(isValidIp("1:2:3:4:5:6:7:8"))
+        assertFalse(isValidIp("010.0.0.1"))
+        assertFalse(isValidCidr("10.00.0.0/24"))
+        assertTrue(isValidIp("10.0.0.0"))
+    }
+
+    @Test
     fun gatewayValidation() {
         assertTrue(isValidIp("172.20.0.1"))
         assertFalse(isValidIp("172.20.0.256"))

@@ -175,6 +175,8 @@ class NetworksViewModel(
                 refresh()
             } catch (e: Exception) {
                 failure(e)
+                // Docker refused (e.g. 409 in use): the list is probably stale, so reload it.
+                if (e is PortainerException) refresh()
             } finally {
                 _state.update { it.copy(busyIds = it.busyIds - id) }
             }
@@ -241,7 +243,7 @@ class NetworksViewModel(
                 "The connection was interrupted"
             }
             is PortainerException, is IllegalStateException -> e.message ?: "Request failed"
-            else -> throw e
+            else -> e.message ?: "Request failed"
         }
         _state.update { it.copy(error = message) }
     }

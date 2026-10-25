@@ -121,7 +121,7 @@ fun NetworksScreen(
         AlertDialog(
             onDismissRequest = { pendingRemove = null },
             title = { Text("Remove network ${item.network.name}?", style = MaterialTheme.typography.headlineSmall) },
-            text = { Text("Remove network ${item.network.name}?") },
+            text = { Text("This cannot be undone.") },
             confirmButton = {
                 TextButton(
                     onClick = {

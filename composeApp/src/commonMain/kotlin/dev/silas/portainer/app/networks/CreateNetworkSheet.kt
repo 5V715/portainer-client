@@ -119,7 +119,7 @@ fun CreateNetworkSheet(
                 onClick = {
                     onCreate(NetworkForm(name, selected, subnet, gateway, ipRange, internal, attachable, options.toList(), labels.toList()))
                 },
-                enabled = !creating,
+                enabled = !creating && state.status !is CreateStatus.Done,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Create") }
             when (val s = state.status) {

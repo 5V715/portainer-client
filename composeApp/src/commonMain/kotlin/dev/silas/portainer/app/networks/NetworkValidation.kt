@@ -3,7 +3,7 @@ package dev.silas.portainer.app.networks
 private fun isIpv4(s: String): Boolean {
     val parts = s.split('.')
     return parts.size == 4 && parts.all { p ->
-        p.isNotEmpty() && p.length <= 3 && p.all { it in '0'..'9' } && p.toInt() in 0..255
+        p.isNotEmpty() && p.length <= 3 && (p.length == 1 || p[0] != '0') && p.all { it in '0'..'9' } && p.toInt() in 0..255
     }
 }
 
@@ -18,6 +18,9 @@ private fun isIpv6(s: String): Boolean {
         if (!isIpv4(tail)) return false
         text = text.removeSuffix(tail) + "0:0"
     }
+    if (text.contains('.')) return false
+    // A single leading/trailing ':' is only valid as half of '::'.
+    if ((text.startsWith(":") && !text.startsWith("::")) || (text.endsWith(":") && !text.endsWith("::"))) return false
     val groups = text.split(':')
     val nonEmpty = groups.filter { it.isNotEmpty() }
     if (nonEmpty.any { it.length > 4 }) return false
