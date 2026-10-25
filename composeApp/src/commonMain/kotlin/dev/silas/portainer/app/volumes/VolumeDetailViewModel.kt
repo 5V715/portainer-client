@@ -63,7 +63,9 @@ class VolumeDetailViewModel(
                 for (c in using) {
                     val mounts = try {
                         parseMounts(client.inspectContainer(endpointId, c.id), name)
-                    } catch (e: PortainerException) {
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
                         emptyList()
                     }
                     _state.update { s -> s.copy(users = s.users.map { if (it.container.id == c.id) it.copy(mounts = mounts) else it }) }

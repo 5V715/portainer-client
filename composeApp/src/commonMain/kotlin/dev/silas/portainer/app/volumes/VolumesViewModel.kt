@@ -116,6 +116,8 @@ class VolumesViewModel(
                 refresh()
             } catch (e: Exception) {
                 failure(e)
+                // Docker refused (e.g. 409 in use): the list is probably stale, so reload it.
+                if (e is PortainerException) refresh()
             } finally {
                 _state.update { it.copy(busyNames = it.busyNames - name) }
             }

@@ -59,9 +59,12 @@ fun parseRfc3339(text: String?): Long? {
     return daysFromCivil(y.toLong(), mo.toLong(), d.toLong()) * DAY + h.toLong() * 3600 + mi.toLong() * 60 + s.toLong() - offset
 }
 
-/** Same wording as [formatCreated], for an RFC3339 timestamp; "unknown" when missing or unparseable. */
-fun formatCreatedRfc3339(createdAt: String?, nowEpochSeconds: Long): String =
-    formatCreated(parseRfc3339(createdAt) ?: 0, nowEpochSeconds)
+/** Same wording as [formatCreated], for an RFC3339 timestamp; "unknown" when missing, the raw text when unparseable. */
+fun formatCreatedRfc3339(createdAt: String?, nowEpochSeconds: Long): String {
+    if (createdAt.isNullOrBlank()) return "unknown"
+    val parsed = parseRfc3339(createdAt) ?: return createdAt
+    return formatCreated(parsed, nowEpochSeconds)
+}
 
 /** Days since 1970-01-01 for a proleptic Gregorian date (inverse of [isoDate]). */
 private fun daysFromCivil(year: Long, month: Long, day: Long): Long {

@@ -63,7 +63,7 @@ fun CreateVolumeSheet(
             PairRows("Labels", labels)
             Button(
                 onClick = { onCreate(name, driver, options.toList(), labels.toList()) },
-                enabled = !creating,
+                enabled = !creating && state.status !is CreateStatus.Done,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Create") }
             when (val s = state.status) {

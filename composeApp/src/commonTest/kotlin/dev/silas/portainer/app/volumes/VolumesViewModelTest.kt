@@ -29,6 +29,8 @@ class VolumesViewModelTest {
     private val requests = mutableListOf<String>()
     private var createBody = ""
     private var listCalls = 0
+    private var deleteStatus = HttpStatusCode.NoContent
+    private var deleteQuery = ""
 
     private val anon = "a".repeat(64)
     private val volumesJson = """{"Volumes":[
@@ -68,7 +70,10 @@ class VolumesViewModelTest {
                     val name = if (createBody.contains("\"Name\"")) "named" else "generated123"
                     respond("""{"Name":"$name","Driver":"local"}""", HttpStatusCode.Created, json)
                 }
-                req.method == HttpMethod.Delete -> respond("", HttpStatusCode.NoContent, json)
+                req.method == HttpMethod.Delete -> {
+                    deleteQuery = req.url.encodedQuery
+                    respond(if (deleteStatus == HttpStatusCode.Conflict) """{"message":"volume is in use"}""" else "", deleteStatus, json)
+                }
                 else -> respond("{}", HttpStatusCode.NotFound, json)
             }
         }
@@ -113,6 +118,17 @@ class VolumesViewModelTest {
         vm.remove("free")
         settle { deletes().size == 1 && listCalls == 2 && !vm.state.value.loading }
         assertEquals(listOf("DELETE /api/endpoints/1/docker/volumes/free"), deletes())
+    }
+
+    @Test
+    fun dockerConflictShowsErrorReloadsListAndNeverForces() = runTest {
+        val vm = loaded()
+        deleteStatus = HttpStatusCode.Conflict
+        vm.remove("free")
+        settle { vm.state.value.error != null && listCalls == 2 && !vm.state.value.loading }
+        assertEquals("volume is in use", vm.state.value.error)
+        assertEquals(1, deletes().size)
+        assertFalse(deleteQuery.contains("force"), deleteQuery)
     }
 
     @Test
@@ -174,5 +190,7 @@ class Rfc3339Test {
         assertEquals(1_700_000_000L, dev.silas.portainer.app.images.parseRfc3339("2023-11-15T00:13:20+02:00"))
         assertEquals(null, dev.silas.portainer.app.images.parseRfc3339("garbage"))
         assertEquals("unknown", dev.silas.portainer.app.images.formatCreatedRfc3339(null, 1_700_000_000L))
+        assertEquals("unknown", dev.silas.portainer.app.images.formatCreatedRfc3339("  ", 1_700_000_000L))
+        assertEquals("garbage", dev.silas.portainer.app.images.formatCreatedRfc3339("garbage", 1_700_000_000L))
     }
 }
