@@ -22,9 +22,23 @@ enum class PlanMode { Replace, Copy }
  * @param userEdited form sections the user changed ([dev.silas.portainer.core.editor.FormMerger.merge]): exempt
  *   from image-default stripping, and with [FormField.Mounts] a volume whose row was deleted is not reattached.
  * @param typedMacs MAC addresses the user typed in the form; Copy keeps only these endpoint MACs.
+ * @param typedAliases network aliases the user typed in the form; Copy keeps only these per endpoint.
+ * @param original the container's inspect before the form edits, when `inspect` is the form's merged JSON: the
+ *   image change, pull decision and env diff are computed against it, and env entries the user typed (new or
+ *   changed against it) are not stripped as image defaults. `null` = `inspect` is unedited (v1).
  * The default keeps v1 behaviour exactly.
  */
-data class PlanOptions(val mode: PlanMode = PlanMode.Replace, val userEdited: Set<FormField> = emptySet(), val typedMacs: Set<String> = emptySet())
+data class PlanOptions(
+    val mode: PlanMode = PlanMode.Replace,
+    val userEdited: Set<FormField> = emptySet(),
+    val typedMacs: Set<String> = emptySet(),
+    val typedAliases: Set<String> = emptySet(),
+    val original: JsonObject? = null,
+)
+
+/** Label prefix compose uses to recognise its containers; a copy must not look like a stack member. */
+private const val COMPOSE_LABEL_PREFIX = "com.docker.compose."
+
 
 /** Single-value Config fields dropped when equal to the old image's (Cmd handled separately). */
 private val IMAGE_DEFAULT_FIELDS = listOf("Entrypoint", "WorkingDir", "User", "Healthcheck", "StopSignal")
@@ -55,7 +69,10 @@ object RecreatePlanner {
         val id = inspect.string("Id").orEmpty()
         val shortId = id.take(SHORT_ID_LENGTH)
         val originalConfig = inspect.obj("Config") ?: JsonObject(emptyMap())
-        val originalImage = originalConfig.string("Image").orEmpty()
+        val inspectedConfig = options.original?.obj("Config") ?: originalConfig
+        val originalImage = inspectedConfig.string("Image").orEmpty()
+        val inspectedEnv = inspectedConfig.array("Env").strings()
+        val copy = options.mode == PlanMode.Copy
         val hostConfig = inspect.obj("HostConfig") ?: JsonObject(emptyMap())
         val networkMode = hostConfig.string("NetworkMode").orEmpty()
 
@@ -65,15 +82,16 @@ object RecreatePlanner {
         config["Env"] = JsonArray(edits.env.map { JsonPrimitive(it) })
 
         val imageConfig = oldImageConfig?.let { it.obj("Config") ?: it }
-        val dropped = if (imageConfig != null) stripImageDefaults(config, imageConfig, options.userEdited) else emptyList()
+        val typedEnv = if (FormField.Env in options.userEdited) edits.env.toSet() - inspectedEnv.toSet() else emptySet()
+        val dropped = if (imageConfig != null) stripImageDefaults(config, imageConfig, options.userEdited, typedEnv) else emptyList()
+        if (copy) stripComposeLabels(config)
 
         val isolatedNetwork = networkMode == "host" || networkMode == "none" || networkMode.startsWith("container:")
         if (networkMode.startsWith("container:")) CONTAINER_MODE_STRIPPED.forEach { config.remove(it) }
 
-        val copy = options.mode == PlanMode.Copy
         // A copy gets fresh anonymous volumes; named volumes and binds stay in HostConfig and are shared.
         var newHostConfig = if (copy) {
-            hostConfig
+            withoutAnonymousVolumes(hostConfig, inspect.array("Mounts"))
         } else {
             val neverRows = if (FormField.Mounts in options.userEdited) imageVolumeTargets(originalConfig) else null
             withAnonymousVolumes(hostConfig, inspect.array("Mounts"), neverRows)
@@ -81,8 +99,8 @@ object RecreatePlanner {
         if (copy) config.remove("MacAddress")
         var extraNetworks = emptyMap<String, JsonObject>()
         if (!isolatedNetwork) {
-            val keepMac: (String) -> Boolean = if (copy) { mac -> mac in options.typedMacs } else { _ -> true }
-            val split = splitNetworks(networkMode, inspect.obj("NetworkSettings")?.obj("Networks"), shortId, keepMac)
+            val keep = if (copy) EndpointFilter(options.typedMacs, options.typedAliases) else null
+            val split = splitNetworks(networkMode, inspect.obj("NetworkSettings")?.obj("Networks"), shortId, keep)
             config["NetworkingConfig"] = JsonObject(mapOf("EndpointsConfig" to JsonObject(split.primary)))
             // Docker API >= 1.44 rejects a create whose top-level MacAddress differs from the primary endpoint's
             // (e.g. after falling back to another network); the endpoint's value is the one Docker applies.
@@ -94,7 +112,14 @@ object RecreatePlanner {
         config["HostConfig"] = newHostConfig
 
         val warnings = buildList {
-            originalConfig.obj("Labels")?.string(COMPOSE_PROJECT_LABEL)?.let { add(RecreateWarning.StackMember(it)) }
+            if (!copy) originalConfig.obj("Labels")?.string(COMPOSE_PROJECT_LABEL)?.let { add(RecreateWarning.StackMember(it)) }
+            if (copy && networkMode.startsWith("container:")) {
+                add(RecreateWarning.SharedNetworkNamespace(networkMode.removePrefix("container:")))
+            }
+            // Docker fills an empty Cmd from the image unless the request has an Entrypoint.
+            if (FormField.Command in options.userEdited && (config["Cmd"] as? JsonArray)?.isEmpty() == true && config["Entrypoint"].isEmptyJson()) {
+                add(RecreateWarning.ImageDefaultCommand)
+            }
             // The rollback warnings don't apply to a copy: the original is never stopped.
             if (!copy && hostConfig.boolean("AutoRemove")) add(RecreateWarning.AutoRemove)
             if (imageConfig == null) add(RecreateWarning.ImageConfigUnavailable)
@@ -109,7 +134,7 @@ object RecreatePlanner {
             image = ImageRef.parse(edits.image),
             pull = edits.pullImage || edits.image != originalImage,
             registryId = edits.registryId,
-            changes = changeSummary(originalImage, edits, originalConfig.array("Env").strings(), imageConfig, dropped),
+            changes = changeSummary(originalImage, edits, inspectedEnv, imageConfig, dropped),
             warnings = warnings,
         )
     }
@@ -119,7 +144,12 @@ object RecreatePlanner {
      * Single-value fields in [edited] sections are kept as the user set them. Env, Labels, ExposedPorts and
      * Volumes are always stripped: Docker merges the image's entries back at create, so that can't undo an edit.
      */
-    private fun stripImageDefaults(config: MutableMap<String, JsonElement>, image: JsonObject, edited: Set<FormField>): List<String> {
+    private fun stripImageDefaults(
+        config: MutableMap<String, JsonElement>,
+        image: JsonObject,
+        edited: Set<FormField>,
+        typedEnv: Set<String>,
+    ): List<String> {
         val exempt = buildSet {
             if (FormField.Entrypoint in edited) add("Entrypoint")
             if (FormField.WorkingDir in edited) add("WorkingDir")
@@ -134,7 +164,7 @@ object RecreatePlanner {
 
         val imageEnv = image.array("Env").strings().toSet()
         val env = config.array("Env").strings()
-        val (inherited, kept) = env.partition { it in imageEnv }
+        val (inherited, kept) = env.partition { it in imageEnv && it !in typedEnv }
         inherited.forEach { dropped += "Env $it" }
         config["Env"] = JsonArray(kept.map { JsonPrimitive(it) })
 
@@ -240,6 +270,43 @@ object RecreatePlanner {
     }
 
     /**
+     * Copy: makes every anonymous volume of the original (named in inspect `Mounts[]`) fresh again, also where an
+     * earlier recreate wrote its name into `HostConfig`: `<name>:/t[:opts]` binds become `/t[:opts]`, `Mounts`
+     * volume entries lose their `Source`.
+     */
+    private fun withoutAnonymousVolumes(hostConfig: JsonObject, mounts: JsonArray?): JsonObject {
+        val anonymous = mounts.orEmpty().mapNotNull { m ->
+            (m as? JsonObject)?.takeIf { it.string("Type") == "volume" }?.string("Name")?.takeIf(ANONYMOUS_VOLUME_NAME::matches)
+        }.toSet()
+        if (anonymous.isEmpty()) return hostConfig
+        val result = hostConfig.toMutableMap()
+        hostConfig.array("Binds")?.let { binds ->
+            result["Binds"] = JsonArray(
+                binds.map { b ->
+                    val text = (b as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return@map b
+                    val spec = parseBind(text)
+                    if (spec.source in anonymous) JsonPrimitive(volumeBind(spec.target, spec.options.joinToString(",").ifEmpty { null })) else b
+                },
+            )
+        }
+        hostConfig.array("Mounts")?.let { list ->
+            result["Mounts"] = JsonArray(
+                list.map { m ->
+                    val mount = m as? JsonObject ?: return@map m
+                    if (mount.string("Type") == "volume" && mount.string("Source") in anonymous) JsonObject(mount - "Source") else mount
+                },
+            )
+        }
+        return JsonObject(result)
+    }
+
+    /** Copy: drops compose's labels so the copy isn't taken for a member of the original's stack. */
+    private fun stripComposeLabels(config: MutableMap<String, JsonElement>) {
+        val labels = config.obj("Labels") ?: return
+        config["Labels"] = JsonObject(labels.filterKeys { !it.startsWith(COMPOSE_LABEL_PREFIX) })
+    }
+
+    /**
      * Targets of `Config.Volumes` (image `VOLUME`, `docker run -v /path`): the volumes Docker creates there are not
      * form rows, so a missing row doesn't mean the user deleted them.
      */
@@ -253,8 +320,12 @@ object RecreatePlanner {
         return options.joinToString(",").ifEmpty { null }
     }
 
-    private fun volumeBind(name: String, destination: String, mode: String?) =
-        if (mode == null) "$name:$destination" else "$name:$destination:$mode"
+    private fun volumeBind(name: String, destination: String, mode: String?) = volumeBind("$name:$destination", mode)
+
+    private fun volumeBind(spec: String, mode: String?) = if (mode == null) spec else "$spec:$mode"
+
+    /** Copy: the endpoint MACs and aliases the user typed; everything else of those kinds, and `Links`, is dropped. */
+    private class EndpointFilter(val macs: Set<String>, val aliases: Set<String>)
 
     private class NetworkSplit(val primary: Map<String, JsonObject>, val extra: Map<String, JsonObject>, val fellBack: Boolean)
 
@@ -262,30 +333,35 @@ object RecreatePlanner {
      * Picks the network for `NetworkingConfig` (named by [networkMode] or matching its NetworkID; `default`
      * means `bridge`), else falls back to the first one; the rest are connected after create.
      */
-    private fun splitNetworks(networkMode: String, networks: JsonObject?, shortId: String, keepMac: (String) -> Boolean): NetworkSplit {
+    private fun splitNetworks(networkMode: String, networks: JsonObject?, shortId: String, keep: EndpointFilter?): NetworkSplit {
         if (networks == null || networks.isEmpty()) return NetworkSplit(emptyMap(), emptyMap(), fellBack = false)
         val wanted = if (networkMode == "default") "bridge" else networkMode
         val matched = networks.keys.firstOrNull { it == wanted }
             ?: networks.entries.firstOrNull { (it.value as? JsonObject)?.string("NetworkID") == wanted }?.key
         val primaryName = matched ?: networks.keys.first()
-        val configs = networks.mapValues { (_, v) -> endpointConfig(v as? JsonObject ?: JsonObject(emptyMap()), shortId, keepMac) }
+        val configs = networks.mapValues { (_, v) -> endpointConfig(v as? JsonObject ?: JsonObject(emptyMap()), shortId, keep) }
         return NetworkSplit(mapOf(primaryName to configs.getValue(primaryName)), configs - primaryName, fellBack = matched == null)
     }
 
     /**
-     * User-settable part of an endpoint ([ENDPOINT_FIELDS]); Docker's short-id alias, empty values and MACs
-     * [keepMac] rejects are left out.
+     * User-settable part of an endpoint ([ENDPOINT_FIELDS]); Docker's short-id alias, empty values and, with [keep]
+     * (Copy), untyped MACs and aliases and all `Links` are left out.
      */
-    private fun endpointConfig(endpoint: JsonObject, shortId: String, keepMac: (String) -> Boolean): JsonObject {
+    private fun endpointConfig(endpoint: JsonObject, shortId: String, keep: EndpointFilter?): JsonObject {
         val out = linkedMapOf<String, JsonElement>()
         for (field in ENDPOINT_FIELDS) {
             val value = endpoint[field] ?: continue
             if (value.isEmptyJson()) continue
             if (field == "Aliases") {
-                val aliases = (value as? JsonArray)?.filterNot { (it as? JsonPrimitive)?.content == shortId }.orEmpty()
+                val aliases = (value as? JsonArray)?.filter {
+                    val alias = (it as? JsonPrimitive)?.content
+                    alias != shortId && (keep == null || alias in keep.aliases)
+                }.orEmpty()
                 if (aliases.isNotEmpty()) out[field] = JsonArray(aliases)
             } else if (field == "MacAddress") {
-                if (keepMac((value as? JsonPrimitive)?.content.orEmpty())) out[field] = value
+                if (keep == null || (value as? JsonPrimitive)?.content in keep.macs) out[field] = value
+            } else if (field == "Links" && keep != null) {
+                continue
             } else {
                 out[field] = value
             }

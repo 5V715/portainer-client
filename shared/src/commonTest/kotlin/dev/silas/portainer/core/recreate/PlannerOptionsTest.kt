@@ -41,17 +41,32 @@ class PlannerOptionsTest {
     private fun JsonObject.endpoints() = getValue("NetworkingConfig").jsonObject.getValue("EndpointsConfig").jsonObject
     private fun strings(vararg s: String) = JsonArray(s.map { JsonPrimitive(it) })
 
-    private class Edited(val before: ContainerForm, val after: ContainerForm, val merged: JsonObject, val fields: Set<FormField>)
+    private class Edited(val original: JsonObject, val before: ContainerForm, val after: ContainerForm, val merged: JsonObject, val fields: Set<FormField>)
 
     private fun edit(inspect: JsonObject, change: (ContainerForm) -> ContainerForm = { it }): Edited {
         val before = FormParser.fromInspect(inspect)
         val after = change(before)
         val (merged, fields) = FormMerger.merge(inspect, before, after)
-        return Edited(before, after, merged, fields)
+        return Edited(inspect, before, after, merged, fields)
     }
 
-    private fun Edited.plan(imageConfig: JsonObject? = imageInspect, mode: PlanMode = PlanMode.Replace, typedMacs: Set<String> = emptySet()) =
-        RecreatePlanner.plan(merged, imageConfig, RecreateEdits(after.image, after.env, false, null), PlanOptions(mode, fields, typedMacs))
+    private fun Edited.plan(
+        imageConfig: JsonObject? = imageInspect,
+        mode: PlanMode = PlanMode.Replace,
+        typedMacs: Set<String> = emptySet(),
+        typedAliases: Set<String> = emptySet(),
+    ) = RecreatePlanner.plan(
+        merged,
+        imageConfig,
+        RecreateEdits(after.image, after.env, false, null),
+        PlanOptions(mode, fields, typedMacs, typedAliases, original),
+    )
+
+    private fun JsonObject.withConfig(key: String, value: kotlinx.serialization.json.JsonElement) =
+        JsonObject(this + ("Config" to JsonObject(getValue("Config").jsonObject + (key to value))))
+
+    private fun JsonObject.withHost(key: String, value: kotlinx.serialization.json.JsonElement) =
+        JsonObject(this + ("HostConfig" to JsonObject(hostConfig + (key to value))))
 
     // ---- baseline ----
 
@@ -65,6 +80,7 @@ class PlannerOptionsTest {
             val v11 = RecreatePlanner.plan(merged, image, RecreateEdits(form.image, form.env, true, 3), PlanOptions())
             assertEquals(v1.createBody, v11.createBody)
             assertEquals(v1, v11)
+            assertEquals(v1, RecreatePlanner.plan(merged, image, RecreateEdits(form.image, form.env, true, 3), PlanOptions(original = inspect)))
         }
     }
 
@@ -184,21 +200,23 @@ class PlannerOptionsTest {
         val p = edit(legacyMac) { it.copy(name = "app-web-copy") }.plan(mode = PlanMode.Copy)
         assertFalse("Hostname" in p.createBody)
         assertFalse("MacAddress" in p.createBody)
-        assertFalse("MacAddress" in p.createBody.endpoints().getValue("frontend").jsonObject)
-        assertFalse("MacAddress" in p.extraNetworks.getValue("backend"))
-        // Everything else in the endpoints is kept.
-        assertEquals(strings("web"), p.createBody.endpoints().getValue("frontend").jsonObject["Aliases"])
-        assertEquals(obj("""{"IPv4Address": "172.20.0.10"}"""), p.extraNetworks.getValue("backend")["IPAMConfig"])
+        // Generated MACs, aliases the user didn't type and links are the original's identity: dropped.
+        assertEquals(
+            obj("""{"DriverOpts": {"com.docker.network.endpoint.sysctls": "net.ipv4.conf.IFNAME.log_martians=1"}, "GwPriority": 0}"""),
+            p.createBody.endpoints().getValue("frontend").jsonObject,
+        )
+        assertEquals(obj("""{"IPAMConfig": {"IPv4Address": "172.20.0.10"}, "GwPriority": 10}"""), p.extraNetworks.getValue("backend"))
     }
 
     @Test
     fun copy_keeps_typed_macs_and_custom_hostname() {
         val custom = JsonObject(full + ("Config" to JsonObject(full.getValue("Config").jsonObject + ("Hostname" to JsonPrimitive("myhost")))))
         val p = edit(custom) { f ->
-            f.copy(name = "app-web-copy", extraNetworks = f.extraNetworks.map { it.copy(mac = "02:42:ac:14:00:77") })
-        }.plan(mode = PlanMode.Copy, typedMacs = setOf("02:42:ac:14:00:77"))
+            f.copy(name = "app-web-copy", extraNetworks = f.extraNetworks.map { it.copy(mac = "02:42:ac:14:00:77", aliases = listOf("app", "app2")) })
+        }.plan(mode = PlanMode.Copy, typedMacs = setOf("02:42:ac:14:00:77"), typedAliases = setOf("app2"))
         assertEquals(JsonPrimitive("myhost"), p.createBody["Hostname"])
         assertEquals(JsonPrimitive("02:42:ac:14:00:77"), p.extraNetworks.getValue("backend")["MacAddress"])
+        assertEquals(strings("app2"), p.extraNetworks.getValue("backend")["Aliases"])
         assertFalse("MacAddress" in p.createBody.endpoints().getValue("frontend").jsonObject)
     }
 
@@ -251,8 +269,91 @@ class PlannerOptionsTest {
         )
         assertTrue(describeChanges(before, before).isEmpty())
         // The planner has no forms: the caller attaches the lines to the plan's summary.
-        val plan = edit(full) { after }.plan()
-        assertTrue(plan.changes.otherChanges.isEmpty())
-        assertEquals(describeChanges(before, after), plan.changes.copy(otherChanges = describeChanges(before, after)).otherChanges)
+        assertTrue(edit(full) { after }.plan().changes.otherChanges.isEmpty())
+    }
+
+    @Test
+    fun describes_removing_every_network() {
+        val before = FormParser.fromInspect(full)
+        assertEquals(
+            listOf("Networks: primary frontend → bridge (default)", "Networks: removed frontend", "Networks: removed backend"),
+            describeChanges(before, before.copy(primaryNetwork = null, extraNetworks = emptyList())),
+        )
+        assertEquals(
+            listOf("Networks: primary frontend → backend", "Networks: removed frontend"),
+            describeChanges(before, before.copy(primaryNetwork = null)),
+        )
+    }
+
+    // ---- fix round 1 ----
+
+    @Test
+    fun copy_does_not_share_anonymous_volumes_named_by_an_earlier_recreate() {
+        // After a v1 Replace the anonymous volume is written by name into HostConfig.
+        val afterReplace = full.withHost("Binds", strings("/srv/app/config:/etc/app:ro", "app-uploads:/uploads", "$fullAnon:/data:ro,z"))
+        val p = edit(afterReplace) { it.copy(name = "app-web-copy") }.plan(mode = PlanMode.Copy)
+        assertEquals(listOf("/srv/app/config:/etc/app:ro", "app-uploads:/uploads", "/data:ro,z"), p.createBody.binds())
+        assertFalse(fullAnon in p.createBody.toString())
+
+        val composeAfterReplace = compose.withHost(
+            "Mounts",
+            JsonArray(
+                listOf(
+                    obj("""{"Type": "volume", "Source": "shop_db", "Target": "/var/lib/data", "VolumeOptions": {}}"""),
+                    obj("""{"Type": "volume", "Target": "/app/node_modules", "VolumeOptions": {}, "Source": "$composeAnon"}"""),
+                ),
+            ),
+        )
+        val c = edit(composeAfterReplace) { it.copy(name = "shop-node-1-copy") }.plan(null, PlanMode.Copy)
+        assertEquals(
+            JsonArray(
+                listOf(
+                    obj("""{"Type": "volume", "Source": "shop_db", "Target": "/var/lib/data", "VolumeOptions": {}}"""),
+                    obj("""{"Type": "volume", "Target": "/app/node_modules", "VolumeOptions": {}}"""),
+                ),
+            ),
+            c.createBody.hostConfig["Mounts"],
+        )
+        assertFalse(composeAnon in c.createBody.toString())
+    }
+
+    @Test
+    fun copy_is_not_a_stack_member() {
+        val p = edit(full) { it.copy(name = "app-web-copy") }.plan(mode = PlanMode.Copy)
+        val labels = p.createBody.getValue("Labels").jsonObject
+        assertTrue(labels.keys.none { it.startsWith("com.docker.compose.") })
+        assertEquals(JsonPrimitive("true"), labels["traefik.enable"])
+        assertTrue(p.warnings.none { it is RecreateWarning.StackMember })
+        assertTrue(RecreateWarning.StackMember("shop") in edit(full) { it.copy(name = "x") }.plan().warnings, "Replace keeps them")
+    }
+
+    @Test
+    fun copy_in_container_network_mode_warns_about_the_shared_namespace() {
+        val p = edit(netmode) { it.copy(name = "sidecar-copy") }.plan(null, PlanMode.Copy)
+        assertTrue(RecreateWarning.SharedNetworkNamespace("0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b") in p.warnings)
+        assertTrue(edit(netmode) { it.copy(name = "x") }.plan(null).warnings.none { it is RecreateWarning.SharedNetworkNamespace })
+    }
+
+    @Test
+    fun typed_env_equal_to_the_old_image_default_is_kept_across_an_image_change() {
+        // The container overrode APP_VERSION; the user sets it back to the old image's value and moves to a new image.
+        val overridden = full.withConfig("Env", strings("DB_HOST=db", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "APP_VERSION=0"))
+        val e = edit(overridden) { f -> f.copy(image = "ghcr.io/example/app:1.1", env = f.env.map { if (it == "APP_VERSION=0") "APP_VERSION=1" else it }) }
+        val p = e.plan()
+        assertEquals(strings("DB_HOST=db", "APP_VERSION=1"), p.createBody["Env"], "PATH (untyped) still stripped")
+        assertEquals(listOf("APP_VERSION=0" to "APP_VERSION=1"), p.changes.envChanged)
+        assertEquals("ghcr.io/example/app:1.0" to "ghcr.io/example/app:1.1", p.changes.imageChange)
+        assertTrue(p.pull, "image changed in the form")
+        // v1 (no edited fields) strips it.
+        val v1 = RecreatePlanner.plan(overridden, imageInspect, RecreateEdits("ghcr.io/example/app:1.1", e.after.env, false, null))
+        assertEquals(strings("DB_HOST=db"), v1.createBody["Env"])
+    }
+
+    @Test
+    fun blank_command_without_entrypoint_warns() {
+        val p = edit(autoremove) { it.copy(command = emptyList()) }.plan(null)
+        assertEquals(JsonArray(emptyList()), p.createBody["Cmd"])
+        assertTrue(RecreateWarning.ImageDefaultCommand in p.warnings)
+        assertFalse(RecreateWarning.ImageDefaultCommand in edit(full) { it.copy(command = emptyList()) }.plan().warnings, "entrypoint kept")
     }
 }

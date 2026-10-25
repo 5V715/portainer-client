@@ -35,8 +35,14 @@ sealed interface RecreateWarning {
     /** Old image could not be inspected: every inherited value is kept as-is. */
     data object ImageConfigUnavailable : RecreateWarning
 
-    /** General reminder: if the app reaches Portainer through this container, rollback can't happen. Always present. */
+    /** General reminder: if the app reaches Portainer through this container, rollback can't happen. Present unless copying. */
     data object ConnectionDependency : RecreateWarning
+
+    /** The user cleared the command but there is no entrypoint, so Docker uses the image's default command. */
+    data object ImageDefaultCommand : RecreateWarning
+
+    /** Copy of a `container:<id>` container: it shares [container]'s network namespace (and its ports). */
+    data class SharedNetworkNamespace(val container: String) : RecreateWarning
 }
 
 data class RecreatePlan(

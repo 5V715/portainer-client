@@ -95,6 +95,15 @@ class NewContainerBuilderTest {
         )
         val readOnlyTmpfs = MountRow(MountType.Tmpfs, "", "/run", true, MountOrigin.New, null)
         val (_, body) = NewContainerBuilder.build(minimal.copy(mounts = listOf(readOnlyTmpfs)))
-        assertEquals(obj("""[{"Type": "tmpfs", "Target": "/run", "ReadOnly": true}]""".let { "{\"m\": $it}" })["m"], body["HostConfig"]!!.jsonObject["Mounts"])
+        assertEquals(Json.parseToJsonElement("""[{"Type": "tmpfs", "Target": "/run", "ReadOnly": true}]"""), body.getValue("HostConfig").jsonObject["Mounts"])
+    }
+
+    @Test
+    fun first_extra_network_is_promoted_without_a_primary() {
+        val form = minimal.copy(extraNetworks = listOf(NetworkRow("backend", listOf("api"), "", "", ""), NetworkRow("metrics", emptyList(), "", "", "")))
+        val (_, body) = NewContainerBuilder.build(form)
+        assertEquals(obj("""{"EndpointsConfig": {"backend": {"Aliases": ["api"]}}}"""), body["NetworkingConfig"])
+        assertEquals(Json.parseToJsonElement("\"backend\""), body.getValue("HostConfig").jsonObject["NetworkMode"])
+        assertEquals(mapOf("metrics" to JsonObject(emptyMap())), NewContainerBuilder.extraNetworks(form))
     }
 }

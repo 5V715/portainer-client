@@ -59,6 +59,10 @@ internal fun warningText(w: RecreateWarning): String = when (w) {
         "If this container is needed to reach Portainer (VPN, reverse proxy), the app may lose connection and can't roll back."
     RecreateWarning.ImageConfigUnavailable ->
         "The old image's settings couldn't be read, so every setting is kept as-is, including ones that came from the image."
+    RecreateWarning.ImageDefaultCommand ->
+        "The command is empty, so the image's default command will be used."
+    is RecreateWarning.SharedNetworkNamespace ->
+        "The copy shares the network of container ${w.container.take(12)}, so its ports may clash with the original's."
 }
 
 internal fun stepLabel(step: RecreateStep): String = when (step) {

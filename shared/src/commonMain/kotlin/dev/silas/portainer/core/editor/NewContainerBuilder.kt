@@ -53,7 +53,7 @@ object NewContainerBuilder {
         form.nanoCpus?.let { host["NanoCpus"] = JsonPrimitive(it) }
         form.cpuShares?.let { host["CpuShares"] = JsonPrimitive(it) }
 
-        val primary = form.primaryNetwork.takeIf { form.networkModeReadOnly == null }
+        val primary = primaryNetwork(form)
         val networkMode = form.networkModeReadOnly ?: primary?.name
         if (networkMode != null) host["NetworkMode"] = JsonPrimitive(networkMode)
         body["HostConfig"] = JsonObject(host)
@@ -64,8 +64,15 @@ object NewContainerBuilder {
     }
 
     /** Networks to connect after create (`POST /networks/{name}/connect`): name → `EndpointConfig`. */
-    fun extraNetworks(form: ContainerForm): Map<String, JsonObject> =
-        if (form.networkModeReadOnly != null) emptyMap() else form.extraNetworks.associate { it.name to endpointConfig(it) }
+    fun extraNetworks(form: ContainerForm): Map<String, JsonObject> {
+        if (primaryNetwork(form) == null) return emptyMap()
+        val extras = if (form.primaryNetwork == null) form.extraNetworks.drop(1) else form.extraNetworks
+        return extras.associate { it.name to endpointConfig(it) }
+    }
+
+    /** As in FormMerger: without a primary network the first extra one is promoted; none for a read-only mode. */
+    private fun primaryNetwork(form: ContainerForm): NetworkRow? =
+        if (form.networkModeReadOnly != null) null else form.primaryNetwork ?: form.extraNetworks.firstOrNull()
 
     /** Only what the user set: aliases, static IPs, MAC. */
     private fun endpointConfig(row: NetworkRow): JsonObject {

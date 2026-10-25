@@ -90,8 +90,12 @@ private fun describeNetworks(before: ContainerForm, after: ContainerForm): List<
     if (before.networkModeReadOnly != after.networkModeReadOnly) {
         add("Network mode: ${before.networkModeReadOnly ?: "networks"} → ${after.networkModeReadOnly ?: "networks"}")
     }
-    if (before.primaryNetwork?.name != after.primaryNetwork?.name) {
-        add("Networks: primary ${before.primaryNetwork?.name ?: "(none)"} → ${after.primaryNetwork?.name ?: "(none)"}")
+    if (after.networkModeReadOnly == null) {
+        // As FormMerger writes it: the first extra network is promoted, with none left Docker's bridge applies.
+        fun primary(form: ContainerForm) = (form.primaryNetwork ?: form.extraNetworks.firstOrNull())?.name ?: "bridge (default)"
+        val old = if (before.networkModeReadOnly == null) primary(before) else null
+        val new = primary(after)
+        if (old != null && old != new) add("Networks: primary $old → $new")
     }
     val old = (listOfNotNull(before.primaryNetwork) + before.extraNetworks).associateBy { it.name }
     val new = (listOfNotNull(after.primaryNetwork) + after.extraNetworks).associateBy { it.name }
