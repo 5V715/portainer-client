@@ -16,6 +16,10 @@ private const val MEMORY_HINT = "use bytes or a size like 512m or 1g"
 
 private val MEMORY = Regex("""^(\d+)(?:\.(\d+))?\s*([kmgt])?(?:i?b)?$""", RegexOption.IGNORE_CASE)
 private val CPUS = Regex("""^(\d*)(?:\.(\d{1,9}))?$""")
+private val TOO_PRECISE_CPUS = Regex("""^\d*\.\d{10,}$""")
+
+/** Docker's smallest memory limit. */
+private const val MIN_MEMORY = 6L shl 20
 private val CONTAINER_NAME = Regex("""^[a-zA-Z0-9][a-zA-Z0-9_.-]+$""")
 private val MAC = Regex("""^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$""")
 private val DRIVE_PATH = Regex("""^[A-Za-z]:[\\/]""")
@@ -105,6 +109,7 @@ fun validate(draft: EditorDraft, initial: EditorDraft, mode: EditorMode): Map<Ed
             if (m in initial.mounts) return@forEachIndexed
             val n = i + 1
             if (!isAbsolutePath(m.target)) add("Mount $n: container path must be an absolute path")
+            if (m.target.isNotEmpty() && draft.mounts.indexOfFirst { it.target == m.target } < i) add("Mount $n: ${m.target} is already mounted")
             when (m.type) {
                 MountType.Bind -> if (!isAbsolutePath(m.source)) add("Mount $n: host path must be an absolute path")
                 MountType.Volume -> if (isAbsolutePath(m.source)) add("Mount $n: a volume name can't be a path")
@@ -122,7 +127,7 @@ fun validate(draft: EditorDraft, initial: EditorDraft, mode: EditorMode): Map<Ed
             if (name.isEmpty()) add("Network $n: choose a network")
             if (name.isNotEmpty() && names.indexOf(name) != i) add("Network $n: $name is listed twice")
             if ((name == "host" || name == "none") && draft.networks.size > 1) add("Network $n: $name can't be combined with other networks")
-            if (net in initial.networks) return@forEachIndexed
+            if (net in initial.networks || isHostOrNone(name)) return@forEachIndexed
             if (net.ipv4.isNotBlank() && !isIpv4(net.ipv4.trim())) add("Network $n: IPv4 address is not valid")
             if (net.ipv6.isNotBlank() && !isIpv6(net.ipv6.trim())) add("Network $n: IPv6 address is not valid")
             if (net.mac.isNotBlank() && !MAC.matches(net.mac.trim())) add("Network $n: MAC address is not valid")
@@ -131,7 +136,8 @@ fun validate(draft: EditorDraft, initial: EditorDraft, mode: EditorMode): Map<Ed
 
     section(EditorSection.Env) {
         draft.env.forEachIndexed { i, e -> if (envKey(e).isBlank() && envValue(e).isNotEmpty()) add("Variable ${i + 1}: name is required") }
-        draft.env.map(::envKey).filter { it.isNotBlank() }.groupingBy { it }.eachCount()
+        // A loaded env with duplicate keys is kept as is; only an edited one is checked.
+        if (draft.env != initial.env) draft.env.map(::envKey).filter { it.isNotBlank() }.groupingBy { it }.eachCount()
             .filterValues { it > 1 }.keys.forEach { add("Duplicate variable: $it") }
     }
 
@@ -149,7 +155,18 @@ fun validate(draft: EditorDraft, initial: EditorDraft, mode: EditorMode): Map<Ed
     section(EditorSection.Resources) {
         if (draft.memory.isNotBlank() && parseMemory(draft.memory) == null) add("Memory limit: $MEMORY_HINT")
         if (draft.memoryReservation.isNotBlank() && parseMemory(draft.memoryReservation) == null) add("Memory reservation: $MEMORY_HINT")
-        if (draft.cpus.isNotBlank() && (parseCpus(draft.cpus) ?: 0L) <= 0L) add("CPU limit must be a number of cores greater than 0")
+        // Docker's own limits; loaded values it already accepted aren't rechecked.
+        if (draft.memory != initial.memory || draft.memoryReservation != initial.memoryReservation) {
+            val limit = parseMemory(draft.memory)?.takeIf { it > 0 }
+            val reservation = parseMemory(draft.memoryReservation)?.takeIf { it > 0 }
+            if (limit != null && limit < MIN_MEMORY) add("Memory limit must be at least 6m")
+            if (limit != null && reservation != null && reservation > limit) add("Memory reservation can't be more than the memory limit")
+        }
+        when {
+            draft.cpus.isBlank() -> Unit
+            TOO_PRECISE_CPUS.matches(draft.cpus.trim()) -> add("CPU limit: use at most 9 decimal places")
+            (parseCpus(draft.cpus) ?: 0L) <= 0L -> add("CPU limit must be a number of cores greater than 0")
+        }
         if (draft.cpuShares.isNotBlank() && (parseShares(draft.cpuShares) ?: 0L) <= 0L) add("CPU shares must be a whole number greater than 0")
     }
 }

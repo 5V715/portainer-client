@@ -2,6 +2,7 @@ package dev.silas.portainer.app.editor
 
 import dev.silas.portainer.core.editor.ContainerForm
 import dev.silas.portainer.core.editor.MountRow
+import dev.silas.portainer.core.editor.MountType
 import dev.silas.portainer.core.editor.NetworkRow
 import dev.silas.portainer.core.editor.PortRow
 import dev.silas.portainer.core.editor.RestartPolicyForm
@@ -49,18 +50,24 @@ data class EditorDraft(
         val networkRows = if (networkModeReadOnly != null) {
             emptyList()
         } else {
-            networks.map { NetworkRow(it.name.trim(), splitAliases(it.aliases), it.ipv4.trim(), it.ipv6.trim(), it.mac.trim()) }
+            networks.map {
+                val name = it.name.trim()
+                // host and none take no endpoint settings; whatever is left in the hidden fields is dropped.
+                if (isHostOrNone(name)) NetworkRow(name, emptyList(), "", "", "")
+                else NetworkRow(name, splitAliases(it.aliases), it.ipv4.trim(), it.ipv6.trim(), it.mac.trim())
+            }
         }
         return ContainerForm(
             image = image.trim(),
             name = name.trim(),
             command = args(command, initial.command, before.command),
             entrypoint = args(entrypoint, initial.entrypoint, before.entrypoint),
-            workingDir = workingDir,
-            user = user,
+            workingDir = workingDir.trim(),
+            user = user.trim(),
             ports = ports.map { PortRow(it.hostIp.trim(), it.hostPort.trim(), it.containerPort.trim().toIntOrNull() ?: 0, it.protocol) },
             publishAll = publishAll,
-            mounts = mounts,
+            // A tmpfs row keeps its old source in the draft (switching back restores it) but has none.
+            mounts = mounts.map { if (it.type == MountType.Tmpfs && it !in initial.mounts) it.copy(source = "") else it },
             primaryNetwork = networkRows.firstOrNull(),
             extraNetworks = networkRows.drop(1),
             networkModeReadOnly = networkModeReadOnly,
@@ -127,3 +134,5 @@ internal fun splitAliases(text: String): List<String> = text.split(',', ' ', '\t
 /** The variable name of a `K=V` entry (the whole entry when it has no `=`). */
 internal fun envKey(entry: String): String = entry.substringBefore('=')
 internal fun envValue(entry: String): String = entry.substringAfter('=', "")
+
+internal fun isHostOrNone(network: String) = network == "host" || network == "none"

@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /** [Edit]: form pre-filled from a container (Replace / Deploy as copy). [New]: empty form (Create). */
 enum class EditorMode { Edit, New }
@@ -43,6 +44,9 @@ sealed interface EditorPhase {
 }
 
 private val EMPTY = JsonObject(emptyMap())
+
+/** Docker uses the first 12 characters of the id as hostname and network alias. */
+private const val SHORT_ID_LENGTH = 12
 
 /** Docker's default network; a new container is attached to it unless the user picks another. */
 private val BRIDGE = NetworkRow("bridge", emptyList(), "", "", "")
@@ -67,6 +71,9 @@ data class EditorState(
     /** Set for a container running Portainer: the form is read-only and only Deploy as copy is offered. */
     val readOnlyMessage: String? = null,
     val pull: Boolean = false,
+    /** [pull] and [registryId] as loaded, to tell whether they were changed. */
+    val initialPull: Boolean = false,
+    val initialRegistryId: Int? = null,
     /** New only. */
     val startAfterCreate: Boolean = true,
     val registries: List<Registry> = emptyList(),
@@ -89,6 +96,9 @@ data class EditorState(
     val canCopy get() = ready && mode == EditorMode.Edit
     val canCreate get() = ready && mode == EditorMode.New
     val readOnly get() = readOnlyMessage != null
+
+    /** Anything the user would lose by leaving: form edits, or a changed pull switch or registry. */
+    val hasUnsavedChanges get() = ready && !readOnly && (dirty.isNotEmpty() || pull != initialPull || registryId != initialRegistryId)
 
     /** A row whose edits couldn't be written back; shown read-only (removing it still works). */
     fun isLocked(row: MountRow) = row.origin == MountOrigin.Binds && row.originalIndex in lockedBinds
@@ -167,8 +177,10 @@ class EditorViewModel(
                 errors = validate(initial, initial, mode),
                 readOnlyMessage = PROTECTED_IMAGE_MESSAGE.takeIf { inspect != null && isProtectedImage(before.image) },
                 pull = mode == EditorMode.New,
+                initialPull = mode == EditorMode.New,
                 registries = registries,
                 registryId = matchFor(before.image, registries),
+                initialRegistryId = matchFor(before.image, registries),
                 volumes = volumes,
                 networks = networks,
                 lockedBinds = inspect?.let { i ->
@@ -254,7 +266,6 @@ class EditorViewModel(
         if (s.isLocked(old)) return@edit s
         var next = row.copy(origin = old.origin, originalIndex = old.originalIndex)
         if (next.origin == MountOrigin.Binds) next = next.copy(type = if (isAbsolutePath(next.source)) MountType.Bind else MountType.Volume)
-        if (next.type == MountType.Tmpfs) next = next.copy(source = "")
         s.copy(draft = s.draft.copy(mounts = s.draft.mounts.toMutableList().also { it[index] = next }))
     }
 
@@ -277,7 +288,8 @@ class EditorViewModel(
     /** Edits row [index]; an entry that had no `=` and still has no value stays without one. */
     fun setEnvRow(index: Int, key: String, value: String) = editDraft(EditorSection.Env) { d ->
         val old = d.env.getOrNull(index) ?: return@editDraft d
-        val entry = if (value.isEmpty() && '=' !in old) key else "$key=$value"
+        // An entry loaded without `=` and left without a value goes back to its key-only form.
+        val entry = if (value.isEmpty() && ('=' !in old || key in initial.env)) key else "$key=$value"
         d.copy(env = d.env.toMutableList().also { it[index] = entry })
     }
     fun addEnvRow() = editDraft(EditorSection.Env) { it.copy(env = it.env + "=") }
@@ -302,17 +314,25 @@ class EditorViewModel(
 
     // ---- for the finish flows ----
 
-    /** MAC addresses the user typed: those that differ from the loaded value of the same network (Copy keeps only these). */
-    fun typedMacs(): Set<String> = typed { row, old -> listOf(row.mac).filter { it.isNotEmpty() && it != old?.mac } }
-
-    /** Network aliases the user added: those not on the loaded network of the same name (Copy keeps only these). */
-    fun typedAliases(): Set<String> = typed { row, old -> row.aliases.filter { it !in old?.aliases.orEmpty() } }
-
-    private fun typed(pick: (NetworkRow, NetworkRow?) -> List<String>): Set<String> {
+    /**
+     * MAC addresses the user typed: form MACs that none of the loaded networks had (Copy keeps only these).
+     * Compared against all loaded values, so moving a row to another network doesn't make its generated MAC "typed".
+     */
+    fun typedMacs(): Set<String> {
         val s = _state.value
-        val before = (listOfNotNull(s.before.primaryNetwork) + s.before.extraNetworks).associateBy { it.name }
-        return (listOfNotNull(s.form.primaryNetwork) + s.form.extraNetworks).flatMap { pick(it, before[it.name]) }.toSet()
+        val loaded = s.before.networkRows().map { it.mac }.toSet()
+        return s.form.networkRows().map { it.mac }.filter { it.isNotEmpty() && it !in loaded }.toSet()
     }
+
+    /** Network aliases the user typed: form aliases that no loaded network had, never the container's short id. */
+    fun typedAliases(): Set<String> {
+        val s = _state.value
+        val loaded = s.before.networkRows().flatMap { it.aliases }.toSet()
+        val shortId = (s.original?.get("Id") as? JsonPrimitive)?.content?.take(SHORT_ID_LENGTH)
+        return s.form.networkRows().flatMap { it.aliases }.filter { it !in loaded && it != shortId }.toSet()
+    }
+
+    private fun ContainerForm.networkRows() = listOfNotNull(primaryNetwork) + extraNetworks
 
     /**
      * "Replace" / "Deploy as copy" / "Create": validates and returns whether [action] may go ahead. With errors,

@@ -192,16 +192,16 @@ private fun EditForm(state: RecreateState, vm: RecreateViewModel) {
 
 /** "Registry used for the pull" dropdown; [onPick] gets null for none (public). */
 @Composable
-internal fun RegistryPicker(registries: List<Registry>, registryId: Int?, onPick: (Int?) -> Unit) {
+internal fun RegistryPicker(registries: List<Registry>, registryId: Int?, onPick: (Int?) -> Unit, enabled: Boolean = true) {
     var open by remember { mutableStateOf(false) }
     val selected = registries.firstOrNull { it.id == registryId }?.name ?: NO_REGISTRY
     Column {
         Text("Registry", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Box {
-            OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = { open = true }, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
                 Text(selected, Modifier.weight(1f))
             }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenu(expanded = open && enabled, onDismissRequest = { open = false }) {
                 DropdownMenuItem(text = { Text(NO_REGISTRY) }, onClick = { onPick(null); open = false })
                 registries.forEach { r ->
                     DropdownMenuItem(text = { Text(r.name) }, onClick = { onPick(r.id); open = false })

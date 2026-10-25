@@ -17,6 +17,6 @@ fun ImageSection(state: EditorState, vm: EditorViewModel, expanded: Boolean, onT
             HintText("Replace isn't available for a Portainer image; deploy a copy instead.")
         }
         SwitchRow("Pull image", state.pull, enabled, vm::setPull)
-        RegistryPicker(state.registries, state.registryId) { if (enabled) vm.setRegistry(it) }
+        RegistryPicker(state.registries, state.registryId, vm::setRegistry, enabled)
     }
 }

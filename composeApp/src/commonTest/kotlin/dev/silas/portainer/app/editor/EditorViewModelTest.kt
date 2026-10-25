@@ -44,6 +44,8 @@ class EditorViewModelTest {
     private var image = "ghcr.io/acme/app:1"
     private var inspectGone = false
     private var volumesFail = false
+    private var hostMounts = """[{"Type":"tmpfs","Target":"/tmp"}]"""
+    private var env = """["A=1","B=2"]"""
 
     private val anonName = "a".repeat(64)
 
@@ -52,13 +54,13 @@ class EditorViewModelTest {
       "State":{"Status":"running","Running":true},
       "Config":{
         "Image":"$image","Cmd":["sh","-c","echo hi there"],"Entrypoint":["/entry"],"WorkingDir":"/srv","User":"1000",
-        "Env":["A=1","B=2"],"Labels":{"tier":"web"},"ExposedPorts":{"80/tcp":{}},
+        "Env":$env,"Labels":{"tier":"web"},"ExposedPorts":{"80/tcp":{}},
         "Healthcheck":{"Test":["CMD-SHELL","curl -f localhost"]}
       },
       "HostConfig":{
         "NetworkMode":"front","PortBindings":{"80/tcp":[{"HostIp":"","HostPort":"8080"}]},"PublishAllPorts":false,
         "Binds":["/srv/data:/data:ro","cache:/cache","/a:/b:"],
-        "Mounts":[{"Type":"tmpfs","Target":"/tmp"}],
+        "Mounts":$hostMounts,
         "RestartPolicy":{"Name":"on-failure","MaximumRetryCount":3},
         "Memory":536870912,"MemoryReservation":0,"NanoCpus":1500000000,"CpuShares":512,
         "Privileged":true,"CapAdd":["NET_ADMIN"],
@@ -379,5 +381,102 @@ class EditorViewModelTest {
         val vm = loaded()
         assertEquals(EditorPhase.Ready, vm.state.value.phase)
         assertEquals(emptyList(), vm.state.value.volumes)
+    }
+
+    @Test
+    fun typedMacsAndAliasesIgnoreLoadedValuesMovedToAnotherNetwork() = runTest {
+        val vm = loaded()
+        val front = vm.state.value.draft.networks[0]
+        vm.updateNetwork(0, front.copy(name = "other", aliases = "web, abcdef123456"))
+        assertEquals(emptySet(), vm.typedMacs(), "the loaded MAC on a renamed row isn't typed")
+        assertEquals(emptySet(), vm.typedAliases(), "loaded aliases and the short id aren't typed")
+        vm.updateNetwork(1, vm.state.value.draft.networks[1].copy(aliases = "db", mac = "02:00:00:00:00:09"))
+        assertEquals(setOf("db"), vm.typedAliases())
+        assertEquals(setOf("02:00:00:00:00:09"), vm.typedMacs())
+    }
+
+    @Test
+    fun hostAndNoneDropEndpointSettings() = runTest {
+        val vm = loaded(containerId = null)
+        vm.updateNetwork(0, NetworkDraft("host", "web", "bad-ip", "zz", "nope"))
+        val s = vm.state.value
+        assertEquals(NetworkRow("host", emptyList(), "", "", ""), s.form.primaryNetwork)
+        assertNull(s.errors[EditorSection.Networks])
+    }
+
+    @Test
+    fun envKeyWithoutValueRestoresItsKeyOnlyForm() = runTest {
+        env = """["A=1","FLAG"]"""
+        val vm = loaded()
+        vm.setEnvRow(1, "FLAG", "x")
+        assertEquals(setOf(FormField.Env), vm.state.value.dirty)
+        vm.setEnvRow(1, "FLAG", "")
+        assertEquals(listOf("A=1", "FLAG"), vm.state.value.form.env)
+        assertEquals(emptySet(), vm.state.value.dirty)
+    }
+
+    @Test
+    fun loadedDuplicateEnvKeysDontBlockAnUntouchedReplace() = runTest {
+        env = """["A=1","A=2"]"""
+        val vm = loaded()
+        vm.setName("web2")
+        assertNull(vm.state.value.errors[EditorSection.Env])
+        assertTrue(vm.review(FinishAction.Replace))
+        vm.addEnvRow()
+        assertEquals(listOf("Duplicate variable: A"), vm.state.value.errors[EditorSection.Env])
+    }
+
+    @Test
+    fun typeThenRevertLeavesNothingDirty() = runTest {
+        hostMounts = """[{"Type":"volume","Source":"logs","Target":"/logs"}]"""
+        val vm = loaded()
+        val port = vm.state.value.draft.ports[0]
+        vm.updatePort(0, port.copy(hostPort = "80801"))
+        vm.updatePort(0, port)
+        vm.setEnvRow(0, "A", "12")
+        vm.setEnvRow(0, "A", "1")
+        val i = vm.mountIndex("/logs")
+        val row = vm.state.value.draft.mounts[i]
+        vm.updateMount(i, row.copy(readOnly = true))
+        vm.updateMount(i, vm.state.value.draft.mounts[i].copy(type = MountType.Tmpfs))
+        assertEquals("", vm.state.value.form.mounts[i].source)
+        vm.updateMount(i, vm.state.value.draft.mounts[i].copy(type = MountType.Volume, readOnly = false))
+        assertEquals(row, vm.state.value.form.mounts[i], "switching back from tmpfs restores the source")
+        vm.setWorkingDir(" /srv ")
+        assertEquals(emptySet(), vm.state.value.dirty)
+        assertFalse(vm.state.value.hasUnsavedChanges)
+        vm.setPull(true)
+        assertTrue(vm.state.value.hasUnsavedChanges, "a changed pull switch counts as unsaved")
+    }
+
+    @Test
+    fun resourceAndMountLimits() = runTest {
+        val vm = loaded()
+        vm.setMemory("4m")
+        vm.setMemoryReservation("1g")
+        vm.setCpus("0.1234567891")
+        assertEquals(
+            listOf(
+                "Memory limit must be at least 6m",
+                "Memory reservation can't be more than the memory limit",
+                "CPU limit: use at most 9 decimal places",
+            ),
+            vm.state.value.errors[EditorSection.Resources],
+        )
+        vm.addMount()
+        val m = vm.state.value.draft.mounts.lastIndex
+        vm.updateMount(m, vm.state.value.draft.mounts[m].copy(source = "x", target = "/data"))
+        assertEquals(listOf("Mount 5: /data is already mounted"), vm.state.value.errors[EditorSection.Volumes])
+    }
+
+    @Test
+    fun parseEdgeCases() {
+        assertNull(parseMemory("9999999999t"), "overflow is rejected")
+        assertEquals(1_610_612_736L, parseMemory("1.5g"))
+        assertEquals(250_000_000L, parseCpus(".25"))
+        assertNull(parseCpus("0.1234567891"))
+        assertNull(parseCpus("."))
+        assertEquals("1.5", formatCpus(1_500_000_000L))
+        assertEquals("1536m", formatMemory(1_610_612_736L))
     }
 }

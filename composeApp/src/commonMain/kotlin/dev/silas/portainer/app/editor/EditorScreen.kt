@@ -62,7 +62,7 @@ fun EditorScreen(viewModel: EditorViewModel, onContinue: (FinishAction) -> Unit,
     var confirmDiscard by rememberSaveable { mutableStateOf(false) }
     // Image and name open by default; sections with errors open when the user tries to continue.
     var expanded by rememberSaveable { mutableStateOf(listOf(EditorSection.Image.name, EditorSection.General.name)) }
-    val unsaved = state.phase == EditorPhase.Ready && !state.readOnly && state.dirty.isNotEmpty()
+    val unsaved = state.hasUnsavedChanges
     val back = { if (unsaved) confirmDiscard = true else onBack() }
     BackHandler(enabled = unsaved) { confirmDiscard = true }
 
