@@ -25,7 +25,8 @@ enum class PlanMode { Replace, Copy }
  * @param typedAliases network aliases the user typed in the form; Copy keeps only these per endpoint.
  * @param original the container's inspect before the form edits, when `inspect` is the form's merged JSON: the
  *   image change, pull decision and env diff are computed against it, and env entries the user typed (new or
- *   changed against it) are not stripped as image defaults. `null` = `inspect` is unedited (v1).
+ *   changed against it) are not stripped as image defaults. `null` = `inspect` is unedited (v1); required
+ *   when [userEdited] is not empty.
  * The default keeps v1 behaviour exactly.
  */
 data class PlanOptions(
@@ -66,6 +67,8 @@ object RecreatePlanner {
      *   `null` when the image can no longer be inspected: nothing is stripped and a warning is added.
      */
     fun plan(inspect: JsonObject, oldImageConfig: JsonObject?, edits: RecreateEdits, options: PlanOptions = PlanOptions()): RecreatePlan {
+        // Merged JSON already holds the edited image and env: diffs and pull would silently compare them with themselves.
+        require(options.original != null || options.userEdited.isEmpty()) { "PlanOptions.original is required when fields were edited" }
         val id = inspect.string("Id").orEmpty()
         val shortId = id.take(SHORT_ID_LENGTH)
         val originalConfig = inspect.obj("Config") ?: JsonObject(emptyMap())
@@ -132,7 +135,7 @@ object RecreatePlanner {
             createBody = JsonObject(config),
             extraNetworks = extraNetworks,
             image = ImageRef.parse(edits.image),
-            pull = edits.pullImage || edits.image != originalImage,
+            pull = edits.pullImage || edits.image != originalImage || FormField.Image in options.userEdited,
             registryId = edits.registryId,
             changes = changeSummary(originalImage, edits, inspectedEnv, imageConfig, dropped),
             warnings = warnings,

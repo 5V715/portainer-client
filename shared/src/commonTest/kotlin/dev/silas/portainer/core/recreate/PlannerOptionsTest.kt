@@ -20,6 +20,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -347,6 +348,24 @@ class PlannerOptionsTest {
         // v1 (no edited fields) strips it.
         val v1 = RecreatePlanner.plan(overridden, imageInspect, RecreateEdits("ghcr.io/example/app:1.1", e.after.env, false, null))
         assertEquals(strings("DB_HOST=db"), v1.createBody["Env"])
+    }
+
+    @Test
+    fun edited_fields_require_the_original_inspect() {
+        val e = edit(full) { it.copy(restart = RestartPolicyForm("always", 0)) }
+        assertFailsWith<IllegalArgumentException> {
+            RecreatePlanner.plan(e.merged, imageInspect, RecreateEdits(e.after.image, e.after.env, false, null), PlanOptions(userEdited = e.fields))
+        }
+    }
+
+    @Test
+    fun edited_image_always_pulls() {
+        val e = edit(full) { it.copy(image = "ghcr.io/example/app:1.1") }
+        assertTrue(e.plan().pull)
+        // Even if the caller's original already carries the new image, an edited image is pulled.
+        val sameImage = RecreatePlanner.plan(e.merged, imageInspect, RecreateEdits(e.after.image, e.after.env, false, null), PlanOptions(userEdited = e.fields, original = e.merged))
+        assertTrue(sameImage.pull)
+        assertFalse(edit(full) { it.copy(restart = RestartPolicyForm("always", 0)) }.plan().pull)
     }
 
     @Test
