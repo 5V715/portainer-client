@@ -72,6 +72,34 @@ class ImagesApiTest {
     }
 
     @Test
+    fun streamLinesReportProgress() = runTest {
+        val body = listOf(
+            "{\"status\":\"Pulling from library/nginx\",\"id\":\"latest\"}",
+            "{\"status\":\"Downloading\",\"progressDetail\":{\"current\":1,\"total\":5},\"progress\":\"[==>   ] 1MB/5MB\",\"id\":\"a1b2c3\"}",
+            "",
+            "not json",
+            "{\"status\":\"Status: Downloaded newer image for nginx:latest\"}",
+        ).joinToString("\n") + "\n"
+        val seen = mutableListOf<String>()
+        client(body = body).pullImage(1, ImageRef.parse("nginx"), null) { seen += it }
+        assertEquals(
+            listOf(
+                "latest: Pulling from library/nginx",
+                "a1b2c3: Downloading [==>   ] 1MB/5MB",
+                "Status: Downloaded newer image for nginx:latest",
+            ),
+            seen,
+        )
+    }
+
+    @Test
+    fun progressTextIsRedacted() = runTest {
+        val seen = mutableListOf<String>()
+        client(body = "{\"status\":\"token test-api-key ok\"}\n").pullImage(1, ImageRef.parse("nginx"), null) { seen += it }
+        assertEquals(listOf("token *** ok"), seen)
+    }
+
+    @Test
     fun buildsRequestWithRegistryHeader() = runTest {
         var req: HttpRequestData? = null
         client(body = "{}") { req = it }.pullImage(2, ImageRef.parse("ghcr.io/me/app:2"), 4)

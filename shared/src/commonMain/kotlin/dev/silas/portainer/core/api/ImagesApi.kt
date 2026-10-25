@@ -51,8 +51,9 @@ suspend fun PortainerClient.inspectImage(endpointId: Int, imageId: String): Json
  * Denial mapping: a stream error or any non-2xx body with a registry-style denial phrase gets the
  * "check its credentials in Registries" hint. Docker's text is redacted of the API key. A 401/403 without one (including Portainer RBAC "Access denied ...")
  * stays [PortainerException.Unauthorized], because it is ambiguous with a bad API key. A digest pins the pull.
+ * [onProgress] gets one redacted line of text (`id: status progress`) per progress line of the stream.
  */
-suspend fun PortainerClient.pullImage(endpointId: Int, ref: ImageRef, registryId: Int?) {
+suspend fun PortainerClient.pullImage(endpointId: Int, ref: ImageRef, registryId: Int?, onProgress: (String) -> Unit = {}) {
     try {
         prepareStream(dockerPath(endpointId, "images/create")) {
             method = HttpMethod.Post
@@ -68,7 +69,9 @@ suspend fun PortainerClient.pullImage(endpointId: Int, ref: ImageRef, registryId
             val channel = response.bodyAsChannel()
             while (true) {
                 val line = channel.readUTF8Line() ?: break
-                streamError(line)?.let { throw pullFailure(200, it) }
+                val obj = streamObject(line) ?: continue
+                streamError(obj)?.let { throw pullFailure(200, it) }
+                progressText(obj)?.let { onProgress(redact(it)) }
             }
         }
     } catch (e: Throwable) {
@@ -110,13 +113,26 @@ private fun PortainerClient.messageOf(body: String): String? {
         ?.takeIf { it.isNotBlank() }
 }
 
-private fun PortainerClient.streamError(line: String): String? {
+private fun PortainerClient.streamObject(line: String): JsonObject? {
     if (line.isBlank()) return null
-    val obj = try {
+    return try {
         json.parseToJsonElement(line) as? JsonObject
     } catch (e: Exception) {
         null
-    } ?: return null
+    }
+}
+
+private fun JsonObject.text(key: String): String? =
+    (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() }
+
+/** `id: status progress` from one progress line, or null when it has no status. */
+private fun progressText(obj: JsonObject): String? {
+    val status = obj.text("status") ?: return null
+    val id = obj.text("id")
+    return listOfNotNull(status, obj.text("progress")).joinToString(" ").let { if (id != null) "$id: $it" else it }
+}
+
+private fun streamError(obj: JsonObject): String? {
     val error = (obj["error"] as? JsonPrimitive)?.takeIf { it.isString }?.content
     val detail = ((obj["errorDetail"] as? JsonObject)?.get("message") as? JsonPrimitive)?.takeIf { it.isString }?.content
     return (error ?: detail)?.takeIf { it.isNotBlank() }
