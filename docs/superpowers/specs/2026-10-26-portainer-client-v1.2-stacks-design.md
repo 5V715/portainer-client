@@ -1,7 +1,7 @@
 # Portainer Client v1.2 — Stacks — Design
 
 Date: 2026-10-26
-Status: awaiting owner approval (builder check done)
+Status: approved by owner (2026-10-26)
 Builds on: v1 (`2026-10-17-portainer-client-design.md`) and v1.1
 (`2026-10-25-portainer-client-v1.1-design.md`). Everything there still applies (HTTPS + API key,
 Docker standalone environments only, protection of Portainer's own containers, Portainer-blue
