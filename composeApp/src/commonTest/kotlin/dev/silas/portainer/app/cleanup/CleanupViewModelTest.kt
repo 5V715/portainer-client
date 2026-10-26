@@ -578,6 +578,8 @@ class CleanupViewModelTest {
         dfGate = CompletableDeferred()
         val vm = preview(CleanupKind.Volumes)
         assertTrue(preview(vm).sizesPending)
+        // The df request goes out on the engine's threads; wait until it has actually been sent.
+        settle { requests.count { it.endsWith("/system/df") } == 1 }
         vm.acknowledge()
         assertEquals(CleanupPhase.Idle, vm.phase.value) // the pending preview is dropped
         dfGate!!.complete(Unit)
