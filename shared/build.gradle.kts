@@ -26,6 +26,7 @@ kotlin {
             api(libs.kotlinx.serialization.json)
             api(libs.kotlinx.coroutines.core)
             api(libs.multiplatform.settings)
+            implementation(libs.snakeyaml.engine.kmp)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
