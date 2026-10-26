@@ -1,7 +1,7 @@
 # Portainer Client v1.2 — Stacks — Design
 
 Date: 2026-10-26
-Status: awaiting owner approval
+Status: awaiting owner approval (builder check done)
 Builds on: v1 (`2026-10-17-portainer-client-design.md`) and v1.1
 (`2026-10-25-portainer-client-v1.1-design.md`). Everything there still applies (HTTPS + API key,
 Docker standalone environments only, protection of Portainer's own containers, Portainer-blue
@@ -172,6 +172,13 @@ notes the deviation; a feature CE lacks is dropped (not faked).
   coordination).
 
 ## Builder-check rulings (designer's calls, reviewable)
+
+- **Target version (owner: "the latest released community edition is installed"):** build against
+  the newest Portainer CE release at build time (check the current release and its API docs). Read
+  the server version from `/api/status` (already used); for any stack feature whose API differs
+  between recent CE releases (e.g. detach from git, ref listing, saved git credentials, webhook
+  format), gate it on the version and hide it on servers that lack it, never sending request
+  bodies an older server would silently ignore.
 
 - **External (limited-control) stacks:** follow Portainer CE's web UI exactly. Whatever CE offers
   for them (expected: view, and delete — addressed by name) the app offers, with the same safety
