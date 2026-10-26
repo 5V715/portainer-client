@@ -19,21 +19,23 @@ data class CleanupKey(val serverId: String, val endpointId: Int, val kind: Clean
  * Running and finished cleanups, one per [CleanupKey], collected in [scope] (an application-level scope), so
  * leaving the screen or switching tabs never stops a cleanup or loses its result. Each run gets its own client
  * from [dedicatedClient] (closed when the run ends). Call from one thread (the UI thread); the phase flows
- * themselves are safe to read anywhere.
+ * themselves are safe to read anywhere. [blocker] says why a cleanup can't start on an endpoint now (a recreate or a
+ * stack operation running there).
  */
 class CleanupSessions(
     private val scope: CoroutineScope,
     private val dedicatedClient: suspend (serverId: String) -> PortainerClient,
+    private val blocker: (serverId: String, endpointId: Int, kind: CleanupKind) -> String? = { _, _, _ -> null },
 ) {
     private val sessions = mutableMapOf<CleanupKey, MutableStateFlow<CleanupPhase?>>()
 
     /** [CleanupPhase.Running] or [CleanupPhase.Done]; null when nothing ran (or the result was cleared). */
     fun phase(key: CleanupKey): StateFlow<CleanupPhase?> = flowFor(key)
 
-    /** Deletes exactly [items], in order. Refused (false) while a cleanup for [key] is still running. */
+    /** Deletes exactly [items], in order. Refused (false) while a cleanup for [key] is still running or [refusal] gives a reason. */
     fun start(key: CleanupKey, items: List<CleanupItem>): Boolean {
         val state = flowFor(key)
-        if (state.value is CleanupPhase.Running) return false
+        if (state.value is CleanupPhase.Running || refusal(key.serverId, key.endpointId, key.kind) != null) return false
         state.value = CleanupPhase.Running(0, items.size)
         scope.launch {
             val deleted = mutableListOf<CleanupItem>()
@@ -86,6 +88,13 @@ class CleanupSessions(
     /** True while a cleanup of [kind] on [serverId]'s endpoint [endpointId] has not finished yet. */
     fun isRunning(serverId: String, endpointId: Int, kind: CleanupKind): Boolean =
         sessions[CleanupKey(serverId, endpointId, kind)]?.value is CleanupPhase.Running
+
+    /** True while a cleanup of any kind on [serverId]'s endpoint [endpointId] has not finished yet. */
+    fun isRunningAny(serverId: String, endpointId: Int): Boolean =
+        sessions.any { (k, v) -> k.serverId == serverId && k.endpointId == endpointId && v.value is CleanupPhase.Running }
+
+    /** Why no cleanup of [kind] may start on [serverId]'s endpoint [endpointId] now, or null. */
+    fun refusal(serverId: String, endpointId: Int, kind: CleanupKind): String? = blocker(serverId, endpointId, kind)
 
     /** Forgets a finished result (never a running one). */
     fun clear(key: CleanupKey) {

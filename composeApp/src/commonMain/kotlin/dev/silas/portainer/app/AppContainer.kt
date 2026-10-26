@@ -8,6 +8,11 @@ import dev.silas.portainer.app.cleanup.CleanupSessions
 import dev.silas.portainer.app.editor.DeploySessions
 import dev.silas.portainer.core.cleanup.CleanupKind
 import dev.silas.portainer.app.recreate.RecreateSessions
+import dev.silas.portainer.app.cleanup.RECREATE_IN_PROGRESS_MESSAGE
+import dev.silas.portainer.app.editor.DEPLOY_IN_PROGRESS_MESSAGE
+import dev.silas.portainer.app.recreate.CLEANUP_IN_PROGRESS_MESSAGE
+import dev.silas.portainer.app.stacks.STACK_OPERATION_IN_PROGRESS_MESSAGE
+import dev.silas.portainer.app.stacks.StackSessions
 import io.ktor.client.engine.HttpClientEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,15 +33,39 @@ class AppContainer(
     val engineFactory: () -> HttpClientEngine = ::httpEngine,
 ) {
     /** Running and finished recreates, so screens can come and go without affecting the operation. */
-    val recreateSessions = RecreateSessions(appScope, nowEpochSeconds) { serverId, endpointId ->
-        cleanupSessions.isRunning(serverId, endpointId, CleanupKind.Containers)
-    }
+    val recreateSessions: RecreateSessions = RecreateSessions(
+        appScope,
+        nowEpochSeconds,
+        cleanupRunning = { serverId, endpointId -> cleanupSessions.isRunning(serverId, endpointId, CleanupKind.Containers) },
+        stackRunning = { serverId, endpointId -> stackSessions.isRunning(serverId, endpointId) },
+    )
 
     /** Running and finished cleanups, so switching tabs or leaving a list never stops or loses one. */
-    val cleanupSessions = CleanupSessions(appScope) { dedicatedClient(it) }
+    val cleanupSessions: CleanupSessions = CleanupSessions(appScope, { dedicatedClient(it) }) { serverId, endpointId, kind ->
+        when {
+            kind == CleanupKind.Containers && recreateSessions.isRunning(serverId, endpointId) -> RECREATE_IN_PROGRESS_MESSAGE
+            stackSessions.isRunning(serverId, endpointId) -> STACK_OPERATION_IN_PROGRESS_MESSAGE
+            else -> null
+        }
+    }
 
     /** Running and finished copies / new containers, so leaving the editor never stops one. */
-    val deploySessions = DeploySessions(appScope)
+    val deploySessions: DeploySessions = DeploySessions(appScope) { serverId, endpointId ->
+        STACK_OPERATION_IN_PROGRESS_MESSAGE.takeIf { stackSessions.isRunning(serverId, endpointId) }
+    }
+
+    /**
+     * Running and finished stack start/stop/delete, so leaving the stack never stops or loses one. Refused while a
+     * recreate, any cleanup or an editor deploy runs on the endpoint: each touches containers the stack may own.
+     */
+    val stackSessions: StackSessions = StackSessions(appScope, { dedicatedClient(it) }, otherWork = { serverId, endpointId ->
+        when {
+            recreateSessions.isRunning(serverId, endpointId) -> RECREATE_IN_PROGRESS_MESSAGE
+            cleanupSessions.isRunningAny(serverId, endpointId) -> CLEANUP_IN_PROGRESS_MESSAGE
+            deploySessions.isRunning(serverId, endpointId) -> DEPLOY_IN_PROGRESS_MESSAGE
+            else -> null
+        }
+    })
 
     private val lock = Mutex()
     private val clients = mutableMapOf<String, PortainerClient>()

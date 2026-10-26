@@ -44,6 +44,7 @@ class StackDetailViewModelTest {
         {"Id":"c3","Names":["/other"],"Image":"redis","State":"running","Status":"Up","Labels":{"com.docker.compose.project":"other"}}
     ]"""
     private var failAll = false
+    private var inspectJson = "{}"
 
     @BeforeTest
     fun setUp() = Dispatchers.setMain(StandardTestDispatcher())
@@ -68,6 +69,7 @@ class StackDetailViewModelTest {
                         respond("""{"message":"Stack git settings have changed"}""", fileStatus, json)
                     }
                 path.endsWith("/containers/json") -> respond(containersJson, HttpStatusCode.OK, json)
+                path.endsWith("/containers/c1/json") -> respond(inspectJson, HttpStatusCode.OK, json)
                 else -> respond("{}", HttpStatusCode.NotFound, json)
             }
         }
@@ -145,6 +147,9 @@ class StackDetailViewModelTest {
         assertEquals("deploy/compose.yml", git.configFilePath)
         assertNull(s.file)
         assertEquals("Stack git settings have changed", s.fileError)
+        // The file's images are unknown, so whether it runs Portainer is too.
+        assertTrue(s.protectionUnknown)
+        assertFalse(s.protected)
         assertNull(s.error)
         assertEquals(2, s.containers.size)
     }
@@ -167,5 +172,33 @@ class StackDetailViewModelTest {
         val message = assertNotNull(vm.state.value.error)
         assertFalse(message.contains("secret-key"), message)
         assertNull(vm.state.value.stack)
+    }
+
+    @Test
+    fun loadedFileMeansProtectionIsKnown() = runTest {
+        val vm = loaded()
+        assertFalse(vm.state.value.protectionUnknown)
+        assertEquals("shop", vm.name)
+    }
+
+    @Test
+    fun idOnlyMemberImageIsResolvedBeforeTheProtectedCheck() = runTest {
+        val id = "sha256:" + "f".repeat(64)
+        containersJson = """[
+            {"Id":"c1","Names":["/shop-ui-1"],"Image":"$id","State":"running","Status":"Up","Labels":{"com.docker.compose.project":"shop"}}
+        ]"""
+        inspectJson = """{"Id":"c1","Config":{"Image":"portainer/portainer-ce:2.45.3"}}"""
+        fileContent = "services:\n  web:\n    image: nginx\n"
+        val vm = loaded()
+        assertTrue(vm.state.value.protected)
+        assertTrue(requests.contains("GET /api/endpoints/1/docker/containers/c1/json"), requests.toString())
+    }
+
+    @Test
+    fun externalStackThatNoLongerExistsShowsAnError() = runTest {
+        val vm = loaded(stackId = null, name = "gone")
+        assertEquals("Stack gone no longer exists", vm.state.value.error)
+        assertNull(vm.state.value.stack)
+        assertEquals("gone", vm.name) // the title while there is no stack
     }
 }

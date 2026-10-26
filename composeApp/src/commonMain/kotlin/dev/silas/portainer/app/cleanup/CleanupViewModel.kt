@@ -78,7 +78,8 @@ sealed interface CleanupPhase {
  * finishes while it is closed opens it again with the result.
  *
  * Container cleanups are refused while a recreate runs on the endpoint: mid-recreate, the new container is only
- * created and the renamed old one stopped, so both would look like stopped containers to delete.
+ * created and the renamed old one stopped, so both would look like stopped containers to delete. Every cleanup is
+ * refused while a stack operation runs there: the stack's containers, images and networks are changing.
  */
 class CleanupViewModel(
     private val container: AppContainer,
@@ -140,9 +141,9 @@ class CleanupViewModel(
         _sheetVisible.value = true
         if (session.value is CleanupPhase.Running) return
         sessions.clear(key)
-        if (recreateBlocks()) {
+        sessions.refusal(serverId, endpointId, kind)?.let {
             loadJob?.cancel()
-            _phase.value = CleanupPhase.Error(RECREATE_IN_PROGRESS_MESSAGE)
+            _phase.value = CleanupPhase.Error(it)
             return
         }
         loadJob?.cancel()
@@ -215,8 +216,8 @@ class CleanupViewModel(
     fun cancelNamed() = _phase.update { if (it is CleanupPhase.ConfirmNamed) it.preview else it }
 
     private fun run(items: List<CleanupItem>) {
-        if (recreateBlocks()) {
-            _phase.value = CleanupPhase.Error(RECREATE_IN_PROGRESS_MESSAGE)
+        sessions.refusal(serverId, endpointId, kind)?.let {
+            _phase.value = CleanupPhase.Error(it)
             return
         }
         // Refused while a run for this key is active (a double tap, or a run started from an earlier screen).
@@ -234,9 +235,6 @@ class CleanupViewModel(
         }
         sessions.clear(key)
     }
-
-    private fun recreateBlocks(): Boolean =
-        kind == CleanupKind.Containers && container.recreateSessions.isRunning(serverId, endpointId)
 
     private suspend fun buildPlan(client: PortainerClient): CleanupPlan {
         imagePlan = null

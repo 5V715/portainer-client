@@ -11,7 +11,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -55,14 +57,38 @@ fun StackDetailScreen(
             viewModel.clearError()
         }
     }
+    LaunchedEffect(state.notice) {
+        state.notice?.let {
+            snackbar.showSnackbar(it)
+            viewModel.clearNotice()
+        }
+    }
+    LaunchedEffect(state.deleted) {
+        if (state.deleted) {
+            viewModel.navigated()
+            onBack() // the list reloads when it shows again
+        }
+    }
+    state.confirm?.let { confirm ->
+        StackConfirmSheet(confirm, viewModel::setTypedName, viewModel::confirm, viewModel::dismissConfirm)
+    }
+    state.failure?.let { (op, message) ->
+        AlertDialog(
+            onDismissRequest = viewModel::clearFailure,
+            title = { Text(failureTitle(op)) },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = viewModel::clearFailure) { Text("OK") } },
+        )
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stack?.name ?: "Stack", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = { Text(stack?.name ?: viewModel.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = { BackButton(onBack) },
             )
         },
+        bottomBar = { StackActionBar(state.ops, state.running, state.starting || state.loading, viewModel::request) },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         PullToRefreshBox(
@@ -91,17 +117,19 @@ fun StackDetailScreen(
                 Field("Control", stack.controlLabel)
                 if (stack.control == StackControl.Limited) {
                     Text(
-                        "Portainer did not create this stack, so it can only be viewed here.",
+                        EXTERNAL_STACK_MESSAGE,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
                     Field("Created", formatStackDate(stack.createdAt))
-                    Field("Updated", formatStackDate(stack.updatedAt))
+                    stack.updatedAt?.let { Field("Updated", formatStackDate(it)) }
                     stack.updatedBy?.let { Field("Updated by", it) }
                 }
                 if (state.protected) {
                     Text(PROTECTED_IMAGE_MESSAGE, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+                } else if (state.protectionUnknown) {
+                    Text(PROTECTION_UNKNOWN_MESSAGE, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
                 }
                 stack.git?.let { git ->
                     HorizontalDivider()

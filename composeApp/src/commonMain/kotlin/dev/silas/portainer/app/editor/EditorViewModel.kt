@@ -574,8 +574,10 @@ class EditorViewModel(
     /** @return why it couldn't start, or null once the deploy runs (its progress is then shown). */
     private suspend fun startDeploy(request: DeployRequest): String? {
         val sessions = container.deploySessions
+        sessions.refusal(serverId, endpointId)?.let { return it }
         val key = DeployKey(serverId, endpointId, deploySource, request.name.ifEmpty { sessions.unnamedId() })
         if (!sessions.start(key, container.dedicatedClient(serverId), request)) {
+            sessions.refusal(serverId, endpointId)?.let { return it }
             return if (request.name.isEmpty()) "This container is being created already." else "A container named ${request.name} is being created already."
         }
         attach(key, live = true)

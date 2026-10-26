@@ -1,5 +1,6 @@
 package dev.silas.portainer.app.recreate
 
+import dev.silas.portainer.app.stacks.STACK_OPERATION_IN_PROGRESS_MESSAGE
 import dev.silas.portainer.app.support.safeMessage
 import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.recreate.PortainerDockerOps
@@ -45,12 +46,14 @@ internal fun plannedSteps(plan: RecreatePlan): List<RecreateStep> = RecreateStep
  * Holds recreates in flight, keyed by container, and collects them in [scope] (an application-level scope),
  * so leaving the screen, rotating or recreating a ViewModel never cancels the operation.
  * Call from one thread (the UI thread); the progress flows themselves are safe to read anywhere.
- * [cleanupRunning] tells whether a Containers cleanup runs on a server's endpoint; no recreate starts meanwhile.
+ * [cleanupRunning] tells whether a Containers cleanup runs on a server's endpoint, [stackRunning] whether a stack
+ * operation does; no recreate starts meanwhile.
  */
 class RecreateSessions(
     private val scope: CoroutineScope,
     private val nowEpochSeconds: () -> Long,
     private val cleanupRunning: (serverId: String, endpointId: Int) -> Boolean = { _, _ -> false },
+    private val stackRunning: (serverId: String, endpointId: Int) -> Boolean = { _, _ -> false },
 ) {
     private val sessions = mutableMapOf<SessionKey, MutableStateFlow<RecreateProgress?>>()
 
@@ -88,8 +91,11 @@ class RecreateSessions(
     }
 
     /** Why no recreate may start on [serverId]'s endpoint [endpointId] now, or null. */
-    fun refusal(serverId: String, endpointId: Int): String? =
-        CLEANUP_IN_PROGRESS_MESSAGE.takeIf { cleanupRunning(serverId, endpointId) }
+    fun refusal(serverId: String, endpointId: Int): String? = when {
+        cleanupRunning(serverId, endpointId) -> CLEANUP_IN_PROGRESS_MESSAGE
+        stackRunning(serverId, endpointId) -> STACK_OPERATION_IN_PROGRESS_MESSAGE
+        else -> null
+    }
 
     /** True while a recreate on [serverId]'s endpoint [endpointId] has not finished yet. */
     fun isRunning(serverId: String, endpointId: Int): Boolean = sessions.any { (key, state) ->

@@ -16,6 +16,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 
+/** Why a stack operation can't start now: a container is being created on the endpoint. */
+const val DEPLOY_IN_PROGRESS_MESSAGE = "A container is being created — try again when it finishes."
+
 /** Where a deploy was started from: the original container's id for a copy, [NEW_SOURCE] for Create. */
 const val NEW_SOURCE = "new"
 
@@ -77,9 +80,13 @@ fun deployFailureText(progress: DeployProgress): String {
  * Copies and new containers being deployed: Pull → Create → ConnectNetworks → Start, collected in [scope] (an
  * application-level scope) so leaving the editor never stops one. Nothing here touches any container but the
  * one it creates, and nothing is ever removed: a failure after Create leaves the created container.
- * Call from one thread (the UI thread); the progress flows are safe to read anywhere.
+ * Call from one thread (the UI thread); the progress flows are safe to read anywhere. [blocker] says why no deploy
+ * may start on an endpoint now (a stack operation running there).
  */
-class DeploySessions(private val scope: CoroutineScope) {
+class DeploySessions(
+    private val scope: CoroutineScope,
+    private val blocker: (serverId: String, endpointId: Int) -> String? = { _, _ -> null },
+) {
     private val sessions = mutableMapOf<DeployKey, MutableStateFlow<DeployProgress?>>()
 
     private var unnamed = 0
@@ -97,15 +104,15 @@ class DeploySessions(private val scope: CoroutineScope) {
 
     /**
      * Runs [request] through [client], which this session owns and closes when done. Refused (false), closing
-     * [client], while a deploy for [key], or of a container with the same name on that endpoint, is still running;
-     * a finished result is replaced.
+     * [client], while a deploy for [key], or of a container with the same name on that endpoint, is still running,
+     * or while [refusal] gives a reason; a finished result is replaced.
      */
     fun start(key: DeployKey, client: PortainerClient, request: DeployRequest): Boolean {
         val state = flowFor(key)
         val sameName = request.name.isNotEmpty() && sessions.any { (k, v) ->
             k.serverId == key.serverId && k.endpointId == key.endpointId && v.value.let { it != null && it.result == null && it.name == request.name }
         }
-        if (sameName || state.value.let { it != null && it.result == null }) {
+        if (sameName || state.value.let { it != null && it.result == null } || refusal(key.serverId, key.endpointId) != null) {
             client.close()
             return false
         }
@@ -152,6 +159,14 @@ class DeploySessions(private val scope: CoroutineScope) {
             }
         }
         return true
+    }
+
+    /** Why no deploy may start on [serverId]'s endpoint [endpointId] now, or null. */
+    fun refusal(serverId: String, endpointId: Int): String? = blocker(serverId, endpointId)
+
+    /** True while a deploy on [serverId]'s endpoint [endpointId] has not finished yet. */
+    fun isRunning(serverId: String, endpointId: Int): Boolean = sessions.any { (k, v) ->
+        k.serverId == serverId && k.endpointId == endpointId && v.value.let { it != null && it.result == null }
     }
 
     /** Forgets a finished result (never a running one). */
