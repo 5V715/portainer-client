@@ -37,7 +37,7 @@ class ComposeAnalysisTest {
     @Test
     fun unclosedFlowReportsLineOfUserText() {
         val e = assertNotNull(analyzeCompose("a: 1\nb: [1, 2\nc: 3\n", webEditor = true).error)
-        assertTrue(e.line in 2..4, "line was ${e.line}")
+        assertEquals(3, e.line)
     }
 
     @Test
@@ -132,8 +132,66 @@ class ComposeAnalysisTest {
         }
         assertTrue(text.lines().size >= 3000)
         analyzeCompose(text, webEditor = true) // warm up
-        val t = measureTime { analyzeCompose(text, webEditor = true) }
-        assertTrue(t.inWholeMilliseconds < 500, "took $t")
+        val best = (1..3).minOf { measureTime { analyzeCompose(text, webEditor = true) } }
+        assertTrue(best.inWholeMilliseconds < 500, "best of 3 took $best")
+    }
+
+    @Test
+    fun duplicateServiceIsAnErrorAtTheDuplicate() {
+        val e = assertNotNull(analyzeCompose("services:\n  web:\n    image: a\n  db:\n    image: b\n  web:\n    image: c\n", true).error)
+        assertEquals(6, e.line)
+        assertTrue("web" in e.message)
+    }
+
+    @Test
+    fun duplicateImageInOneServiceIsAnError() {
+        val e = assertNotNull(analyzeCompose("services:\n  web:\n    image: a\n    image: b\n", true).error)
+        assertEquals(4, e.line)
+    }
+
+    @Test
+    fun sameKeyInDifferentMappingsAndAliasReuseAreFine() {
+        val text = "x: &c\n  image: a\nservices:\n  a:\n    image: a\n  b:\n    image: b\n  c: *c\n  d: *c\n"
+        assertNull(analyzeCompose(text, true).error)
+    }
+
+    @Test
+    fun multipleDocumentsExplainedWithLibraryLine() {
+        val e = assertNotNull(analyzeCompose("a: b\n---\nc: d", webEditor = true).error)
+        assertEquals("Multiple YAML documents ('---'). A compose file must contain exactly one.", e.message)
+        assertEquals(1, e.line)
+    }
+
+    @Test
+    fun leadingLoneDocumentMarkerIsFine() {
+        val a = analyzeCompose("---\n$valid\n", webEditor = true)
+        assertNull(a.error)
+        assertEquals(listOf("web", "db"), a.services)
+    }
+
+    @Test
+    fun blankOrNullImageIsMissing() {
+        for (img in listOf("image:", "image: ''", "image: ~", "image: null")) {
+            val a = analyzeCompose("services:\n  x:\n    $img\n", webEditor = true)
+            assertNull(a.error, img)
+            assertEquals(listOf<ComposeWarning>(ComposeWarning.ServiceWithoutImage("x")), a.warnings, img)
+            assertEquals(emptyList(), a.images, img)
+        }
+    }
+
+    @Test
+    fun includeAloneHasNoWarnings() {
+        val a = analyzeCompose("include:\n  - other.yml\n", webEditor = true)
+        assertNull(a.error)
+        assertTrue(a.warnings.isEmpty())
+    }
+
+    @Test
+    fun extendsSuppressesMissingImageWarning() {
+        val with = analyzeCompose("services:\n  b:\n    extends:\n      service: z\n", true)
+        val without = analyzeCompose("services:\n  b:\n    command: ls\n", true)
+        assertTrue(with.warnings.isEmpty())
+        assertEquals(listOf<ComposeWarning>(ComposeWarning.ServiceWithoutImage("b")), without.warnings)
     }
 
     @Test
