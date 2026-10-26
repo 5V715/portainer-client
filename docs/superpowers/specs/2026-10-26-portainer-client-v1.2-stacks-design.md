@@ -171,6 +171,22 @@ notes the deviation; a feature CE lacks is dropped (not faked).
   delete, review before deploy, credentials never stored, unsaved-changes guard, session
   coordination).
 
+## Builder-check rulings (designer's calls, reviewable)
+
+- **External (limited-control) stacks:** follow Portainer CE's web UI exactly. Whatever CE offers
+  for them (expected: view, and delete — addressed by name) the app offers, with the same safety
+  rules (protected block, connection reminder, typed-name confirm); nothing CE doesn't offer.
+  Goals §1 "view-only" means no edit/redeploy.
+- **Validation strictness:** a YAML **parse error blocks** deploy. The structural check
+  (`services:` present, each service has `image` or `build`) is a **warning** the user can
+  proceed past, because valid files using `extends`/`include:`/fragments would fail it. A
+  `build:` key in a web-editor stack adds a warning that Portainer may not have a build context.
+- **Portainer protection reach:** the block applies when either the stack's current containers
+  (running or stopped) or the images in the stack's compose file (current, and the new file being
+  deployed) match the protected-image rule. It covers redeploy, update, stop, delete, detach and
+  **migrate** (which takes the stack down on the source). Migrate also gets the connection
+  reminder and the typed-name confirmation.
+
 ## Decided by the designer (reviewable)
 
 - Fifth bottom-bar tab "Stacks".
