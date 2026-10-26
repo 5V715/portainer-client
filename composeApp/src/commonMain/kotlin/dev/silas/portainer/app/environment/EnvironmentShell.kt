@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.automirrored.filled.List
@@ -22,9 +23,10 @@ enum class EnvTab(val label: String, val icon: ImageVector) {
     Images("Images", Icons.Default.Info),
     Volumes("Volumes", Icons.Default.Home),
     Networks("Networks", Icons.Default.Share),
+    Stacks("Stacks", Icons.Default.Build),
 }
 
-/** Bottom tab bar around one of the environment's four list screens. */
+/** Bottom tab bar around one of the environment's five list screens. */
 @Composable
 fun EnvironmentShell(selected: EnvTab, onSelect: (EnvTab) -> Unit, content: @Composable () -> Unit) {
     Scaffold(

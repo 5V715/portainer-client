@@ -50,3 +50,10 @@ data class NetworkDetail(val serverId: String, val endpointId: Int, val networkI
 /** The container editor; [containerId] `null` = New container. */
 @Serializable
 data class Editor(val serverId: String, val endpointId: Int, val containerId: String?)
+
+@Serializable
+data class Stacks(val serverId: String, val endpointId: Int)
+
+/** A stack; [stackId] `null` = external (limited) stack, identified by [name]. */
+@Serializable
+data class StackDetail(val serverId: String, val endpointId: Int, val stackId: Int?, val name: String)
