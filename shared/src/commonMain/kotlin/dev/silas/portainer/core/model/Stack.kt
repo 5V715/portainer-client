@@ -32,8 +32,10 @@ enum class StackStatus {
     companion object {
         fun fromCode(code: Int): StackStatus = when (code) {
             1 -> Active
+            2 -> Inactive
             3 -> Deploying
             4 -> Error
+            // 0 (missing, e.g. very old stacks) or a code newer than this app: never claim it is running.
             else -> Inactive
         }
     }

@@ -56,7 +56,7 @@ class StackFeaturesTest {
         assertTrue(stackFeatures("2.43.0").savedGitCredentials)
         assertFalse(stackFeatures("2.43.0").pollingOnSource)
         assertTrue(stackFeatures("2.44.0").pollingOnSource)
-        assertTrue(stackFeatures("3.0.0").pollingOnSource)
+        // 3.x is unverified: its gates are deliberately left unasserted (see the notes' "Version gates").
         assertFalse(stackFeatures("1.24.2").detachFromGit)
     }
 

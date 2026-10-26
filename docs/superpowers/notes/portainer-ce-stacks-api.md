@@ -85,8 +85,9 @@ deployment error). Stop returns 409 while deploying. Same paths in all checked v
 
 ## Delete — `DELETE /api/stacks/{id}?endpointId=N`
 
-`stack_delete.go`. 204, no body. `endpointId` must be the stack's endpoint (a different id is treated as an
-orphaned-stack delete and needs admin). Synchronous (compose down).
+`stack_delete.go`. 204, no body. `endpointId` is optional server-side, but a missing value (→ 0) or any id other than the
+stack's endpoint is treated as an orphaned-stack delete that needs admin; the app always sends the stack's endpoint id.
+Synchronous (compose down).
 
 - **No volume-removal flag for standalone/compose stacks in CE** (any checked version): teardown calls
   `UndeployComposeStack` without volume options (`api/stacks/teardown/teardown.go`); `ComposeDownOptions.RemoveVolumes`
@@ -129,7 +130,7 @@ orphaned-stack delete and needs admin). Synchronous (compose down).
 
 ```json
 {"RepositoryReferenceName": "refs/heads/main", "ConfigFilePath": "docker-compose.yml",
- "AdditionalFiles": ["override.yml"], "AutoUpdate": null, "Env": [], "Prune": false,
+ "AdditionalFiles": ["override.yml"], "AutoUpdate": <current or edited>, "Env": [<current or edited>], "Prune": false,
  "SourceID": 0,
  "RepositoryURL": "", "RepositoryAuthentication": true, "RepositoryUsername": "u",
  "RepositoryPassword": "", "TLSSkipVerify": false}
@@ -138,6 +139,14 @@ orphaned-stack delete and needs admin). Synchronous (compose down).
 - `ConfigFilePath` and `AdditionalFiles` in this payload: **2.40.0+** (older: ref/auth/TLS/AutoUpdate/Env/Prune only;
   compose path not editable).
 - `Prune` is applied only to Swarm stacks here (ignored for compose).
+- **Replaced vs kept** (`stack_update_git.go` at 2.33.7, 2.39.8, 2.40.0, 2.41.1, 2.45.3):
+  - Replaced wholesale on **every** version: `RepositoryReferenceName` (`""` empties the ref), `Env` (omitted, `null` or
+    `[]` clears all variables), `AutoUpdate` (`null`/omitted turns GitOps updates off); with `SourceID == 0` also `TLSSkipVerify` and the credentials
+    (see below).
+  - Kept when empty, **2.40+** only: `ConfigFilePath: ""`, `AdditionalFiles: null`/omitted, `RepositoryURL: ""` keep
+    the stored values (`[]` for `AdditionalFiles` clears them).
+  - **Rule (Task 8):** always send the stack's current ref, env and AutoUpdate (and TLS) unless the user changed them.
+- ≤2.39 payloads also have `RepositoryAuthorizationType` (int, `gittypes.GitCredentialAuthType`); omit it (0 = basic).
 - **Credentials ("keep stored" vs "no auth")** — critical, applies when `SourceID == 0` (all versions):
   - `RepositoryAuthentication: true` + `RepositoryPassword: ""` → **keeps the stored password** (username replaced by
     `RepositoryUsername`).
@@ -173,9 +182,14 @@ orphaned-stack delete and needs admin). Synchronous (compose down).
  "RepositoryPassword": "", "Env": [...], "Prune": false, "RepullImageAndRedeploy": true, "PullImage": true}
 ```
 
-- `RepositoryReferenceName: ""` keeps the stored ref.
-- `Env` omitted/`null` keeps env; `Prune` is `*bool` on 2.41+ (omit = keep `Option.Prune`); plain bool on ≤2.40
-  (omitted = false). CE UI sends `Prune: stack.Option?.Prune`.
+- Keep rules exist **only from 2.41.1**: `RepositoryReferenceName: ""` keeps the stored ref (`cmp.Or`), and `Env`
+  omitted/`null` keeps env (`if payload.Env != nil`). On **≤2.40** (incl. 2.33.7, 2.36, 2.39 LTS) both are assigned
+  unconditionally: an empty ref empties `GitConfig.ReferenceName`, an omitted Env clears all variables.
+- **Rule (Task 8): always send the stack's current `RepositoryReferenceName` and current `Env` on redeploy, on every
+  version.**
+- `Prune` is `*bool` on 2.41+ (omit = keep `Option.Prune`); plain bool on ≤2.40 (omitted = false). CE UI sends
+  `Prune: stack.Option?.Prune` — always send the stack's current `prune`.
+- ≤2.39 payloads also have `RepositoryAuthorizationType` (int); omit it (0 = basic).
 - Credentials: **2.44+** stored (Source) credentials are used unless `RepositoryAuthentication: true` **and** a non-empty
   `RepositoryPassword` is sent (then it replaces them). **≤2.43**: credentials are used only when
   `RepositoryAuthentication: true` (+ username); empty password = keep stored.
@@ -245,7 +259,9 @@ source, synchronously; 409 if the name is used on the target. Duplicate = create
 ## Version gates (`StackFeatures`, `core/stacks/StackFeatures.kt`)
 
 Versions are compared numerically on `major.minor.patch` from `/api/status` `Version`; unparseable → every
-optional feature off. Below 2.33.0 (unverified) → off.
+optional feature off. Below 2.33.0 (unverified) → off. A future major (3.x) is unverified: the implementation's
+`>=` comparisons currently turn its gates on, but this is deliberately **not** asserted by tests — re-verify the gates
+when a 3.x CE release exists.
 
 | feature | gate | evidence |
 |---|---|---|
