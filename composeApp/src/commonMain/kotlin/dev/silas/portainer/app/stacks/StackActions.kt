@@ -24,13 +24,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dev.silas.portainer.app.support.CONNECTION_DEPENDENCY_REMINDER
 import dev.silas.portainer.core.model.StackControl
 import dev.silas.portainer.core.model.StackStatus
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
-
-/** Shown on every confirmation of an operation that takes stack containers down. */
-const val STACK_CONNECTION_REMINDER =
-    "If this stack runs something the app needs to reach Portainer (VPN, reverse proxy), the app may lose its connection."
 
 /** The compose file couldn't be read, so whether the stack runs Portainer is unknown. */
 const val PROTECTION_UNKNOWN_MESSAGE = "Couldn't check whether this stack runs Portainer — try again."
@@ -50,37 +47,38 @@ fun availableStackOps(state: StackDetailState): List<StackOp> {
     }
 }
 
-/** Why [op] may not run on the stack as loaded, or null. Protection blocks everything that takes containers down. */
+/**
+ * Why [op] may not run on the stack as loaded, or null. Protection blocks every operation, start included: compose up
+ * can recreate drifted Portainer/agent containers.
+ */
 fun stackOpRefusal(state: StackDetailState, op: StackOp): String? {
     val stack = state.stack ?: return null
     if (stack.control != StackControl.Full || stack.id == null) return EXTERNAL_STACK_MESSAGE
-    val takesDown = op != StackOp.Start
     return when {
-        takesDown && state.protected -> PROTECTED_IMAGE_MESSAGE
-        takesDown && state.protectionUnknown -> PROTECTION_UNKNOWN_MESSAGE
+        state.protected -> PROTECTED_IMAGE_MESSAGE
+        state.protectionUnknown -> PROTECTION_UNKNOWN_MESSAGE
         else -> null
     }
 }
 
-/** The confirmation of [op] on [stackName]; delete needs the name typed exactly. */
+/** The confirmation of [op] (stop or delete; start asks nothing) on [stackName]; delete needs the name typed exactly. */
 data class StackConfirm(val op: StackOp, val stackName: String, val typedName: String = "") {
-    val reminder: String get() = STACK_CONNECTION_REMINDER
+    init {
+        require(needsConfirm(op)) { "Start needs no confirmation" }
+    }
+
+    val reminder: String get() = CONNECTION_DEPENDENCY_REMINDER
     val needsTypedName: Boolean get() = op == StackOp.Delete
     val canConfirm: Boolean get() = !needsTypedName || typedName == stackName
 
     val title: String
-        get() = when (op) {
-            StackOp.Start -> "Start stack $stackName?"
-            StackOp.Stop -> "Stop stack $stackName?"
-            StackOp.Delete -> "Delete stack $stackName?"
-        }
+        get() = if (op == StackOp.Delete) "Delete stack $stackName?" else "Stop stack $stackName?"
 
     val body: String
-        get() = when (op) {
-            StackOp.Start -> "Portainer starts the stack's services."
-            StackOp.Stop -> "All of the stack's containers are stopped."
-            StackOp.Delete ->
-                "The stack and its containers are removed from Portainer and Docker. Its volumes are kept. This can't be undone."
+        get() = if (op == StackOp.Delete) {
+            "The stack and its containers are removed from Portainer and Docker. Its volumes are kept. This can't be undone."
+        } else {
+            "All of the stack's containers are stopped."
         }
 }
 

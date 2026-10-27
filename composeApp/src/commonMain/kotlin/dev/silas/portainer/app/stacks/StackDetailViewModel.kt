@@ -84,7 +84,10 @@ class StackDetailViewModel(
             sessions.progress(key).collect { p ->
                 when {
                     p == null -> _state.update { it.copy(running = null) }
+                    // A result for another stack that had this name (deleted, then re-created): stale.
+                    stackId != null && p.stackId != stackId -> if (!p.running) sessions.clear(key)
                     p.running -> _state.update { it.copy(running = p.op) }
+                    stackId == null -> Unit // external: Portainer can't act on it, so nothing ran on it
                     else -> finished(p)
                 }
             }
@@ -112,7 +115,7 @@ class StackDetailViewModel(
     fun request(op: StackOp) {
         val s = _state.value
         if (s.running != null || s.starting || s.confirm != null || op !in s.ops) return
-        stackOpRefusal(s, op)?.let { reason ->
+        (stackOpRefusal(s, op) ?: sessions.refusal(serverId, endpointId))?.let { reason ->
             _state.update { it.copy(error = reason) }
             return
         }
@@ -145,7 +148,7 @@ class StackDetailViewModel(
                 val id = s.stack?.id
                 when {
                     refusal != null -> _state.update { it.copy(error = refusal) }
-                    id == null -> Unit
+                    id == null -> _state.update { it.copy(error = "The stack couldn't be loaded — try again.") }
                     !sessions.start(key, id, op) -> _state.update {
                         it.copy(error = sessions.refusal(serverId, endpointId) ?: "Another operation is running on this stack.")
                     }

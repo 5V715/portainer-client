@@ -8,6 +8,7 @@ import dev.silas.portainer.core.model.ImageRef
 import kotlinx.serialization.json.JsonObject
 import dev.silas.portainer.core.recreate.RecreatePlan
 import dev.silas.portainer.app.settle
+import dev.silas.portainer.app.support.CONNECTION_DEPENDENCY_REMINDER
 import dev.silas.portainer.core.model.Stack
 import dev.silas.portainer.core.model.StackControl
 import dev.silas.portainer.core.model.StackStatus
@@ -34,6 +35,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -92,6 +94,9 @@ class StackActionsTest {
                 } else {
                     respond("""{"message":"Stack git settings have changed"}""", fileStatus, json)
                 }
+            // An earlier stack named "shop", already deleted.
+            path == "/api/stacks/4" ->
+                if (req.method == HttpMethod.Delete) respond("", HttpStatusCode.NoContent) else respond("""{"message":"Unable to find a stack"}""", HttpStatusCode.NotFound, json)
             path.startsWith("/api/stacks/5") -> {
                 opGate?.await()
                 if (opFails) throw RuntimeException("connection reset")
@@ -153,8 +158,10 @@ class StackActionsTest {
     fun everyConfirmShowsTheConnectionReminder() {
         for (op in listOf(StackOp.Stop, StackOp.Delete)) {
             assertTrue(needsConfirm(op))
-            assertEquals(STACK_CONNECTION_REMINDER, StackConfirm(op, "shop").reminder)
+            assertEquals(CONNECTION_DEPENDENCY_REMINDER, StackConfirm(op, "shop").reminder)
         }
+        assertFalse(needsConfirm(StackOp.Start))
+        assertFailsWith<IllegalArgumentException> { StackConfirm(StackOp.Start, "shop") }
         assertFalse(StackConfirm(StackOp.Stop, "shop").needsTypedName)
         assertTrue(StackConfirm(StackOp.Stop, "shop").canConfirm)
         // Delete keeps volumes (CE has no option to remove them): the confirm says so.
@@ -172,14 +179,14 @@ class StackActionsTest {
     }
 
     @Test
-    fun protectionBlocksStopAndDeleteButNotStart() {
+    fun protectionBlocksEveryOpStartIncluded() {
         val protected = StackDetailState(stack = stack(), protected = true)
-        assertEquals(PROTECTED_IMAGE_MESSAGE, stackOpRefusal(protected, StackOp.Stop))
-        assertEquals(PROTECTED_IMAGE_MESSAGE, stackOpRefusal(protected, StackOp.Delete))
-        assertNull(stackOpRefusal(protected, StackOp.Start))
         val unknown = StackDetailState(stack = stack(), protectionUnknown = true)
-        assertEquals(PROTECTION_UNKNOWN_MESSAGE, stackOpRefusal(unknown, StackOp.Stop))
-        assertEquals(PROTECTION_UNKNOWN_MESSAGE, stackOpRefusal(unknown, StackOp.Delete))
+        for (op in listOf(StackOp.Start, StackOp.Stop, StackOp.Delete)) {
+            assertEquals(PROTECTED_IMAGE_MESSAGE, stackOpRefusal(protected, op))
+            assertEquals(PROTECTION_UNKNOWN_MESSAGE, stackOpRefusal(unknown, op))
+            assertNull(stackOpRefusal(StackDetailState(stack = stack()), op))
+        }
     }
 
     // ---- view model ----
@@ -242,7 +249,7 @@ class StackActionsTest {
         assertEquals(StackStatus.Inactive, vm.state.value.stack?.status)
         assertEquals(listOf(StackOp.Start, StackOp.Delete), vm.state.value.ops)
         val session = env().container.stackSessions.progress(StackKey("s1", 1, "shop"))
-        assertEquals(StackProgress(StackOp.Stop, running = false, error = null), session.value)
+        assertEquals(StackProgress(StackOp.Stop, running = false, error = null, stackId = 5), session.value)
         vm.clearNotice() // seen: forgotten, so it isn't shown again
         assertNull(session.value)
     }
@@ -348,4 +355,78 @@ class StackActionsTest {
         assertEquals(RECREATE_IN_PROGRESS_MESSAGE, vm.state.value.error)
         assertEquals(emptyList(), opRequests.filter { it.contains("/api/stacks") })
     }
+
+    @Test
+    fun stackWithoutContainersProtectedByItsFileRefusesEverything() = runTest {
+        containersJson = "[]"
+        status = 2
+        fileContent = "services:\n  agent:\n    image: portainer/agent:2.45.3\n"
+        val vm = loaded()
+        assertEquals(StackStatus.Inactive, vm.state.value.stack?.status)
+        assertTrue(vm.state.value.containers.isEmpty())
+        assertTrue(vm.state.value.protected)
+        assertEquals(listOf(StackOp.Start, StackOp.Delete), vm.state.value.ops)
+        for (op in listOf(StackOp.Delete, StackOp.Start)) {
+            vm.request(op)
+            assertEquals(PROTECTED_IMAGE_MESSAGE, vm.state.value.error)
+            assertNull(vm.state.value.confirm)
+            vm.clearError()
+        }
+        idle(vm)
+        assertEquals(emptyList(), opRequests)
+    }
+
+    @Test
+    fun stackWithoutContainersCanBeStartedAndDeleted() = runTest {
+        containersJson = "[]"
+        status = 2
+        val vm = loaded()
+        assertTrue(vm.state.value.containers.isEmpty())
+        assertFalse(vm.state.value.protected)
+        vm.request(StackOp.Start)
+        settle { vm.state.value.notice != null }
+        assertEquals("Stack started", vm.state.value.notice)
+        assertEquals(listOf("POST /api/stacks/5/start"), opRequests)
+        vm.clearNotice()
+        idle(vm)
+        vm.request(StackOp.Delete)
+        vm.setTypedName("shop")
+        vm.confirm()
+        settle { vm.state.value.deleted }
+        assertEquals(listOf("POST /api/stacks/5/start", "DELETE /api/stacks/5"), opRequests)
+        assertNull(vm.state.value.failure)
+    }
+
+    @Test
+    fun resultOfAnEarlierStackWithTheSameNameIsClearedNotShown() = runTest {
+        val sessions = env().container.stackSessions
+        val key = StackKey("s1", 1, "shop")
+        // Stack 4 "shop" was deleted with no screen open: its result is still held.
+        sessions.start(key, 4, StackOp.Delete)
+        settle { sessions.progress(key).value?.running == false }
+        assertNull(sessions.progress(key).value?.error, sessions.progress(key).value.toString())
+
+        val vm = loaded() // the new "shop", id 5
+        settle { sessions.progress(key).value == null }
+        assertFalse(vm.state.value.deleted)
+        assertNull(vm.state.value.failure)
+        assertNull(vm.state.value.notice)
+    }
+
+    @Test
+    fun requestIsRefusedBeforeTheConfirmWhileAnotherSessionRuns() = runTest {
+        val vm = loaded()
+        val container = env().container
+        assertTrue(container.recreateSessions.start(SessionKey("s1", 1, "c1"), container.dedicatedClient("s1"), "c1", recreatePlan()))
+        vm.request(StackOp.Stop)
+        assertNull(vm.state.value.confirm)
+        assertEquals(RECREATE_IN_PROGRESS_MESSAGE, vm.state.value.error)
+    }
+
+    private fun recreatePlan() = RecreatePlan(
+        containerName = "web", wasRunning = false, createBody = JsonObject(emptyMap()),
+        extraNetworks = emptyMap(), image = ImageRef.parse("nginx"), pull = true,
+        registryId = null, changes = ChangeSummary(null, emptyList(), emptyList(), emptyList(), emptyList()),
+        warnings = emptyList(),
+    )
 }

@@ -14,6 +14,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.TimeSource
 
 /** Why recreates, cleanups and editor deploys can't start on an endpoint now. */
 const val STACK_OPERATION_IN_PROGRESS_MESSAGE = "A stack operation is in progress — try again when it finishes."
@@ -31,8 +33,11 @@ sealed interface StackOp {
     data object Delete : StackOp
 }
 
-/** [running] until the operation and its check end; then [error] is null only when Portainer confirmed the result. */
-data class StackProgress(val op: StackOp, val running: Boolean, val error: String?)
+/**
+ * [running] until the operation and its check end; then [error] is null only when Portainer confirmed the result.
+ * [stackId] is the stack it ran on, so a later stack with the same name never shows it.
+ */
+data class StackProgress(val op: StackOp, val running: Boolean, val error: String?, val stackId: Int)
 
 /**
  * Stack operations in flight and their results, one per [StackKey], collected in [scope] (an application-level
@@ -62,18 +67,18 @@ class StackSessions(
     fun start(key: StackKey, stackId: Int, op: StackOp): Boolean {
         val state = flowFor(key)
         if (state.value?.running == true || refusal(key.serverId, key.endpointId) != null) return false
-        state.value = StackProgress(op, running = true, error = null)
+        state.value = StackProgress(op, running = true, error = null, stackId = stackId)
         scope.launch {
             var client: PortainerClient? = null
             try {
                 val c = clientFactory(key.serverId).also { client = it }
                 run(c, stackId, key.endpointId, op)
-                state.value = StackProgress(op, running = false, error = null)
+                state.value = StackProgress(op, running = false, error = null, stackId = stackId)
             } catch (e: CancellationException) {
-                state.value = StackProgress(op, running = false, error = "The stack operation was interrupted")
+                state.value = StackProgress(op, running = false, error = "The stack operation was interrupted", stackId = stackId)
                 throw e
             } catch (e: Exception) {
-                state.value = StackProgress(op, running = false, error = safeMessage(e, "Unexpected error"))
+                state.value = StackProgress(op, running = false, error = safeMessage(e, "Unexpected error"), stackId = stackId)
             } finally {
                 client?.close()
             }
@@ -119,7 +124,7 @@ class StackSessions(
      * with Portainer's deployment message; a check that can't be made fails too: nothing is assumed done.
      */
     private suspend fun awaitStatus(client: PortainerClient, id: Int, expected: StackStatus?, mismatch: String) {
-        var waitedMs = 0L // time spent between reads (request time not counted: the limit is approximate)
+        val started = TimeSource.Monotonic.markNow()
         while (true) {
             val stack = try {
                 client.stack(id)
@@ -133,9 +138,8 @@ class StackSessions(
             }
             when (stack.status) {
                 StackStatus.Deploying -> {
-                    if (waitedMs >= pollTimeoutMs) throw IllegalStateException(STACK_STILL_WORKING_MESSAGE)
+                    if (started.elapsedNow() >= pollTimeoutMs.milliseconds) throw IllegalStateException(STACK_STILL_WORKING_MESSAGE)
                     delay(pollIntervalMs)
-                    waitedMs += pollIntervalMs
                 }
                 StackStatus.Error -> throw IllegalStateException(stack.statusMessage ?: "Portainer reports that the deployment failed.")
                 expected -> return

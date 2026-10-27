@@ -65,6 +65,8 @@ class StackSessionsTest {
     private var opGate: CompletableDeferred<Unit>? = null
     private var opFailsWithNetworkError = false
     private var pollFailsWithNetworkError = false
+    /** A slow `GET /api/stacks/5` (real time). */
+    @Volatile private var pollDelayMs = 0L
     /** Holds a cleanup's DELETE, a recreate's pull, or a deploy's create. */
     private val otherGate = CompletableDeferred<Unit>()
 
@@ -89,6 +91,7 @@ class StackSessionsTest {
         when {
             path == "/api/stacks/5" && req.method == HttpMethod.Get -> {
                 if (pollFailsWithNetworkError) throw RuntimeException("connection reset secret-api-key")
+                if (pollDelayMs > 0) Thread.sleep(pollDelayMs)
                 val code = if (statuses.size > 1) statuses.removeAt(0) else statuses.first()
                 if (code == null) {
                     respond("""{"message":"Unable to find a stack with the specified identifier inside the database"}""", HttpStatusCode.NotFound, json)
@@ -128,10 +131,15 @@ class StackSessionsTest {
 
     @Test
     fun startPostsWithTheEndpointThenConfirmsTheStackIsActive() = runTest {
+        // Held so the running state is observed before the op can finish, however loaded the machine is.
+        opGate = CompletableDeferred()
         val sessions = sessions()
         assertTrue(sessions.start(key, 5, StackOp.Start))
-        assertEquals(StackProgress(StackOp.Start, running = true, error = null), sessions.progress(key).value)
-        assertEquals(StackProgress(StackOp.Start, running = false, error = null), finished(sessions))
+        assertEquals(StackProgress(StackOp.Start, running = true, error = null, stackId = 5), sessions.progress(key).value)
+        settle { requests.isNotEmpty() }
+        assertEquals(true, sessions.progress(key).value?.running)
+        opGate!!.complete(Unit)
+        assertEquals(StackProgress(StackOp.Start, running = false, error = null, stackId = 5), finished(sessions))
         assertEquals(listOf("POST /api/stacks/5/start?endpointId=1", "GET /api/stacks/5"), requests)
     }
 
@@ -244,6 +252,36 @@ class StackSessionsTest {
         finished(sessions)
         val client = clients.value.single()
         assertFails { client.stack(5) }
+    }
+
+    @Test
+    fun dedicatedClientIsClosedWhenTheOpFails() = runTest {
+        opFailsWithNetworkError = true
+        val sessions = sessions()
+        sessions.start(key, 5, StackOp.Delete)
+        assertNotNull(finished(sessions).error)
+        val client = clients.value.single()
+        opFailsWithNetworkError = false
+        // A closed client fails before reaching the engine: no new request is recorded.
+        val before = requests.size
+        assertFails { client.stack(5) }
+        assertEquals(before, requests.size)
+    }
+
+    @Test
+    fun slowReadsCountTowardsTheTimeout() = runTest {
+        statuses = mutableListOf(3)
+        pollDelayMs = 30
+        val sessions = StackSessions(
+            scope,
+            { PortainerClient("https://a.example.com", "k", MockEngine(handler)) },
+            pollIntervalMs = 1,
+            pollTimeoutMs = 60,
+        )
+        sessions.start(key, 5, StackOp.Start)
+        assertEquals(STACK_STILL_WORKING_MESSAGE, finished(sessions).error)
+        // ~60 ms of 30 ms reads: a handful, not the ~60 a wait-only count would allow.
+        assertTrue(requests.count { it == "GET /api/stacks/5" } < 10, requests.toString())
     }
 
     @Test

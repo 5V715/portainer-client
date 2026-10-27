@@ -1,6 +1,7 @@
 package dev.silas.portainer.app.recreate
 
 import androidx.compose.foundation.layout.Arrangement
+import dev.silas.portainer.app.support.CONNECTION_DEPENDENCY_REMINDER
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -46,7 +47,7 @@ internal fun warningText(w: RecreateWarning): String = when (w) {
     RecreateWarning.AutoRemove ->
         "This container is removed by Docker when stopped. If starting the new one fails, the old one can't be restored."
     RecreateWarning.ConnectionDependency ->
-        "If this container is needed to reach Portainer (VPN, reverse proxy), the app may lose connection and can't roll back."
+        "$CONNECTION_DEPENDENCY_REMINDER The recreate can't be rolled back then."
     RecreateWarning.ImageConfigUnavailable ->
         "The old image's settings couldn't be read, so every setting is kept as-is, including ones that came from the image."
     RecreateWarning.ImageDefaultCommand ->
