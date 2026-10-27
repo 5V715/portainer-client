@@ -176,11 +176,16 @@ private fun backtrack(trace: List<IntArray>, last: IntArray, dEnd: Int, n: Int, 
     return IntArray(rev.size) { rev[rev.size - 1 - it] }
 }
 
-private val SECRET_NAME = Regex("(?i)pass|pwd|secret|token|key|auth|cred|private|dsn|jwt|salt|cookie")
+private val SECRET_NAME = Regex("pass|pwd|secret|token|key|auth|cred|private|dsn|jwt|salt|cookie", RegexOption.IGNORE_CASE)
+private val QUERY_PARAM = Regex("[?&]([^=&#\\s]*)=")
+
+private fun mayHoldCredentials(value: String): Boolean =
+    '@' in value || QUERY_PARAM.findAll(value).any { SECRET_NAME.containsMatchIn(it.groupValues[1]) }
 
 /**
  * Human-readable env changes ordered by name: `Added X=v`, `Changed X: old -> new`, `Removed X=v`.
- * For names matching `(?i)pass|pwd|secret|token|key|auth|cred|private|dsn|jwt|salt|cookie` no value is ever included (`Added X`, `Changed X`, `Removed X`).
+ * Values are hidden entirely (also when only one side is risky) when the name matches, the value contains `@`, or it has a
+ * query parameter whose name matches. For names matching `pass|pwd|secret|token|key|auth|cred|private|dsn|jwt|salt|cookie` (case-insensitive) no value is ever included (`Added X`, `Changed X`, `Removed X`).
  * Repeated names are paired in order of appearance; extra occurrences count as added or removed.
  */
 fun envDiff(old: List<EnvVar>, new: List<EnvVar>): List<String> {
@@ -190,26 +195,23 @@ fun envDiff(old: List<EnvVar>, new: List<EnvVar>): List<String> {
     for (name in (o.keys + n.keys).sorted()) {
         val ov = o[name].orEmpty()
         val nv = n[name].orEmpty()
-        val hide = SECRET_NAME.containsMatchIn(name)
+        val hideName = SECRET_NAME.containsMatchIn(name)
         for (i in 0 until maxOf(ov.size, nv.size)) {
             val before = ov.getOrNull(i)
             val after = nv.getOrNull(i)
             when {
-                before == null && after != null -> out.add(if (hide) "Added $name" else "Added $name=${show(after.value)}")
-                after == null && before != null -> out.add(if (hide) "Removed $name" else "Removed $name=${show(before.value)}")
+                before == null && after != null -> out.add(if (hideName || mayHoldCredentials(after.value)) "Added $name" else "Added $name=${show(after.value)}")
+                after == null && before != null -> out.add(if (hideName || mayHoldCredentials(before.value)) "Removed $name" else "Removed $name=${show(before.value)}")
                 before != null && after != null && before.value != after.value ->
-                    out.add(if (hide) "Changed $name" else "Changed $name: ${show(before.value)} -> ${show(after.value)}")
+                    out.add(if (hideName || mayHoldCredentials(before.value) || mayHoldCredentials(after.value)) "Changed $name" else "Changed $name: ${show(before.value)} -> ${show(after.value)}")
             }
         }
     }
     return out
 }
 
-private val USERINFO = Regex("^([A-Za-z][A-Za-z0-9+.-]*://[^/@:\\s]*):[^/@\\s]*@")
-
-/** Single-line display form: escapes \n \r \t, masks URL passwords, quotes empty or edge-whitespace values. */
+/** Single-line display form: escapes \n \r \t, quotes empty or edge-whitespace values. */
 private fun show(value: String): String {
-    var v = value.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    v = USERINFO.replace(v) { "${it.groupValues[1]}:***@" }
+    val v = value.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
     return if (value.isEmpty() || value.first().isWhitespace() || value.last().isWhitespace()) "\"$v\"" else v
 }

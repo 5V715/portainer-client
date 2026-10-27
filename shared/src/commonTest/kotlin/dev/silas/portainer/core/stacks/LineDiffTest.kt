@@ -268,13 +268,12 @@ class LineDiffTest {
     @Test
     fun envValuesAreEscapedQuotedAndMasked() {
         val old = listOf(EnvVar("A", ""), EnvVar("B", "x"), EnvVar("C", "u"), EnvVar("D", "p"))
-        val new = listOf(EnvVar("A", "a b "), EnvVar("B", "l1\nl2\t\r"), EnvVar("C", "postgres://bob:hunter2@db:5432/x"), EnvVar("E", "http://h/p?q=1"))
+        val new = listOf(EnvVar("A", "a b "), EnvVar("B", "l1\nl2\t\r"), EnvVar("C", "postgres://db:5432/x"), EnvVar("E", "http://h/p?q=1"))
         assertEquals(
-            listOf("Changed A: \"\" -> \"a b \"", "Changed B: x -> \"l1\\nl2\\t\\r\"", "Changed C: u -> postgres://bob:***@db:5432/x", "Removed D=p", "Added E=http://h/p?q=1"),
+            listOf("Changed A: \"\" -> \"a b \"", "Changed B: x -> \"l1\\nl2\\t\\r\"", "Changed C: u -> postgres://db:5432/x", "Removed D=p", "Added E=http://h/p?q=1"),
             envDiff(old, new),
         )
         assertEquals(listOf("Added F=\"\""), envDiff(emptyList(), listOf(EnvVar("F", ""))))
-        assertEquals(listOf("Added G=https://user@host/"), envDiff(emptyList(), listOf(EnvVar("G", "https://user@host/"))))
     }
 
     @Test
@@ -286,5 +285,23 @@ class LineDiffTest {
             assertEquals(listOf("Removed $n"), envDiff(listOf(EnvVar(n, "zzz")), emptyList()))
         }
         assertEquals(listOf("Added PORT=80"), envDiff(emptyList(), listOf(EnvVar("PORT", "80"))))
+    }
+
+    @Test
+    fun envValuesThatMayHoldCredentialsAreHidden() {
+        val risky = listOf(
+            "postgres://bob:p@ss@host", "u:pa/ss@h", "bob:pw@host:5432", "jdbc:postgresql://u:pw@h/db",
+            "mongodb://u:pw@h1:27017,h2:27017/x", "https://h/x?api_key=abc", "https://h/x?a=1&token=", "https://h/x?Secret=1#f",
+        )
+        for (v in risky) {
+            assertEquals(listOf("Added URL"), envDiff(emptyList(), listOf(EnvVar("URL", v))), v)
+            assertEquals(listOf("Removed URL"), envDiff(listOf(EnvVar("URL", v)), emptyList()), v)
+            assertEquals(listOf("Changed URL"), envDiff(listOf(EnvVar("URL", "plain")), listOf(EnvVar("URL", v))), v)
+            assertEquals(listOf("Changed URL"), envDiff(listOf(EnvVar("URL", v)), listOf(EnvVar("URL", "plain"))), v)
+        }
+        assertEquals(listOf("Added PORT=8080"), envDiff(emptyList(), listOf(EnvVar("PORT", "8080"))))
+        assertEquals(listOf("Added URL=https://h/x?page=2&sort=asc"), envDiff(emptyList(), listOf(EnvVar("URL", "https://h/x?page=2&sort=asc"))))
+        assertEquals(listOf("Added db_password"), envDiff(emptyList(), listOf(EnvVar("db_password", "x"))))
+        assertEquals(listOf("Changed api_token"), envDiff(listOf(EnvVar("api_token", "a")), listOf(EnvVar("api_token", "b"))))
     }
 }
