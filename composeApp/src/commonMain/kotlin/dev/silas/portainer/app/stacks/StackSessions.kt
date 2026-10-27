@@ -6,6 +6,8 @@ import dev.silas.portainer.core.api.PortainerException
 import dev.silas.portainer.core.api.GitRedeployRequest
 import dev.silas.portainer.core.api.GitSettingsRequest
 import dev.silas.portainer.core.api.GitSourceAuth
+import dev.silas.portainer.core.api.createStackFromRepository
+import dev.silas.portainer.core.api.createStackFromText
 import dev.silas.portainer.core.api.deleteStack
 import dev.silas.portainer.core.api.detachFromGit
 import dev.silas.portainer.core.api.gitRedeploy
@@ -58,7 +60,25 @@ sealed interface StackOp {
 
     /** Turns a git stack into a web-editor stack with its current file (redeploys it); one-way. */
     data object Detach : StackOp
+
+    /**
+     * Creates the stack named by its [StackKey] (its id is known once Portainer answers) and waits for its deploy.
+     * The values stay here so a failed create can give the form back.
+     */
+    sealed interface Create : StackOp {
+        /** A web-editor stack: typed, uploaded or from a custom template. */
+        data class Text(val file: String, val env: List<EnvVar>) : Create {
+            // Env values can be secrets: never in logs or crash reports.
+            override fun toString(): String = "Create.Text(lines=${file.lines().size}, env=${env.size})"
+        }
+
+        /** A git stack from [url]; [request]'s prune and source don't apply. */
+        data class Repository(val url: String, val request: GitSettingsRequest) : Create
+    }
 }
+
+/** [StackProgress.stackId] of a create Portainer hasn't answered yet (or refused). */
+const val STACK_NOT_CREATED = 0
 
 /** [op] without the git password it may carry: what progress (and so any screen) keeps after the request is sent. */
 internal fun StackOp.withoutSecrets(): StackOp = when (this) {
@@ -71,6 +91,7 @@ internal fun StackOp.withoutSecrets(): StackOp = when (this) {
         StackOp.GitSettings(r.copy(auth = r.auth?.copy(password = null), source = source))
     }
     is StackOp.GitRedeploy -> StackOp.GitRedeploy(request.copy(auth = request.auth?.copy(password = null)))
+    is StackOp.Create.Repository -> copy(request = request.copy(auth = request.auth?.copy(password = null)))
     else -> this
 }
 
@@ -78,12 +99,14 @@ internal fun StackOp.withoutSecrets(): StackOp = when (this) {
 private fun StackOp.secrets(): List<String> = when (this) {
     is StackOp.GitSettings -> listOfNotNull(request.auth?.password, (request.source?.auth as? GitSourceAuth.Basic)?.auth?.password)
     is StackOp.GitRedeploy -> listOfNotNull(request.auth?.password)
+    is StackOp.Create.Repository -> listOfNotNull(request.auth?.password)
     else -> emptyList()
 }.filter { it.isNotEmpty() }
 
 /**
  * [running] until the operation and its check end; then [error] is null only when Portainer confirmed the result.
- * [stackId] is the stack it ran on, so a later stack with the same name never shows it.
+ * [stackId] is the stack it ran on, so a later stack with the same name never shows it; for a create it is
+ * [STACK_NOT_CREATED] until Portainer returns the new stack.
  */
 data class StackProgress(val op: StackOp, val running: Boolean, val error: String?, val stackId: Int)
 
@@ -110,26 +133,54 @@ class StackSessions(
 
     /**
      * Runs [op] on the stack [stackId] ([key]'s stack). Refused (false) while an operation for [key] is still
-     * running or [refusal] gives a reason; a finished result is replaced.
+     * running or [refusal] gives a reason; a finished result is replaced. A [StackOp.Create] goes through [create].
      */
-    fun start(key: StackKey, stackId: Int, op: StackOp): Boolean {
+    fun start(key: StackKey, stackId: Int, op: StackOp): Boolean =
+        if (op is StackOp.Create) create(key, op) else launch(key, stackId, op)
+
+    /**
+     * Creates [key]'s stack with [op]. Refused (false) while any stack operation runs on [key]'s endpoint or
+     * [refusal] gives a reason.
+     */
+    fun create(key: StackKey, op: StackOp.Create): Boolean {
+        if (isRunning(key.serverId, key.endpointId)) return false
+        return launch(key, STACK_NOT_CREATED, op)
+    }
+
+    /**
+     * The create on [serverId]'s endpoint [endpointId] a create screen should show: a running one, else a failed one
+     * nobody has cleared yet (a create that went well is shown by the new stack itself). Null when there is none.
+     */
+    fun pendingCreate(serverId: String, endpointId: Int): StackKey? {
+        val creates = sessions.filter { (key, state) ->
+            key.serverId == serverId && key.endpointId == endpointId && state.value?.op is StackOp.Create
+        }
+        return creates.entries.firstOrNull { it.value.value?.running == true }?.key
+            ?: creates.entries.firstOrNull { it.value.value?.error != null }?.key
+    }
+
+    private fun launch(key: StackKey, stackId: Int, op: StackOp): Boolean {
         val state = flowFor(key)
         if (state.value?.running == true || refusal(key.serverId, key.endpointId) != null) return false
         // Progress outlives the request: it never holds a git password.
         val shown = op.withoutSecrets()
-        state.value = StackProgress(shown, running = true, error = null, stackId = stackId)
+        var id = stackId
+        state.value = StackProgress(shown, running = true, error = null, stackId = id)
         scope.launch {
             var client: PortainerClient? = null
             try {
                 val c = clientFactory(key.serverId).also { client = it }
-                run(c, stackId, key.endpointId, op)
-                state.value = StackProgress(shown, running = false, error = null, stackId = stackId)
+                run(c, key, id, op) { created ->
+                    id = created
+                    state.value = StackProgress(shown, running = true, error = null, stackId = created)
+                }
+                state.value = StackProgress(shown, running = false, error = null, stackId = id)
             } catch (e: CancellationException) {
-                state.value = StackProgress(shown, running = false, error = "The stack operation was interrupted", stackId = stackId)
+                state.value = StackProgress(shown, running = false, error = "The stack operation was interrupted", stackId = id)
                 throw e
             } catch (e: Exception) {
                 val message = op.secrets().fold(safeMessage(e, "Unexpected error")) { m, secret -> m.replace(secret, "***") }
-                state.value = StackProgress(shown, running = false, error = message, stackId = stackId)
+                state.value = StackProgress(shown, running = false, error = message, stackId = id)
             } finally {
                 client?.close()
             }
@@ -153,7 +204,8 @@ class StackSessions(
 
     private fun flowFor(key: StackKey) = sessions.getOrPut(key) { MutableStateFlow(null) }
 
-    private suspend fun run(client: PortainerClient, id: Int, endpointId: Int, op: StackOp) {
+    private suspend fun run(client: PortainerClient, key: StackKey, id: Int, op: StackOp, onCreated: (Int) -> Unit) {
+        val endpointId = key.endpointId
         when (op) {
             StackOp.Start -> {
                 client.startStack(id, endpointId)
@@ -183,6 +235,17 @@ class StackSessions(
                 client.detachFromGit(id, endpointId)
                 val stack = awaitStatus(client, id, StackStatus.Active, "Portainer reports the stack as stopped after detaching it.")
                 if (stack?.git != null) throw IllegalStateException("Portainer still reports the stack as deployed from git.")
+            }
+            is StackOp.Create -> {
+                val created = when (op) {
+                    is StackOp.Create.Text -> client.createStackFromText(endpointId, key.stackName, op.file, op.env)
+                    is StackOp.Create.Repository -> client.createStackFromRepository(endpointId, key.stackName, op.url, op.request)
+                }
+                val newId = created.id?.takeIf { it != STACK_NOT_CREATED }
+                    ?: throw IllegalStateException("Portainer didn't return the new stack.")
+                onCreated(newId)
+                // From CE 2.44 the deploy continues after the response.
+                awaitStatus(client, newId, StackStatus.Active, "Portainer reports the stack as stopped after creating it.")
             }
         }
     }

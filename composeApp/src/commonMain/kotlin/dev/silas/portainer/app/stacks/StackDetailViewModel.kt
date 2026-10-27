@@ -104,6 +104,13 @@ class StackDetailViewModel(
         when {
             // The editor (update) and the git tab (settings, redeploy, detach) show these results and keep the edits;
             // here the stack is only read again.
+            // A create that went well (the create screen may have been left before it finished): the stack itself shows
+            // the result. A failed one (the stack exists, its deploy failed) shows below like any other failure.
+            p.op is StackOp.Create && error == null -> {
+                _state.update { it.copy(running = null) }
+                sessions.clear(key)
+                refresh()
+            }
             p.op.shownElsewhere -> {
                 _state.update { it.copy(running = null) }
                 refresh()

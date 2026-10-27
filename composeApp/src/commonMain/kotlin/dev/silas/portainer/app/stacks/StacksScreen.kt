@@ -9,7 +9,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -40,6 +44,7 @@ import dev.silas.portainer.core.model.StackControl
 fun StacksScreen(
     viewModel: StacksViewModel,
     onOpen: (Stack) -> Unit,
+    onCreate: () -> Unit,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
@@ -64,6 +69,9 @@ fun StacksScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
+        floatingActionButton = {
+            FloatingActionButton(onClick = onCreate) { Icon(Icons.Filled.Add, contentDescription = "New stack") }
+        },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             OutlinedTextField(

@@ -57,3 +57,7 @@ data class Stacks(val serverId: String, val endpointId: Int)
 /** A stack; [stackId] `null` = external (limited) stack, identified by [name]. */
 @Serializable
 data class StackDetail(val serverId: String, val endpointId: Int, val stackId: Int?, val name: String)
+
+/** New stack on an endpoint. */
+@Serializable
+data class CreateStack(val serverId: String, val endpointId: Int)

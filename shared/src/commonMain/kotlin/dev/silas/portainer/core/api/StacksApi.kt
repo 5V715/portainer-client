@@ -22,6 +22,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -423,3 +424,108 @@ suspend fun PortainerClient.stacksUsingGitSource(sourceId: Int, exceptStackId: I
     val others = decodeBody(response) { response.body<List<StackDto>>() }.filter { it.gitConfig != null && it.id != exceptStackId }
     return others.count { stack(it.id).git?.sourceId == sourceId }
 }
+
+private const val DEFAULT_COMPOSE_FILE = "docker-compose.yml"
+
+/**
+ * Creates a web-editor stack named [name] from [file] and [env] (`POST /api/stacks/create/standalone/string`). Uploaded
+ * files and custom templates are created this way too. From CE 2.44 the deploy continues after the response: the
+ * returned stack may still be deploying.
+ */
+suspend fun PortainerClient.createStackFromText(endpointId: Int, name: String, file: String, env: List<EnvVar>): Stack {
+    val body = buildJsonObject {
+        put("Name", name)
+        put("StackFileContent", file)
+        put("Env", envJson(env))
+        put("FromAppTemplate", false)
+    }
+    return createStack("/api/stacks/create/standalone/string", endpointId, body)
+}
+
+/**
+ * Creates a git stack named [name] from the repository [url] (`POST /api/stacks/create/standalone/repository`) with
+ * [git]'s reference, compose paths, credentials, TLS, automatic updates and env ([GitSettingsRequest.prune] and
+ * [GitSettingsRequest.source] don't apply). With authentication on, a password is required. A [GitSettingsRequest.sourceId]
+ * (CE 2.43+) points the stack at an existing GitOps Source instead of the inline URL and credentials. From 2.44 polling
+ * is set on the Source, so a polling interval is refused there rather than sent to be ignored.
+ */
+suspend fun PortainerClient.createStackFromRepository(endpointId: Int, name: String, url: String, git: GitSettingsRequest): Stack {
+    val features = stackFeatures(status().version)
+    if (git.auth != null && git.auth.password.isNullOrEmpty()) throw IllegalStateException("Enter the password or token")
+    if (git.sourceId != null && !features.savedGitCredentials) throw IllegalStateException("This Portainer version has no shared git sources")
+    if (git.autoUpdate?.interval != null && features.pollingOnSource) {
+        throw IllegalStateException("This Portainer version sets the polling interval on the git source, not when creating the stack")
+    }
+    val body = buildJsonObject {
+        put("Name", name)
+        put("RepositoryURL", url)
+        put("RepositoryReferenceName", git.referenceName)
+        putInlineAuth(git.auth)
+        put("ComposeFile", git.configFilePath.trim().ifEmpty { DEFAULT_COMPOSE_FILE })
+        put("AdditionalFiles", JsonArray(git.additionalFiles.map(::JsonPrimitive)))
+        put("AutoUpdate", autoUpdateJson(git.autoUpdate))
+        put("Env", envJson(git.env))
+        put("FromAppTemplate", false)
+        put("TLSSkipVerify", git.tlsSkipVerify)
+        git.sourceId?.let { put("SourceID", it) }
+    }
+    return createStack("/api/stacks/create/standalone/repository", endpointId, body)
+}
+
+/** Up to 2.43 the deploy runs inside the request, so it gets the long stack-operation timeout. */
+private suspend fun PortainerClient.createStack(path: String, endpointId: Int, body: JsonObject): Stack {
+    val response = execute(path) {
+        method = HttpMethod.Post
+        parameter("endpointId", endpointId)
+        timeout {
+            requestTimeoutMillis = STACK_OPERATION_TIMEOUT_MS
+            socketTimeoutMillis = STACK_OPERATION_TIMEOUT_MS
+        }
+        contentType(ContentType.Application.Json)
+        setBody(body)
+    }
+    return decodeBody(response) { response.body<StackDto>() }.toModel()
+}
+
+/** A custom template's variable: `{{ name }}` in its file. */
+data class TemplateVariable(val name: String, val label: String, val defaultValue: String)
+
+/** A Docker standalone compose custom template. */
+data class CustomTemplate(val id: Int, val title: String, val description: String, val variables: List<TemplateVariable>)
+
+@Serializable
+private data class TemplateVariableDto(
+    @SerialName("name") val name: String = "",
+    @SerialName("label") val label: String = "",
+    @SerialName("defaultValue") val defaultValue: String = "",
+)
+
+@Serializable
+private data class CustomTemplateDto(
+    @SerialName("Id") val id: Int = 0,
+    @SerialName("Title") val title: String = "",
+    @SerialName("Description") val description: String = "",
+    @SerialName("Type") val type: Int = 0,
+    @SerialName("EdgeTemplate") val edgeTemplate: Boolean = false,
+    @SerialName("Variables") val variables: List<TemplateVariableDto>? = null,
+)
+
+@Serializable
+private data class CustomTemplateFileDto(@SerialName("FileContent") val content: String = "")
+
+/** Custom templates for Docker standalone compose stacks (type 2, not Edge), as CE's create-stack view lists them. */
+suspend fun PortainerClient.customTemplates(): List<CustomTemplate> {
+    val response = execute("/api/custom_templates") {
+        parameter("type", COMPOSE_STACK_TYPE)
+        parameter("edge", false)
+    }
+    if (response.status == HttpStatusCode.NoContent) return emptyList()
+    return decodeBody(response) { response.body<List<CustomTemplateDto>>() }
+        .filter { it.type == COMPOSE_STACK_TYPE && !it.edgeTemplate }
+        .map { t ->
+            CustomTemplate(t.id, t.title, t.description, t.variables.orEmpty().map { TemplateVariable(it.name, it.label, it.defaultValue) })
+        }
+}
+
+/** The template's compose file, variables not yet filled in. */
+suspend fun PortainerClient.customTemplateFile(id: Int): String = getJson<CustomTemplateFileDto>("/api/custom_templates/$id/file").content

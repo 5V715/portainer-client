@@ -33,7 +33,7 @@ const val SAVE_SETTINGS_FIRST_MESSAGE =
     "Save or undo the other git settings first: Pull and redeploy only applies the reference and the environment variables."
 
 @OptIn(ExperimentalUuidApi::class)
-private fun randomWebhookId(): String = Uuid.random().toString()
+internal fun randomWebhookId(): String = Uuid.random().toString()
 
 /** Save confirmation: what is saved, the shared-source warning, and the connection reminder. */
 data class GitSaveConfirm(val changes: List<String>, val sharedWarning: String?) {

@@ -179,7 +179,7 @@ private fun GitSettingsFields(state: GitSettingsState, form: GitSettingsForm, en
 
 @Suppress("DEPRECATION") // LocalClipboardManager: plain-text copy without per-platform ClipEntry code
 @Composable
-private fun WebhookUrl(url: String, saved: Boolean) {
+internal fun WebhookUrl(url: String, saved: Boolean) {
     val clipboard = LocalClipboardManager.current
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Hint("Webhook URL")
@@ -190,14 +190,14 @@ private fun WebhookUrl(url: String, saved: Boolean) {
 }
 
 @Composable
-private fun Title(text: String) = Text(text, style = MaterialTheme.typography.titleMedium)
+internal fun Title(text: String) = Text(text, style = MaterialTheme.typography.titleMedium)
 
 @Composable
-private fun Hint(text: String) =
+internal fun Hint(text: String) =
     Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
 @Composable
-private fun TextInput(
+internal fun TextInput(
     label: String,
     value: String,
     enabled: Boolean,
@@ -219,7 +219,7 @@ private fun TextInput(
 }
 
 @Composable
-private fun SwitchLine(label: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+internal fun SwitchLine(label: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)

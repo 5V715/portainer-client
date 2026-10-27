@@ -39,6 +39,9 @@ import dev.silas.portainer.app.networks.NetworkDetailScreen
 import dev.silas.portainer.app.networks.NetworkDetailViewModel
 import dev.silas.portainer.app.networks.NetworksScreen
 import dev.silas.portainer.app.networks.NetworksViewModel
+import dev.silas.portainer.app.stacks.CreateStackScreen
+import dev.silas.portainer.app.stacks.CreateStackViewModel
+import dev.silas.portainer.app.stacks.CreatedStack
 import dev.silas.portainer.app.stacks.GitSettingsViewModel
 import dev.silas.portainer.app.stacks.StackDetailScreen
 import dev.silas.portainer.app.stacks.StackDetailViewModel
@@ -254,9 +257,21 @@ private fun AppNavHost(container: AppContainer) {
                 StacksScreen(
                     viewModel = vm,
                     onOpen = { nav.navigate(StackDetail(route.serverId, route.endpointId, it.id, it.name)) },
+                    onCreate = { nav.navigate(CreateStack(route.serverId, route.endpointId)) },
                     onBack = toEnvironments,
                 )
             }
+        }
+        composable<CreateStack> { entry ->
+            val route = entry.toRoute<CreateStack>()
+            val vm = viewModel(key = "create-stack-${route.serverId}-${route.endpointId}") {
+                CreateStackViewModel(container, route.serverId, route.endpointId)
+            }
+            val open = { created: CreatedStack ->
+                // The create screen is done: Back from the new stack leads to the list.
+                nav.navigate(StackDetail(route.serverId, route.endpointId, created.id, created.name)) { popUpTo(route) { inclusive = true } }
+            }
+            CreateStackScreen(viewModel = vm, onCreated = open, onOpenStack = open, onBack = { nav.popBackStack() })
         }
         composable<StackDetail> { entry ->
             val route = entry.toRoute<StackDetail>()
