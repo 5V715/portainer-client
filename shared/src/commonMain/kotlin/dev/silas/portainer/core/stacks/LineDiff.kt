@@ -14,9 +14,10 @@ sealed interface DiffLine {
 
 /**
  * A run of changed lines with context. [collapsedBefore] is the number of unchanged lines hidden between the
- * previous hunk (or the start of the file) and this hunk. Unchanged lines after the last hunk are not reported.
+ * previous hunk (or the start of the file) and this hunk. [collapsedAfter] is non-zero only on the last hunk: the
+ * unchanged lines hidden after it up to the end of the file.
  */
-data class DiffHunk(val lines: List<DiffLine>, val collapsedBefore: Int)
+data class DiffHunk(val lines: List<DiffLine>, val collapsedBefore: Int, val collapsedAfter: Int = 0)
 
 /** Largest edit distance Myers is allowed to explore (memory is about D^2 ints, time about (N+M)*D). */
 private const val MAX_EDIT_DISTANCE = 1500
@@ -37,7 +38,11 @@ private fun parse(s: String): Doc {
 /**
  * Unified-style line diff of [old] to [new] with [context] unchanged lines around each change.
  *
- * CRLF and LF compare equal. A difference only in the final newline is reported as the last line removed and added,
+ * CRLF and LF compare equal, so a file converted only from CRLF to LF yields no diff. A lone `\r` is not treated as a
+ * line break. UIs must key rows by list index, not line number: a [NO_EOL_MARKER] line shares the number of the line
+ * it annotates.
+ *
+ * A difference only in the final newline is reported as the last line removed and added,
  * with a [NO_EOL_MARKER] line after the side that lacks the newline.
  *
  * Cost: common prefix and suffix are trimmed first, then Myers O(ND) runs on the rest, so large files with few
@@ -92,8 +97,10 @@ fun lineDiff(old: String, new: String, context: Int = 3): List<DiffHunk> {
         }
     }
     for (k in 0 until suffix) same(aEnd + k, bEnd + k)
-    return group(out, context.coerceAtLeast(0))
+    return group(out, context.coerceIn(0, out.size))
 }
+
+private fun lastKept(keep: BooleanArray): Int = keep.indexOfLast { it }
 
 private fun group(all: List<DiffLine>, context: Int): List<DiffHunk> {
     val keep = BooleanArray(all.size)
@@ -111,6 +118,10 @@ private fun group(all: List<DiffLine>, context: Int): List<DiffHunk> {
         while (idx < all.size && keep[idx]) idx++
         hunks.add(DiffHunk(all.subList(start, idx).toList(), hidden))
         hidden = 0
+    }
+    if (hunks.isNotEmpty()) {
+        val trailing = all.size - (lastKept(keep) + 1)
+        hunks[hunks.lastIndex] = hunks.last().copy(collapsedAfter = trailing)
     }
     return hunks
 }
@@ -165,11 +176,11 @@ private fun backtrack(trace: List<IntArray>, last: IntArray, dEnd: Int, n: Int, 
     return IntArray(rev.size) { rev[rev.size - 1 - it] }
 }
 
-private val SECRET_NAME = Regex("(?i)pass|secret|token|key")
+private val SECRET_NAME = Regex("(?i)pass|pwd|secret|token|key|auth|cred|private|dsn|jwt|salt|cookie")
 
 /**
  * Human-readable env changes ordered by name: `Added X=v`, `Changed X: old -> new`, `Removed X=v`.
- * For names matching `(?i)pass|secret|token|key` no value is ever included (`Added X`, `Changed X`, `Removed X`).
+ * For names matching `(?i)pass|pwd|secret|token|key|auth|cred|private|dsn|jwt|salt|cookie` no value is ever included (`Added X`, `Changed X`, `Removed X`).
  * Repeated names are paired in order of appearance; extra occurrences count as added or removed.
  */
 fun envDiff(old: List<EnvVar>, new: List<EnvVar>): List<String> {
@@ -184,12 +195,21 @@ fun envDiff(old: List<EnvVar>, new: List<EnvVar>): List<String> {
             val before = ov.getOrNull(i)
             val after = nv.getOrNull(i)
             when {
-                before == null && after != null -> out.add(if (hide) "Added $name" else "Added $name=${after.value}")
-                after == null && before != null -> out.add(if (hide) "Removed $name" else "Removed $name=${before.value}")
+                before == null && after != null -> out.add(if (hide) "Added $name" else "Added $name=${show(after.value)}")
+                after == null && before != null -> out.add(if (hide) "Removed $name" else "Removed $name=${show(before.value)}")
                 before != null && after != null && before.value != after.value ->
-                    out.add(if (hide) "Changed $name" else "Changed $name: ${before.value} -> ${after.value}")
+                    out.add(if (hide) "Changed $name" else "Changed $name: ${show(before.value)} -> ${show(after.value)}")
             }
         }
     }
     return out
+}
+
+private val USERINFO = Regex("^([A-Za-z][A-Za-z0-9+.-]*://[^/@:\\s]*):[^/@\\s]*@")
+
+/** Single-line display form: escapes \n \r \t, masks URL passwords, quotes empty or edge-whitespace values. */
+private fun show(value: String): String {
+    var v = value.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    v = USERINFO.replace(v) { "${it.groupValues[1]}:***@" }
+    return if (value.isEmpty() || value.first().isWhitespace() || value.last().isWhitespace()) "\"$v\"" else v
 }

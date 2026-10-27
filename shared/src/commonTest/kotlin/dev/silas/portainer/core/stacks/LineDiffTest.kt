@@ -186,4 +186,105 @@ class LineDiffTest {
         assertEquals(listOf("Removed A=2"), envDiff(listOf(EnvVar("A", "1"), EnvVar("A", "2")), listOf(EnvVar("A", "1"))))
         assertEquals(listOf("Changed A: 2 -> 3"), envDiff(listOf(EnvVar("A", "1"), EnvVar("A", "2")), listOf(EnvVar("A", "1"), EnvVar("A", "3"))))
     }
+
+    private fun lcs(a: List<String>, b: List<String>): Int {
+        val dp = Array(a.size + 1) { IntArray(b.size + 1) }
+        for (i in 1..a.size) for (j in 1..b.size)
+            dp[i][j] = if (a[i - 1] == b[j - 1]) dp[i - 1][j - 1] + 1 else maxOf(dp[i - 1][j], dp[i][j - 1])
+        return dp[a.size][b.size]
+    }
+
+    @Test
+    fun sameCountEqualsLcsOnRandomInputs() {
+        val rnd = kotlin.random.Random(11)
+        repeat(80) {
+            val o = List(rnd.nextInt(0, 30)) { "l${rnd.nextInt(0, 6)}" }
+            val n = List(rnd.nextInt(0, 30)) { "l${rnd.nextInt(0, 6)}" }
+            val d = flat(lineDiff(o.joinToString("") { "$it\n" }, n.joinToString("") { "$it\n" }, Int.MAX_VALUE))
+            assertEquals(lcs(o, n), d.count { it is DiffLine.Same })
+            assertEquals(o.size, d.count { it !is DiffLine.Added })
+            assertEquals(n.size, d.count { it !is DiffLine.Removed })
+        }
+    }
+
+    @Test
+    fun movedBlockAndSingleLine() {
+        val blocks = lines(20)
+        val moved = (11..20).joinToString("") { "line $it\n" } + (1..10).joinToString("") { "line $it\n" }
+        val d = flat(lineDiff(blocks, moved, Int.MAX_VALUE))
+        assertEquals(10, d.count { it is DiffLine.Same })
+        replay(blocks, moved)
+        assertEquals(listOf(DiffLine.Removed("a", 1), DiffLine.Added("b", 1)), flat(lineDiff("a\n", "b\n")))
+        assertEquals(listOf(DiffLine.Removed("a", 1), DiffLine.Removed(NO_EOL_MARKER, 1), DiffLine.Added("b", 1), DiffLine.Added(NO_EOL_MARKER, 1)), flat(lineDiff("a", "b")))
+    }
+
+    @Test
+    fun partiallySimilarPastTheCapIsStillFaithful() {
+        fun build(tag: String) = (1..1000).joinToString("") { "$tag-a $it\n" } + (1..500).joinToString("") { "shared $it\n" } + (1..1000).joinToString("") { "$tag-b $it\n" }
+        val old = build("old")
+        val new = build("new")
+        val best = (1..3).minOf { measureTime { lineDiff(old, new) } }
+        assertTrue(best.inWholeMilliseconds < 1000, "best of 3 took $best")
+        val d = flat(lineDiff(old, new, Int.MAX_VALUE))
+        assertEquals(2500, d.count { it !is DiffLine.Added })
+        assertEquals(2500, d.count { it !is DiffLine.Removed })
+        replay(old, new)
+    }
+
+    @Test
+    fun fallbackPerfBestOfThree() {
+        val old = lines(3000) { "old $it" }
+        val new = lines(3000) { "new $it" }
+        val best = (1..3).minOf { measureTime { lineDiff(old, new) } }
+        assertTrue(best.inWholeMilliseconds < 1000, "best of 3 took $best")
+    }
+
+    @Test
+    fun lastHunkReportsCollapsedAfter() {
+        val old = lines(20)
+        val h = lineDiff(old, old.replace("line 5\n", "x\n"))
+        assertEquals(0, h.dropLast(1).sumOf { it.collapsedAfter })
+        assertEquals(20 - 8, h.single().collapsedAfter) // lines 9..20
+        val two = lineDiff(old, old.replace("line 2\n", "x\n").replace("line 18\n", "y\n"))
+        assertEquals(2, two.size)
+        assertEquals(0, two[0].collapsedAfter)
+        assertEquals(0, two[1].collapsedAfter) // line 18 + 3 reaches the end
+        val mid = lineDiff(old, old.replace("line 12\n", "y\n"))
+        assertEquals(5, mid.single().collapsedAfter) // lines 16..20
+        assertEquals(0, lineDiff("a\nb\n", "a\nc\n").single().collapsedAfter)
+    }
+
+    @Test
+    fun hugeContextIsClamped() {
+        val old = lines(10)
+        val h = lineDiff(old, old.replace("line 5\n", "x\n"), Int.MAX_VALUE)
+        assertEquals(1, h.size)
+        assertEquals(0, h[0].collapsedBefore)
+        assertEquals(11, h[0].lines.size)
+        assertTrue(lineDiff(old, old, Int.MAX_VALUE).isEmpty())
+        assertEquals(2, lineDiff(old, old.replace("line 5\n", "x\n"), -5).single().lines.size)
+    }
+
+    @Test
+    fun envValuesAreEscapedQuotedAndMasked() {
+        val old = listOf(EnvVar("A", ""), EnvVar("B", "x"), EnvVar("C", "u"), EnvVar("D", "p"))
+        val new = listOf(EnvVar("A", "a b "), EnvVar("B", "l1\nl2\t\r"), EnvVar("C", "postgres://bob:hunter2@db:5432/x"), EnvVar("E", "http://h/p?q=1"))
+        assertEquals(
+            listOf("Changed A: \"\" -> \"a b \"", "Changed B: x -> \"l1\\nl2\\t\\r\"", "Changed C: u -> postgres://bob:***@db:5432/x", "Removed D=p", "Added E=http://h/p?q=1"),
+            envDiff(old, new),
+        )
+        assertEquals(listOf("Added F=\"\""), envDiff(emptyList(), listOf(EnvVar("F", ""))))
+        assertEquals(listOf("Added G=https://user@host/"), envDiff(emptyList(), listOf(EnvVar("G", "https://user@host/"))))
+    }
+
+    @Test
+    fun envBroaderSecretNamesHideValues() {
+        for (n in listOf("DB_PWD", "AUTH_HEADER", "SENTRY_DSN", "JWT_X", "PW_SALT", "SESSION_COOKIE", "PRIVATE_URL", "AWS_CREDENTIALS")) {
+            val out = envDiff(listOf(EnvVar(n, "old-v")), listOf(EnvVar(n, "new-v")))
+            assertEquals(listOf("Changed $n"), out)
+            assertEquals(listOf("Added $n"), envDiff(emptyList(), listOf(EnvVar(n, "zzz"))))
+            assertEquals(listOf("Removed $n"), envDiff(listOf(EnvVar(n, "zzz")), emptyList()))
+        }
+        assertEquals(listOf("Added PORT=80"), envDiff(emptyList(), listOf(EnvVar("PORT", "80"))))
+    }
 }
