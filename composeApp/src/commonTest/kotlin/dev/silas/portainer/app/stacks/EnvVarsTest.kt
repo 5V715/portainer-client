@@ -101,4 +101,11 @@ class EnvVarsTest {
         assertEquals(1, envErrors(listOf(EnvVar("A=B", "1"))).size)
         assertEquals(1, envErrors(listOf(EnvVar("#A", "1"))).size)
     }
+
+    @Test
+    fun leadingExportIsDropped() {
+        val (env, errors) = parseDotEnv("export A=1\n  export\tB=\"x y\"\nexport=3\nexported=4\nexport C\n")
+        assertEquals(listOf(EnvVar("A", "1"), EnvVar("B", "x y"), EnvVar("export", "3"), EnvVar("exported", "4")), env)
+        assertEquals(listOf("Line 5: expected NAME=value"), errors)
+    }
 }

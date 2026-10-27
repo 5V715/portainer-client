@@ -21,6 +21,7 @@ import dev.silas.portainer.core.stacks.stackProtection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -116,8 +117,11 @@ class StackDetailViewModel(
         }
     }
 
-    /** Start runs at once; stop and delete ask first. A refused operation only says why. */
-    fun request(op: StackOp) {
+    /**
+     * Start runs at once; stop and delete ask first. A refused operation only says why. [unsavedEdits]: the editor
+     * holds edits that a delete would throw away, so its confirmation says so.
+     */
+    fun request(op: StackOp, unsavedEdits: Boolean = false) {
         val s = _state.value
         if (s.running != null || s.starting || s.confirm != null || op !in s.ops) return
         (stackOpRefusal(s, op) ?: sessions.refusal(serverId, endpointId))?.let { reason ->
@@ -125,7 +129,7 @@ class StackDetailViewModel(
             return
         }
         val stack = s.stack ?: return
-        if (needsConfirm(op)) _state.update { it.copy(confirm = StackConfirm(op, stack.name)) } else launchOp(op)
+        if (needsConfirm(op)) _state.update { it.copy(confirm = StackConfirm(op, stack.name, unsavedEdits = unsavedEdits)) } else launchOp(op)
     }
 
     fun setTypedName(text: String) = _state.update { s -> s.copy(confirm = s.confirm?.copy(typedName = text)) }
@@ -144,7 +148,8 @@ class StackDetailViewModel(
         _state.update { it.copy(starting = true) }
         viewModelScope.launch {
             try {
-                loadJob?.cancel()
+                // Joined, so a cancelled load never lands after this one.
+                loadJob?.cancelAndJoin()
                 load()
                 val s = _state.value
                 val refusal = stackOpRefusal(s, op)
@@ -185,8 +190,11 @@ class StackDetailViewModel(
 
     fun refresh() {
         _state.update { it.copy(loading = true) }
-        loadJob?.cancel()
+        val previous = loadJob
+        previous?.cancel()
         loadJob = viewModelScope.launch {
+            // A cancelled load may still be finishing off the main thread: let it end before this one starts.
+            previous?.join()
             try {
                 load()
             } catch (e: Exception) {
@@ -201,7 +209,7 @@ class StackDetailViewModel(
 
     /** Reads the stack again now, for a check right before an operation starts; failures are thrown. */
     internal suspend fun reloadNow() {
-        loadJob?.cancel()
+        loadJob?.cancelAndJoin()
         try {
             load()
         } finally {

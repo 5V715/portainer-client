@@ -1,6 +1,7 @@
 package dev.silas.portainer.app.stacks
 
 import dev.silas.portainer.app.TestEnv
+import dev.silas.portainer.app.drain
 import dev.silas.portainer.app.settle
 import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.StackControl
@@ -77,14 +78,22 @@ class StackDetailViewModelTest {
         return env
     }
 
+    private val vms = mutableListOf<StackDetailViewModel>()
+
+    /** Runs [block], then lets the view models' loads finish ([drain]) before the Main dispatcher is reset. */
+    private fun vmTest(block: suspend TestScope.() -> Unit) = runTest {
+        block()
+        drain { vms.all { !it.state.value.loading && !it.state.value.starting } }
+    }
+
     private suspend fun TestScope.loaded(stackId: Int? = 5, name: String = "shop"): StackDetailViewModel {
-        val vm = StackDetailViewModel(env().container, "s1", 1, stackId, name)
+        val vm = StackDetailViewModel(env().container, "s1", 1, stackId, name).also { vms += it }
         settle { !vm.state.value.loading && (vm.state.value.stack != null || vm.state.value.error != null) }
         return vm
     }
 
     @Test
-    fun showsRunningAndStoppedMembersFileDatesAndFeatures() = runTest {
+    fun showsRunningAndStoppedMembersFileDatesAndFeatures() = vmTest {
         val vm = loaded()
         val s = vm.state.value
         val stack = assertNotNull(s.stack)
@@ -105,7 +114,7 @@ class StackDetailViewModelTest {
     }
 
     @Test
-    fun stackWithoutContainersIsInactiveAndProtectedFromItsFile() = runTest {
+    fun stackWithoutContainersIsInactiveAndProtectedFromItsFile() = vmTest {
         stackJson = """{"Id":5,"Name":"shop","Type":2,"EndpointId":1,"Status":2}"""
         containersJson = "[]"
         fileContent = "services:\n  agent:\n    image: portainer/portainer-ce:2.45.3\n"
@@ -117,7 +126,7 @@ class StackDetailViewModelTest {
     }
 
     @Test
-    fun memberRunningPortainerAgentIsProtected() = runTest {
+    fun memberRunningPortainerAgentIsProtected() = vmTest {
         containersJson = """[
             {"Id":"c1","Names":["/shop-agent-1"],"Image":"portainer/agent:2.45.3","State":"exited","Status":"Exited (0)","Labels":{"com.docker.compose.project":"shop"}}
         ]"""
@@ -127,7 +136,7 @@ class StackDetailViewModelTest {
     }
 
     @Test
-    fun errorStatusCarriesTheStatusMessage() = runTest {
+    fun errorStatusCarriesTheStatusMessage() = vmTest {
         stackJson = """{"Id":5,"Name":"shop","Type":2,"EndpointId":1,"Status":4,"DeploymentStatus":[{"Status":4,"Message":"pull failed"}]}"""
         val vm = loaded()
         assertEquals(StackStatus.Error, vm.state.value.stack?.status)
@@ -135,7 +144,7 @@ class StackDetailViewModelTest {
     }
 
     @Test
-    fun gitStackShowsItsConfigAndAFileThatFailsToLoadIsNotFatal() = runTest {
+    fun gitStackShowsItsConfigAndAFileThatFailsToLoadIsNotFatal() = vmTest {
         stackJson = """{"Id":5,"Name":"shop","Type":2,"EndpointId":1,"Status":1,
             "GitConfig":{"URL":"https://git.example.com/shop.git","ReferenceName":"refs/heads/main","ConfigFilePath":"deploy/compose.yml"}}"""
         fileStatus = HttpStatusCode.Conflict
@@ -155,7 +164,7 @@ class StackDetailViewModelTest {
     }
 
     @Test
-    fun externalStackLoadsFromContainersWithoutAFile() = runTest {
+    fun externalStackLoadsFromContainersWithoutAFile() = vmTest {
         val vm = loaded(stackId = null, name = "other")
         val s = vm.state.value
         assertEquals(StackControl.Limited, s.stack?.control)
@@ -165,9 +174,9 @@ class StackDetailViewModelTest {
     }
 
     @Test
-    fun loadFailureShowsAnErrorWithoutTheApiKeyAndNoCrash() = runTest {
+    fun loadFailureShowsAnErrorWithoutTheApiKeyAndNoCrash() = vmTest {
         failAll = true
-        val vm = StackDetailViewModel(env(key = "secret-key").container, "s1", 1, 5, "shop")
+        val vm = StackDetailViewModel(env(key = "secret-key").container, "s1", 1, 5, "shop").also { vms += it }
         settle { vm.state.value.error != null && !vm.state.value.loading }
         val message = assertNotNull(vm.state.value.error)
         assertFalse(message.contains("secret-key"), message)
@@ -175,14 +184,14 @@ class StackDetailViewModelTest {
     }
 
     @Test
-    fun loadedFileMeansProtectionIsKnown() = runTest {
+    fun loadedFileMeansProtectionIsKnown() = vmTest {
         val vm = loaded()
         assertFalse(vm.state.value.protectionUnknown)
         assertEquals("shop", vm.name)
     }
 
     @Test
-    fun idOnlyMemberImageIsResolvedBeforeTheProtectedCheck() = runTest {
+    fun idOnlyMemberImageIsResolvedBeforeTheProtectedCheck() = vmTest {
         val id = "sha256:" + "f".repeat(64)
         containersJson = """[
             {"Id":"c1","Names":["/shop-ui-1"],"Image":"$id","State":"running","Status":"Up","Labels":{"com.docker.compose.project":"shop"}}
@@ -195,7 +204,7 @@ class StackDetailViewModelTest {
     }
 
     @Test
-    fun externalStackThatNoLongerExistsShowsAnError() = runTest {
+    fun externalStackThatNoLongerExistsShowsAnError() = vmTest {
         val vm = loaded(stackId = null, name = "gone")
         assertEquals("Stack gone no longer exists", vm.state.value.error)
         assertNull(vm.state.value.stack)

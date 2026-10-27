@@ -83,6 +83,15 @@ fun StackReviewSheet(
                     )
                 }
             }
+            if (review.startsStack) {
+                item(key = "starts") {
+                    Text(
+                        "The stack is stopped. Updating deploys it, so its containers start.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            }
             item(key = "env-title") { SectionTitle("Environment variables") }
             if (review.envChanges.isEmpty()) {
                 item(key = "env-same") { Text("No changes.", color = MaterialTheme.colorScheme.onSurfaceVariant) }

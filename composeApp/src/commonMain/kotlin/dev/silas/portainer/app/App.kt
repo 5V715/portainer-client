@@ -263,7 +263,7 @@ private fun AppNavHost(container: AppContainer) {
                 StackDetailViewModel(container, route.serverId, route.endpointId, route.stackId, route.name)
             }
             val editor = viewModel(key = "stack-editor-${route.serverId}-${route.endpointId}-${route.stackId}-${route.name}") {
-                StackEditorViewModel(container, vm, route.serverId, route.endpointId, route.name)
+                StackEditorViewModel(container, vm, route.serverId, route.endpointId, route.stackId, route.name)
             }
             StackDetailScreen(
                 viewModel = vm,

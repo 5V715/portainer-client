@@ -117,6 +117,15 @@ Synchronous (compose down).
   `3` deploying, then `1`/`4`; poll `GET /api/stacks/{id}` until not `3` and report `DeploymentStatus` last
   `Message` on `4`. 2.40 and older: synchronous, errors come back as the HTTP error. A second update while
   deploying → 409.
+- **Updating a stopped (inactive) stack starts it**, on every checked version: the update always deploys
+  (compose up, `CreateComposeStackDeploymentConfigTx(...).Deploy`), never just saves the file. ≤2.40 set
+  `stack.Status = StackStatusActive` in the request after a successful deploy (`updateStackInTx`, 2.33.7, 2.39.8,
+  2.40.0). 2.41+ set Deploying first (`PrepareStackStatusForDeployment`, which keeps the old status in
+  `DeploymentStartStatus`). Then `stackDeploy` deploys and `UpdateStackStatusFromDeploymentResult` sets **Active** on
+  success, Error on failure (2.41.1, 2.45.3). Only a stack whose `DeploymentStartStatus` was Error is undeployed first.
+  → The app expects Active after an update, whatever the status before, and says in the review that a stopped
+  stack will be started. A stack that reads Inactive after a successful update is not what CE does (only a stop
+  running at the same time could cause it), so it is reported, not assumed done.
 - **Detach from git** = this same `PUT` on a git stack, with the current file (CE UI `StackActions.tsx`
   `handleDetachFromGit`: `{stackFileContent, env: stack.Env, prune: false}`). Portainer clears git config and
   `AutoUpdate` and sets `FromAppTemplate = true`. Available in all checked versions (2.33.7 → 2.45.3; earlier

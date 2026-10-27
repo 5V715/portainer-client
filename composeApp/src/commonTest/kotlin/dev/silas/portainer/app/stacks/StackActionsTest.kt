@@ -7,6 +7,7 @@ import dev.silas.portainer.core.recreate.ChangeSummary
 import dev.silas.portainer.core.model.ImageRef
 import kotlinx.serialization.json.JsonObject
 import dev.silas.portainer.core.recreate.RecreatePlan
+import dev.silas.portainer.app.drain
 import dev.silas.portainer.app.settle
 import dev.silas.portainer.app.support.CONNECTION_DEPENDENCY_REMINDER
 import dev.silas.portainer.core.model.Stack
@@ -127,8 +128,16 @@ class StackActionsTest {
         testEnv = it
     }
 
+    private val vms = mutableListOf<StackDetailViewModel>()
+
+    /** Runs [block], then lets the view models' loads finish ([drain]) before the Main dispatcher is reset. */
+    private fun vmTest(block: suspend TestScope.() -> Unit) = runTest {
+        block()
+        drain { vms.all { !it.state.value.loading && !it.state.value.starting } }
+    }
+
     private suspend fun TestScope.loaded(stackId: Int? = 5, name: String = "shop"): StackDetailViewModel {
-        val vm = StackDetailViewModel(env().container, "s1", 1, stackId, name)
+        val vm = StackDetailViewModel(env().container, "s1", 1, stackId, name).also { vms += it }
         settle { !vm.state.value.loading && (vm.state.value.stack != null || vm.state.value.error != null) }
         return vm
     }
@@ -192,7 +201,7 @@ class StackActionsTest {
     // ---- view model ----
 
     @Test
-    fun protectedStackRefusesStopAndDeleteWithoutARequest() = runTest {
+    fun protectedStackRefusesStopAndDeleteWithoutARequest() = vmTest {
         containersJson = """[
             {"Id":"c1","Names":["/shop-agent-1"],"Image":"portainer/agent:2.45.3","State":"running","Status":"Up","Labels":{"com.docker.compose.project":"shop"}}
         ]"""
@@ -209,7 +218,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun gitStackWhoseFileCantBeReadRefusesStopAndDelete() = runTest {
+    fun gitStackWhoseFileCantBeReadRefusesStopAndDelete() = vmTest {
         gitStack = true
         fileStatus = HttpStatusCode.Conflict
         val vm = loaded()
@@ -225,7 +234,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun externalStackOffersNoActions() = runTest {
+    fun externalStackOffersNoActions() = vmTest {
         val vm = loaded(stackId = null, name = "other")
         assertEquals(emptyList(), vm.state.value.ops)
         assertFalse(vm.state.value.protectionUnknown)
@@ -235,7 +244,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun stopAsksThenRunsAndReportsTheConfirmedResult() = runTest {
+    fun stopAsksThenRunsAndReportsTheConfirmedResult() = vmTest {
         val vm = loaded()
         vm.request(StackOp.Stop)
         val confirm = assertNotNull(vm.state.value.confirm)
@@ -255,7 +264,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun startRunsWithoutAConfirm() = runTest {
+    fun startRunsWithoutAConfirm() = vmTest {
         status = 2
         val vm = loaded()
         vm.request(StackOp.Start)
@@ -266,7 +275,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun deleteNeedsTheTypedNameThenGoesBackToTheListWhichNoLongerShowsIt() = runTest {
+    fun deleteNeedsTheTypedNameThenGoesBackToTheListWhichNoLongerShowsIt() = vmTest {
         val vm = loaded()
         vm.request(StackOp.Delete)
         vm.setTypedName("Shop")
@@ -286,7 +295,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun failureMidOpShowsTheErrorAndClaimsNothing() = runTest {
+    fun failureMidOpShowsTheErrorAndClaimsNothing() = vmTest {
         opFails = true
         val vm = loaded()
         vm.request(StackOp.Delete)
@@ -304,7 +313,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun newViewModelReattachesToARunningOpAndThenItsResult() = runTest {
+    fun newViewModelReattachesToARunningOpAndThenItsResult() = vmTest {
         opGate = CompletableDeferred()
         val first = loaded()
         first.request(StackOp.Stop)
@@ -322,7 +331,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun newViewModelShowsAResultThatFinishedWhileNoScreenWasOpen() = runTest {
+    fun newViewModelShowsAResultThatFinishedWhileNoScreenWasOpen() = vmTest {
         opFails = true
         val sessions = env().container.stackSessions
         val key = StackKey("s1", 1, "shop")
@@ -337,7 +346,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun confirmIsRefusedWhileARecreateRunsOnTheEndpoint() = runTest {
+    fun confirmIsRefusedWhileARecreateRunsOnTheEndpoint() = vmTest {
         val vm = loaded()
         vm.request(StackOp.Stop)
         assertNotNull(vm.state.value.confirm)
@@ -357,7 +366,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun stackWithoutContainersProtectedByItsFileRefusesEverything() = runTest {
+    fun stackWithoutContainersProtectedByItsFileRefusesEverything() = vmTest {
         containersJson = "[]"
         status = 2
         fileContent = "services:\n  agent:\n    image: portainer/agent:2.45.3\n"
@@ -377,7 +386,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun stackWithoutContainersCanBeStartedAndDeleted() = runTest {
+    fun stackWithoutContainersCanBeStartedAndDeleted() = vmTest {
         containersJson = "[]"
         status = 2
         val vm = loaded()
@@ -398,7 +407,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun resultOfAnEarlierStackWithTheSameNameIsClearedNotShown() = runTest {
+    fun resultOfAnEarlierStackWithTheSameNameIsClearedNotShown() = vmTest {
         val sessions = env().container.stackSessions
         val key = StackKey("s1", 1, "shop")
         // Stack 4 "shop" was deleted with no screen open: its result is still held.
@@ -414,7 +423,7 @@ class StackActionsTest {
     }
 
     @Test
-    fun requestIsRefusedBeforeTheConfirmWhileAnotherSessionRuns() = runTest {
+    fun requestIsRefusedBeforeTheConfirmWhileAnotherSessionRuns() = vmTest {
         val vm = loaded()
         val container = env().container
         assertTrue(container.recreateSessions.start(SessionKey("s1", 1, "c1"), container.dedicatedClient("s1"), "c1", recreatePlan()))

@@ -62,7 +62,13 @@ fun stackOpRefusal(state: StackDetailState, op: StackOp): String? {
 }
 
 /** The confirmation of [op] (stop or delete; start asks nothing) on [stackName]; delete needs the name typed exactly. */
-data class StackConfirm(val op: StackOp, val stackName: String, val typedName: String = "") {
+data class StackConfirm(
+    val op: StackOp,
+    val stackName: String,
+    val typedName: String = "",
+    /** The editor has unsaved edits; deleting the stack throws them away. */
+    val unsavedEdits: Boolean = false,
+) {
     init {
         require(op == StackOp.Stop || op == StackOp.Delete) { "Only stop and delete use this confirmation" }
     }
@@ -76,7 +82,8 @@ data class StackConfirm(val op: StackOp, val stackName: String, val typedName: S
 
     val body: String
         get() = if (op == StackOp.Delete) {
-            "The stack and its containers are removed from Portainer and Docker. Its volumes are kept. This can't be undone."
+            "The stack and its containers are removed from Portainer and Docker. Its volumes are kept. This can't be undone." +
+                if (unsavedEdits) " Your unsaved changes in the editor are discarded too." else ""
         } else {
             "All of the stack's containers are stopped."
         }

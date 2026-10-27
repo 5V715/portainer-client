@@ -2,7 +2,13 @@ package dev.silas.portainer.app.stacks
 
 import dev.silas.portainer.app.AppContainer
 import dev.silas.portainer.app.TestEnv
+import dev.silas.portainer.app.drain
 import dev.silas.portainer.app.settle
+import dev.silas.portainer.app.cleanup.RECREATE_IN_PROGRESS_MESSAGE
+import dev.silas.portainer.app.recreate.SessionKey
+import dev.silas.portainer.core.model.ImageRef
+import dev.silas.portainer.core.recreate.ChangeSummary
+import dev.silas.portainer.core.recreate.RecreatePlan
 import dev.silas.portainer.app.support.CONNECTION_DEPENDENCY_REMINDER
 import dev.silas.portainer.core.model.EnvVar
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
@@ -64,6 +70,15 @@ class StackEditorViewModelTest {
     @Volatile private var putStatus = HttpStatusCode.OK
     @Volatile private var putNetworkLoss = false
     @Volatile private var putGate: CompletableDeferred<Unit>? = null
+    @Volatile private var status = 1
+    /** Portainer stores the file with this appended (as if it rewrote it). */
+    @Volatile private var storedSuffix = ""
+    /** Holds a stop (the session stays running) and a recreate's pull. */
+    private val stopGate = CompletableDeferred<Unit>()
+    private val pullGate = CompletableDeferred<Unit>()
+    /** Holds the overview's read of stack 5, and an update of stack 9 (an earlier "shop"). */
+    @Volatile private var stackGate: CompletableDeferred<Unit>? = null
+    private val oldStackGate = CompletableDeferred<Unit>()
     private val key = "secret-api-key"
     private var testEnv: TestEnv? = null
 
@@ -73,12 +88,16 @@ class StackEditorViewModelTest {
     @AfterTest
     fun tearDown() {
         putGate?.complete(Unit)
+        stopGate.complete(Unit)
+        pullGate.complete(Unit)
+        stackGate?.complete(Unit)
+        oldStackGate.complete(Unit)
         Dispatchers.resetMain()
     }
 
     private fun stackJson(): String {
         val gitConfig = if (git) ""","GitConfig":{"URL":"https://g/x.git","ReferenceName":"refs/heads/main","ConfigFilePath":"compose.yml"}""" else ""
-        return """{"Id":5,"Name":"shop","Type":2,"EndpointId":1,"Status":1,"Env":$env,"Option":{"Prune":true}$gitConfig}"""
+        return """{"Id":5,"Name":"shop","Type":2,"EndpointId":1,"Status":$status,"Env":$env,"Option":{"Prune":true}$gitConfig}"""
     }
 
     private suspend fun env(): TestEnv {
@@ -96,12 +115,29 @@ class StackEditorViewModelTest {
                     if (putStatus != HttpStatusCode.OK) {
                         respond("""{"message":"compose up failed","details":"bad $key"}""", putStatus, json)
                     } else {
-                        fileContent = body["StackFileContent"]!!.jsonPrimitive.content
+                        fileContent = body["StackFileContent"]!!.jsonPrimitive.content + storedSuffix
                         env = body["Env"].toString()
+                        status = 1 // CE deploys an update with compose up: the stack is active afterwards
                         respond(stackJson(), HttpStatusCode.OK, json)
                     }
                 }
-                path == "/api/stacks/5" -> respond(stackJson(), HttpStatusCode.OK, json)
+                path == "/api/stacks/5" -> {
+                    stackGate?.await()
+                    respond(stackJson(), HttpStatusCode.OK, json)
+                }
+                path == "/api/stacks/9" -> {
+                    oldStackGate.await()
+                    respond("""{"message":"Unable to find a stack"}""", HttpStatusCode.NotFound, json)
+                }
+                path == "/api/stacks/5/stop" -> {
+                    stopGate.await()
+                    status = 2
+                    respond(stackJson(), HttpStatusCode.OK, json)
+                }
+                path.endsWith("/images/create") -> {
+                    pullGate.await()
+                    respond("{}", HttpStatusCode.OK, json)
+                }
                 path == "/api/stacks/5/file" ->
                     if (fileFails) {
                         respond("""{"message":"boom"}""", HttpStatusCode.InternalServerError, json)
@@ -127,30 +163,23 @@ class StackEditorViewModelTest {
     private val editors = mutableListOf<StackEditorViewModel>()
 
     /**
-     * Runs [block], then waits until every view model it made is idle: their loads and validations hop to
-     * Dispatchers.Default, and one resuming after the test's resetMain would fail the next test.
+     * Runs [block], then waits until every view model it made is idle (see [drain]).
      */
     private fun editorTest(block: suspend TestScope.() -> Unit) = runTest {
         block()
-        settle {
+        drain {
             details.all { !it.state.value.loading && it.state.value.running == null && !it.state.value.starting } &&
                 editors.all { e -> e.state.value.let { !it.validating && !it.checking && !it.updating } }
         }
-        // A load cancelled by a newer one may still be finishing its Dispatchers.Default part: let it land.
-        repeat(5) {
-            advanceUntilIdle()
-            withContext(Dispatchers.Default) { delay(20) }
-        }
-        advanceUntilIdle()
     }
 
-    private fun editorOf(c: AppContainer, detail: StackDetailViewModel) =
-        StackEditorViewModel(c, detail, "s1", 1, "shop").also { editors += it }
+    private fun editorOf(c: AppContainer, detail: StackDetailViewModel, stackId: Int? = 5) =
+        StackEditorViewModel(c, detail, "s1", 1, stackId, "shop").also { editors += it }
 
     private suspend fun TestScope.loaded(stackId: Int? = 5): Pair<StackDetailViewModel, StackEditorViewModel> {
         val c = env().container
         val detail = StackDetailViewModel(c, "s1", 1, stackId, "shop").also { details += it }
-        val editor = editorOf(c, detail)
+        val editor = editorOf(c, detail, stackId)
         settle { !detail.state.value.loading && detail.state.value.stack != null }
         settle { !editor.state.value.editable || (editor.state.value.ready && !editor.state.value.validating) }
         return detail to editor
@@ -450,5 +479,120 @@ class StackEditorViewModelTest {
         assertEquals(listOf(StackDetailTab.Overview, StackDetailTab.File), stackDetailTabs(gitDetail.state.value))
         val (external, _) = loaded(stackId = null)
         assertEquals(listOf(StackDetailTab.Overview), stackDetailTabs(external.state.value))
+    }
+
+    @Test
+    fun updatingAStoppedStackStartsItAndSucceeds() = editorTest {
+        status = 2
+        val (detail, editor) = loaded()
+        editor.setText(newFile)
+        validated(editor)
+        editor.requestUpdate()
+        assertTrue(assertNotNull(editor.state.value.review).startsStack, "the review says the update starts it")
+        editor.confirmUpdate()
+        idle(editor)
+        settle { editor.state.value.notice != null || editor.state.value.updateError != null }
+        assertEquals("Stack updated", editor.state.value.notice)
+        assertNull(editor.state.value.updateError)
+        settle { detail.state.value.stack?.status == dev.silas.portainer.core.model.StackStatus.Active }
+        editor.clearNotice()
+    }
+
+    @Test
+    fun aResultForAnEarlierStackWithTheSameNameIsIgnored() = editorTest {
+        val c = env().container
+        val shop = StackKey("s1", 1, "shop")
+        stackGate = CompletableDeferred() // the overview hasn't loaded stack 5 yet
+        val detail = StackDetailViewModel(c, "s1", 1, 5, "shop").also { details += it }
+        val editor = editorOf(c, detail)
+        // An update of stack 9, an earlier "shop", runs and then fails; only the route's id tells it apart.
+        assertTrue(c.stackSessions.start(shop, 9, StackOp.Update("old: file\n", emptyList(), pullImage = false, prune = false)))
+        settle { requests.contains("PUT /api/stacks/9") }
+        advanceUntilIdle()
+        assertFalse(editor.state.value.updating)
+        oldStackGate.complete(Unit)
+        settle { c.stackSessions.progress(shop).value?.running != true }
+        advanceUntilIdle()
+        assertNull(editor.state.value.updateError)
+        stackGate!!.complete(Unit)
+        settle { editor.state.value.ready && !editor.state.value.validating }
+        assertNull(editor.state.value.updateError)
+        assertEquals(original, editor.state.value.text)
+        assertFalse(editor.state.value.hasUnsavedChanges)
+    }
+
+    @Test
+    fun deleteConfirmationMentionsUnsavedEditorChanges() = editorTest {
+        val (detail, editor) = loaded()
+        detail.request(StackOp.Delete, unsavedEdits = editor.state.value.hasUnsavedChanges)
+        val clean = assertNotNull(detail.state.value.confirm)
+        assertFalse(clean.unsavedEdits)
+        assertFalse(clean.body.contains("unsaved"))
+        detail.dismissConfirm()
+
+        editor.setText(newFile)
+        detail.request(StackOp.Delete, unsavedEdits = editor.state.value.hasUnsavedChanges)
+        val dirty = assertNotNull(detail.state.value.confirm)
+        assertTrue(dirty.unsavedEdits)
+        assertTrue(dirty.body.contains("unsaved changes in the editor are discarded"), dirty.body)
+        detail.dismissConfirm()
+    }
+
+    @Test
+    fun requestUpdateIsRefusedWhileARecreateRunsOnTheEndpoint() = editorTest {
+        val (_, editor) = loaded()
+        editor.setText(newFile)
+        validated(editor)
+        val plan = RecreatePlan(
+            containerName = "web", wasRunning = false, createBody = JsonObject(emptyMap()),
+            extraNetworks = emptyMap(), image = ImageRef.parse("nginx"), pull = true,
+            registryId = null, changes = ChangeSummary(null, emptyList(), emptyList(), emptyList(), emptyList()),
+            warnings = emptyList(),
+        )
+        assertTrue(container.recreateSessions.start(SessionKey("s1", 1, "c1"), container.dedicatedClient("s1"), "c1", plan))
+        editor.requestUpdate()
+        assertNull(editor.state.value.review)
+        assertEquals(RECREATE_IN_PROGRESS_MESSAGE, editor.state.value.error)
+        assertTrue(requests.none { it.startsWith("PUT") })
+        pullGate.complete(Unit)
+        settle { !container.recreateSessions.isRunning("s1", 1) }
+    }
+
+    @Test
+    fun aStopAlreadyRunningRefusesTheUpdate() = editorTest {
+        val (_, editor) = loaded()
+        editor.setText(newFile)
+        validated(editor)
+        editor.requestUpdate()
+        assertNotNull(editor.state.value.review)
+        // Started elsewhere (the Overview) while the review was open.
+        assertTrue(container.stackSessions.start(StackKey("s1", 1, "shop"), 5, StackOp.Stop))
+        editor.confirmUpdate()
+        idle(editor)
+        assertEquals(OTHER_STACK_OPERATION_MESSAGE, editor.state.value.error)
+        assertTrue(requests.none { it.startsWith("PUT") })
+        assertEquals(newFile, editor.state.value.text)
+        // And a new review is refused up front while it runs.
+        editor.clearError()
+        editor.requestUpdate()
+        assertNull(editor.state.value.review)
+        assertEquals(OTHER_STACK_OPERATION_MESSAGE, editor.state.value.error)
+        stopGate.complete(Unit)
+    }
+
+    @Test
+    fun successAdoptsTheStoredFileAsBaselineAndText() = editorTest {
+        storedSuffix = "# stored by Portainer\n"
+        val (_, editor) = loaded()
+        editor.setText(newFile)
+        validated(editor)
+        editor.requestUpdate()
+        editor.confirmUpdate()
+        idle(editor)
+        settle { editor.state.value.original == newFile + storedSuffix }
+        val s = editor.state.value
+        assertEquals(newFile + storedSuffix, s.text)
+        assertFalse(s.hasUnsavedChanges, "no stuck \"Unsaved changes\" after a success")
+        editor.clearNotice()
     }
 }

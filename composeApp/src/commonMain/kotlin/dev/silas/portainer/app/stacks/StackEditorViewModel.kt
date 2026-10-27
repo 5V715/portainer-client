@@ -30,6 +30,7 @@ import kotlinx.coroutines.withContext
 private const val VALIDATION_DEBOUNCE_MS = 300L
 
 const val GIT_STACK_EDIT_MESSAGE = "This stack is deployed from git: change its file in the repository."
+const val OTHER_STACK_OPERATION_MESSAGE = "Another operation is running on this stack."
 const val STACK_DEPLOYING_MESSAGE = "Portainer is still deploying this stack — try again when it finishes."
 
 /** `\r\n` and lone `\r` (YAML line breaks too) become `\n`, so lines match the editor's and the parser's. */
@@ -46,6 +47,8 @@ data class StackReview(
     val warnings: List<ComposeWarning>,
     /** The stored file used CRLF line ends; the update sends `\n` ones. */
     val lineEndingsChanged: Boolean,
+    /** The stack is stopped: CE deploys an update with compose up, so the update starts it. */
+    val startsStack: Boolean,
     val pullImage: Boolean,
     val prune: Boolean,
     /** The server has `Prune` on update (CE 2.40+); otherwise the switch is hidden. */
@@ -125,6 +128,8 @@ class StackEditorViewModel(
     private val detail: StackDetailViewModel,
     private val serverId: String,
     private val endpointId: Int,
+    /** The route's stack id: results for another stack that had this name are ignored. Null: external. */
+    private val stackId: Int?,
     name: String,
 ) : ViewModel() {
     private val _state = MutableStateFlow(StackEditorState())
@@ -135,6 +140,8 @@ class StackEditorViewModel(
     private var validation: Job? = null
     /** A failed update's edits, put back once the file is loaded if nothing was typed meanwhile. */
     private var pendingRestore: StackOp.Update? = null
+    /** An update succeeded: the next stored file and env read replace the text, edited or not. */
+    private var adoptAfterSuccess = false
 
     init {
         viewModelScope.launch { detail.state.collect(::adopt) }
@@ -153,7 +160,8 @@ class StackEditorViewModel(
         val normalized = normalizeLineEndings(file)
         val s = _state.value
         if (s.ready && s.editable && normalized == s.original && stack.env == s.originalEnv) return
-        val clean = !s.ready || !s.hasUnsavedChanges
+        val clean = !s.ready || !s.hasUnsavedChanges || adoptAfterSuccess
+        adoptAfterSuccess = false
         _state.update {
             it.copy(
                 editable = true,
@@ -164,6 +172,7 @@ class StackEditorViewModel(
                 text = if (clean) normalized else it.text,
                 env = if (clean) stack.env else it.env,
                 envBlock = if (clean) formatDotEnv(stack.env) else it.envBlock,
+                envMode = if (clean) EnvMode.Rows else it.envMode,
             )
         }
         applyRestore()
@@ -171,17 +180,20 @@ class StackEditorViewModel(
     }
 
     private fun onProgress(p: StackProgress?) {
-        val id = detail.state.value.stack?.id
         when {
             p == null || p.op !is StackOp.Update -> _state.update { it.copy(updating = false) }
-            id != null && p.stackId != id -> Unit // a result for an earlier stack with this name: the overview clears it
+            stackId == null || p.stackId != stackId -> Unit // another stack that had this name: the overview clears it
             p.running -> _state.update { it.copy(updating = true) }
             p.error != null -> {
                 _state.update { it.copy(updating = false, updateError = p.error) }
                 pendingRestore = p.op
                 applyRestore()
             }
-            else -> _state.update { it.copy(updating = false, notice = "Stack updated") }
+            else -> {
+                // The overview reads the stack again; what Portainer stored becomes the editor's text.
+                adoptAfterSuccess = true
+                _state.update { it.copy(updating = false, notice = "Stack updated") }
+            }
         }
     }
 
@@ -195,9 +207,12 @@ class StackEditorViewModel(
         validate()
     }
 
+    /** True when an edit may be made now; an edit also keeps what was typed over a refresh after a success. */
     private fun editing(): Boolean {
         val s = _state.value
-        return s.editable && s.ready && !s.updating && !s.checking && s.review == null
+        val allowed = s.editable && s.ready && !s.updating && !s.checking && s.review == null
+        if (allowed) adoptAfterSuccess = false
+        return allowed
     }
 
     /** Pass back exactly what the code editor emitted; the text is never rewritten here. */
@@ -208,9 +223,12 @@ class StackEditorViewModel(
     }
 
     private fun validate() {
-        validation?.cancel()
+        val previous = validation
+        previous?.cancel()
         val text = _state.value.text
         validation = viewModelScope.launch {
+            // A cancelled check may still be running off the main thread: let it end first.
+            previous?.join()
             delay(VALIDATION_DEBOUNCE_MS)
             val analysis = withContext(Dispatchers.Default) { analyzeCompose(text, webEditor = true) }
             _state.update { if (it.text == text) it.copy(analysis = analysis, analyzedText = text) else it }
@@ -260,7 +278,10 @@ class StackEditorViewModel(
         if (!s.canUpdate || s.review != null) return
         val analysis = s.analysis ?: return
         val d = detail.state.value
-        (stackUpdateRefusal(d, analysis.images) ?: sessions.refusal(serverId, endpointId))?.let { reason ->
+        val refusal = stackUpdateRefusal(d, analysis.images)
+            ?: sessions.refusal(serverId, endpointId)
+            ?: OTHER_STACK_OPERATION_MESSAGE.takeIf { sessions.progress(key).value?.running == true }
+        refusal?.let { reason ->
             _state.update { it.copy(error = reason) }
             return
         }
@@ -273,6 +294,7 @@ class StackEditorViewModel(
             envChanges = envDiff(s.originalEnv, s.effectiveEnv),
             warnings = analysis.warnings,
             lineEndingsChanged = s.originalHadCarriageReturns,
+            startsStack = d.stack?.status == StackStatus.Inactive,
             pullImage = false,
             prune = pruneAvailable && d.stack?.prune == true,
             pruneAvailable = pruneAvailable,
@@ -301,7 +323,7 @@ class StackEditorViewModel(
                     refusal != null -> _state.update { it.copy(error = refusal) }
                     id == null -> _state.update { it.copy(error = "The stack couldn't be loaded — try again.") }
                     !sessions.start(key, id, op) -> _state.update {
-                        it.copy(error = sessions.refusal(serverId, endpointId) ?: "Another operation is running on this stack.")
+                        it.copy(error = sessions.refusal(serverId, endpointId) ?: OTHER_STACK_OPERATION_MESSAGE)
                     }
                 }
             } catch (e: Exception) {

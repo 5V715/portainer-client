@@ -54,6 +54,8 @@ fun envErrors(env: List<EnvVar>): List<String> {
     return out
 }
 
+private val EXPORT_PREFIX = Regex("""^export\s+(?=\S)""")
+
 /** Index of an inline comment's `#` (whitespace before it) in an unquoted value, or -1. */
 private fun inlineCommentStart(s: String): Int {
     for (i in 1 until s.length) if (s[i] == '#' && s[i - 1].isWhitespace()) return i
@@ -68,7 +70,8 @@ private fun isTrailingNoise(rest: String): Boolean = rest.isBlank() || rest.trim
  *
  * Syntax (Docker Compose's): blank lines and `#` lines are ignored; `NAME=value`, spaces around the name and an
  * unquoted value trimmed, an unquoted value ends at ` #` (an inline comment), so `a#b` keeps its `#`. `"…"` values
- * take `\\`, `\"`, `\n`, `\r` and `\t` escapes; `'…'` values are literal. CRLF line ends are accepted.
+ * take `\\`, `\"`, `\n`, `\r` and `\t` escapes; `'…'` values are literal. A leading `export ` is dropped.
+ * CRLF line ends are accepted.
  */
 fun parseDotEnv(text: String): Pair<List<EnvVar>, List<String>> {
     val env = ArrayList<EnvVar>()
@@ -78,17 +81,19 @@ fun parseDotEnv(text: String): Pair<List<EnvVar>, List<String>> {
         val n = index + 1
         val start = line.trimStart()
         if (start.isEmpty() || start.startsWith('#')) return@forEachIndexed
-        val eq = line.indexOf('=')
+        // `export NAME=value` (shell style) means NAME=value.
+        val body = EXPORT_PREFIX.find(start)?.let { start.substring(it.range.last + 1) } ?: start
+        val eq = body.indexOf('=')
         if (eq < 0) {
             errors += "Line $n: expected NAME=value"
             return@forEachIndexed
         }
-        val name = line.substring(0, eq).trim()
+        val name = body.substring(0, eq).trim()
         envNameError(name)?.let {
             errors += "Line $n: $it"
             return@forEachIndexed
         }
-        val raw = line.substring(eq + 1)
+        val raw = body.substring(eq + 1)
         val v = raw.trimStart()
         val value: String? = when {
             v.startsWith('"') -> {

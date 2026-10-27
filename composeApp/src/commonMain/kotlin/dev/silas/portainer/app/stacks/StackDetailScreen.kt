@@ -163,7 +163,9 @@ fun StackDetailScreen(
         },
         bottomBar = {
             when (tab) {
-                StackDetailTab.Overview -> StackActionBar(state.ops, state.running, state.starting || state.loading, viewModel::request)
+                StackDetailTab.Overview -> StackActionBar(state.ops, state.running, state.starting || state.loading) { op ->
+                    viewModel.request(op, unsavedEdits = editorState.hasUnsavedChanges)
+                }
                 StackDetailTab.Editor -> StackEditorBar(editorState, editor::requestUpdate)
                 StackDetailTab.File -> Unit
             }

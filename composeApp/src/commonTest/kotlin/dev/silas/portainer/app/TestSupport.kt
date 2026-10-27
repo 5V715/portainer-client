@@ -32,3 +32,18 @@ suspend fun kotlinx.coroutines.test.TestScope.settle(done: () -> Boolean) {
     }
     throw AssertionError("condition not reached")
 }
+
+/**
+ * Waits until [idle] holds, then lets work still finishing on Dispatchers.Default land on the test Main dispatcher.
+ * Call at the end of a test whose view models hop off the main thread: work that resumes after `resetMain` would
+ * fail a later test.
+ */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+suspend fun kotlinx.coroutines.test.TestScope.drain(idle: () -> Boolean = { true }) {
+    settle(idle)
+    repeat(5) {
+        advanceUntilIdle()
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { kotlinx.coroutines.delay(20) }
+    }
+    advanceUntilIdle()
+}
