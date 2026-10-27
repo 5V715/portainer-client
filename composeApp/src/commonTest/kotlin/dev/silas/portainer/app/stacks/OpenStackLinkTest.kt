@@ -4,9 +4,6 @@ import dev.silas.portainer.app.StackDetail
 import dev.silas.portainer.app.TestEnv
 import dev.silas.portainer.app.detail.ContainerDetailViewModel
 import dev.silas.portainer.app.settle
-import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
-import dev.silas.portainer.core.model.ContainerState
-import dev.silas.portainer.core.model.ContainerSummary
 import dev.silas.portainer.core.model.Stack
 import dev.silas.portainer.core.model.StackControl
 import dev.silas.portainer.core.model.StackStatus
@@ -18,6 +15,8 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -31,11 +30,6 @@ import kotlin.test.assertNull
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class OpenStackLinkTest {
-    private fun container(project: String?) = ContainerSummary(
-        id = "c1", name = "web", image = "nginx", state = ContainerState.Running, statusText = "Up", health = null,
-        stack = project, labels = project?.let { mapOf(COMPOSE_PROJECT_LABEL to it) }.orEmpty(),
-    )
-
     private fun stack(id: Int?, name: String) = Stack(
         id = id, name = name, type = StackType.Compose, endpointId = 1, status = StackStatus.Active,
         control = if (id == null) StackControl.Limited else StackControl.Full,
@@ -46,23 +40,31 @@ class OpenStackLinkTest {
 
     @Test
     fun managedStackLinksWithItsId() {
-        assertEquals(StackDetail("s1", 1, 5, "shop"), stackLinkFor(container("shop"), stacks, "s1"))
+        assertEquals(StackDetail("s1", 1, 5, "shop"), stackLinkFor("shop", stacks, "s1", 1))
     }
 
     @Test
     fun externalStackLinksByNameWithNullId() {
-        assertEquals(StackDetail("s1", 1, null, "legacy"), stackLinkFor(container("legacy"), stacks, "s1"))
+        assertEquals(StackDetail("s1", 1, null, "legacy"), stackLinkFor("legacy", stacks, "s1", 1))
     }
 
     @Test
     fun nonMemberHasNoLink() {
-        assertNull(stackLinkFor(container(null), stacks, "s1"))
-        assertNull(stackLinkFor(container("other"), stacks, "s1"))
-        assertNull(stackLinkFor(container("shop"), emptyList(), "s1"))
+        assertNull(stackLinkFor(null, stacks, "s1", 1))
+        assertNull(stackLinkFor("other", stacks, "s1", 1))
+        assertNull(stackLinkFor("shop", emptyList(), "s1", 1))
+    }
+
+    @Test
+    fun sameNamedStackOnAnotherEndpointIsNotLinked() {
+        val elsewhere = listOf(stack(9, "shop").copy(endpointId = 2))
+        assertNull(stackLinkFor("shop", elsewhere, "s1", 1))
+        assertEquals(StackDetail("s1", 2, 9, "shop"), stackLinkFor("shop", elsewhere, "s1", 2))
     }
 
     // --- view model ---
 
+    private val requestLog = MutableStateFlow(emptyList<String>())
     private val json = headersOf(HttpHeaders.ContentType, "application/json")
     private val inspect = """{"Id":"abc","Name":"/web","State":{"Status":"running"},
       "Config":{"Image":"nginx:1.27","Labels":{"com.docker.compose.project":"shop"}},"HostConfig":{},"NetworkSettings":{}}"""
@@ -76,6 +78,7 @@ class OpenStackLinkTest {
     private suspend fun env(stacksOk: Boolean): TestEnv {
         val env = TestEnv { req ->
             val path = req.url.encodedPath
+            requestLog.update { it + path }
             when {
                 path == "/api/stacks" ->
                     if (stacksOk) respond("""[{"Id":5,"Name":"shop","Type":2,"EndpointId":1,"Status":1}]""", HttpStatusCode.OK, json)
@@ -97,10 +100,21 @@ class OpenStackLinkTest {
     }
 
     @Test
+    fun refreshingTheDetailDoesNotLookTheStackUpAgain() = runTest {
+        val vm = ContainerDetailViewModel(env(stacksOk = true).container, "s1", 1, "abc")
+        settle { vm.state.value.stackLink != null }
+        vm.refresh()
+        settle { vm.state.value.loading }
+        settle { !vm.state.value.loading }
+        assertEquals(1, requestLog.value.count { it == "/api/stacks" })
+    }
+
+    @Test
     fun aStacksLoadFailureHidesTheLinkWithoutAnError() = runTest {
         val vm = ContainerDetailViewModel(env(stacksOk = false).container, "s1", 1, "abc")
         settle { vm.state.value.overview != null && !vm.state.value.loading }
-        settle { true }
+        // The lookup runs apart from the overview: wait until its request has been answered (and failed).
+        settle { "/api/stacks" in requestLog.value }
         assertNull(vm.state.value.stackLink)
         assertNull(vm.state.value.error)
         assertEquals("shop", vm.state.value.overview?.stack)

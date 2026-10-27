@@ -21,6 +21,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -108,18 +110,16 @@ private fun Review(r: FinishPhase.Review, vm: EditorViewModel, onOpenStack: (Sta
     }
 
     r.blocking.forEach { Banner(conflictText(it), MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) }
-    // The stack-member warning (Replace only) comes with a way to open that stack.
-    val stackLink = vm.state.collectAsState().value.stackLink
-        ?.takeIf { link -> r.action == FinishAction.Replace && r.warnings.any { it.startsWith("This container belongs to stack ${link.name}.") } }
     r.warnings.forEach { w ->
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp)) {
-                Text(w, color = StatusTone.Warn.color())
-                if (stackLink != null && w.startsWith("This container belongs to stack ${stackLink.name}.")) {
-                    TextButton(onClick = { onOpenStack(stackLink) }, enabled = !r.starting) { Text("Open stack") }
-                }
-            }
+            Text(w, Modifier.padding(12.dp), color = StatusTone.Warn.color())
         }
+    }
+    // The stack-member warning (Replace only) comes with a way to open that stack.
+    val stacks by vm.state.collectAsState()
+    val stackLink = remember(r.stackProject, stacks.stacks) { vm.stackLink(r.stackProject) }
+    if (stackLink != null) {
+        TextButton(onClick = { onOpenStack(stackLink) }, enabled = !r.starting) { Text("Open stack ${stackLink.name}") }
     }
     if (r.blocking.isNotEmpty()) {
         Text("Change these in the form first.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)

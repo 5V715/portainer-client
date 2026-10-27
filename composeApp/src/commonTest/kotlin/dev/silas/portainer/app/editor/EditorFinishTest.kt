@@ -43,6 +43,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -744,8 +745,10 @@ class EditorFinishTest {
         val replace = reviewing(vm, FinishAction.Replace)
         val stackWarning = dev.silas.portainer.app.recreate.warningText(dev.silas.portainer.core.recreate.RecreateWarning.StackMember("shop"))
         assertTrue(stackWarning in replace.warnings, "${replace.warnings}")
+        assertEquals("shop", replace.stackProject)
         vm.backToForm()
         val copy = reviewing(vm, FinishAction.Copy)
         assertTrue(copy.warnings.none { it.contains("stack") }, "${copy.warnings}")
+        assertNull(copy.stackProject)
     }
 }

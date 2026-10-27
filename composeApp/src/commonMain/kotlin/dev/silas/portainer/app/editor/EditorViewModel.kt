@@ -1,11 +1,11 @@
 package dev.silas.portainer.app.editor
 
-import dev.silas.portainer.app.StackDetail
-import dev.silas.portainer.app.stacks.loadStackLink
-import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.StackDetail
+import dev.silas.portainer.app.stacks.loadStacks
+import dev.silas.portainer.app.stacks.stackLinkFor
 import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.api.networks
@@ -21,6 +21,7 @@ import dev.silas.portainer.core.editor.MountType
 import dev.silas.portainer.core.editor.NetworkRow
 import dev.silas.portainer.core.model.ImageRef
 import dev.silas.portainer.core.model.Registry
+import dev.silas.portainer.core.model.Stack
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 import dev.silas.portainer.core.recreate.isProtectedImage
 import dev.silas.portainer.core.registry.matchRegistry
@@ -38,7 +39,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.contentOrNull
 
 /** [Edit]: form pre-filled from a container (Replace / Deploy as copy). [New]: empty form (Create). */
 enum class EditorMode { Edit, New }
@@ -97,8 +97,8 @@ data class EditorState(
     val anonymousVolumes: List<String> = emptyList(),
     /** The read-only Advanced section. */
     val advanced: List<Pair<String, String>> = emptyList(),
-    /** The container's stack when it exists on the endpoint (for the review's stack-member warning); null if unknown. */
-    val stackLink: StackDetail? = null,
+    /** The endpoint's stacks (Edit only), for the review's "Open stack"; empty if they couldn't be loaded. */
+    val stacks: List<Stack> = emptyList(),
     /** The finish step (review, deploy progress); `null` while on the form. The form can't be edited meanwhile. */
     val finish: FinishPhase? = null,
     /** Where the screen should go now (see [EditorViewModel.navigated]). */
@@ -156,17 +156,15 @@ class EditorViewModel(
                 val registries = async { optional { client.registries() } }
                 val volumes = async { optional { client.volumes(endpointId) } }
                 val networks = async { optional { client.networks(endpointId) } }
-                val project = inspect?.await()?.let { ((it["Config"] as? JsonObject)?.get("Labels") as? JsonObject)?.get(COMPOSE_PROJECT_LABEL) }
-                    ?.let { (it as? JsonPrimitive)?.contentOrNull }
-                val stackLink = async { loadStackLink(client, serverId, endpointId, project) }
+                val stacks = async { if (containerId == null) emptyList() else loadStacks(client, endpointId) }
                 ready(
                     inspect?.await(),
                     registries.await(),
                     volumes.await().filterNot { it.anonymous }.map { it.name },
                     networks.await().map { it.name },
                 )
-                val link = stackLink.await()
-                if (link != null) _state.update { it.copy(stackLink = link) }
+                val loaded = stacks.await()
+                if (loaded.isNotEmpty()) _state.update { it.copy(stacks = loaded) }
             }
             null
         } catch (e: Exception) {
@@ -174,6 +172,9 @@ class EditorViewModel(
         }
         if (message != null) _state.update { it.copy(phase = EditorPhase.Error(message)) }
     }
+
+    /** The route to the stack named [project], if it is among the loaded stacks. */
+    fun stackLink(project: String?): StackDetail? = stackLinkFor(project, _state.value.stacks, serverId, endpointId)
 
     private suspend fun <T> optional(block: suspend () -> List<T>): List<T> = try {
         block()

@@ -1,5 +1,6 @@
 package dev.silas.portainer.app.detail
 
+import dev.silas.portainer.app.StackDetail
 import dev.silas.portainer.app.TestEnv
 import dev.silas.portainer.app.cleanup.CleanupKey
 import dev.silas.portainer.app.recreate.CLEANUP_IN_PROGRESS_MESSAGE
@@ -75,6 +76,8 @@ class QuickRecreateViewModelTest {
             path.endsWith("/containers/abc/json") -> respond(inspect(), HttpStatusCode.OK, json)
             path.endsWith("/images/sha256:old/json") -> respond("""{"Config":{"Env":["PATH=/x"]}}""", HttpStatusCode.OK, json)
             path.endsWith("/api/registries") -> respond(registries, HttpStatusCode.OK, json)
+            path == "/api/stacks" -> respond("""[{"Id":5,"Name":"shop","Type":2,"EndpointId":1,"Status":1}]""", HttpStatusCode.OK, json)
+            path.endsWith("/containers/json") -> respond("[]", HttpStatusCode.OK, json)
             path.endsWith("/containers/create") -> {
                 createBody = (r.body as? OutgoingContent.ByteArrayContent)?.bytes()?.decodeToString().orEmpty()
                 createGate?.await()
@@ -115,6 +118,18 @@ class QuickRecreateViewModelTest {
         assertTrue(s.pull)
         assertEquals(7, s.registryId)
         assertEquals(RecreateWarning.StackMember("shop"), s.warnings.first())
+    }
+
+    @Test
+    fun stackMemberWarningCarriesTheStackLinkAndReopeningReusesIt() = runTest {
+        val vm = ready(env())
+        assertEquals(StackDetail("s1", 1, 5, "shop"), vm.state.value.stackLink)
+        vm.dismiss()
+        assertNull(vm.state.value.stackLink)
+        vm.open()
+        settle { vm.state.value.phase == QuickPhase.Ready }
+        assertEquals(StackDetail("s1", 1, 5, "shop"), vm.state.value.stackLink)
+        assertEquals(1, requests.count { it.startsWith("GET /api/stacks") }, "$requests")
     }
 
     @Test

@@ -61,6 +61,7 @@ class QuickRecreateViewModel(
     private val containerId: String,
 ) : ViewModel() {
     private val key = SessionKey(serverId, endpointId, containerId)
+    private var linkCache: Pair<String?, StackDetail?>? = null
     private val _state = MutableStateFlow(QuickRecreateState())
     val state: StateFlow<QuickRecreateState> = _state
 
@@ -84,7 +85,9 @@ class QuickRecreateViewModel(
                 val match = matchFor(image, registries)
                 val plan = plan(client, fresh, pull = true, registryId = match)
                 val project = plan.warnings.filterIsInstance<RecreateWarning.StackMember>().firstOrNull()?.project
-                val stackLink = loadStackLink(client, serverId, endpointId, project)
+                // Reopened for the same stack: reuse the link looked up before.
+                val stackLink = linkCache?.takeIf { it.first == project }?.second
+                    ?: loadStackLink(client, serverId, endpointId, project).also { linkCache = project to it }
                 _state.update {
                     if (it.phase != QuickPhase.Loading) it
                     else it.copy(phase = QuickPhase.Ready, registries = registries, registryId = match, warnings = plan.warnings, stackLink = stackLink)

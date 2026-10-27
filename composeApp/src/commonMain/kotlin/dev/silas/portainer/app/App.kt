@@ -256,7 +256,7 @@ private fun AppNavHost(container: AppContainer) {
             EnvironmentShell(EnvTab.Stacks, { nav.switchTab(route.serverId, route.endpointId, it) }) {
                 StacksScreen(
                     viewModel = vm,
-                    onOpen = { nav.navigate(StackDetail(route.serverId, route.endpointId, it.id, it.name)) },
+                    onOpen = { nav.navigate(StackDetail(route.serverId, route.endpointId, it.id, it.name)) { launchSingleTop = true } },
                     onCreate = { nav.navigate(CreateStack(route.serverId, route.endpointId)) },
                     onBack = toEnvironments,
                 )
@@ -288,7 +288,11 @@ private fun AppNavHost(container: AppContainer) {
                 viewModel = vm,
                 editor = editor,
                 git = git,
-                onOpenContainer = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
+                // Back to the container the user came from when it is below, so Container <-> Stack hops don't pile up.
+                onOpenContainer = {
+                    val target = ContainerDetail(route.serverId, route.endpointId, it)
+                    if (!nav.popBackStack(target, inclusive = false)) nav.navigate(target) { launchSingleTop = true }
+                },
                 onBack = { nav.popBackStack() },
             )
         }
@@ -311,7 +315,7 @@ private fun AppNavHost(container: AppContainer) {
                 onQuickRecreated = { nav.navigate(Recreate(route.serverId, route.endpointId, route.containerId, quick = true)) },
                 onEdit = { nav.navigate(Editor(route.serverId, route.endpointId, route.containerId)) },
                 // A plain push: Back from the stack returns to this container.
-                onOpenStack = { nav.navigate(it) },
+                onOpenStack = { nav.navigate(it) { launchSingleTop = true } },
                 onBack = { nav.popBackStack() },
             )
         }
@@ -349,7 +353,7 @@ private fun AppNavHost(container: AppContainer) {
                     nav.navigate(ContainerDetail(route.serverId, route.endpointId, id)) { popUpTo(route) { inclusive = true } }
                 },
                 // A plain push: Back from the stack returns to the review with the edits.
-                onOpenStack = { nav.navigate(it) },
+                onOpenStack = { nav.navigate(it) { launchSingleTop = true } },
                 onBack = { nav.popBackStack() },
             )
         }

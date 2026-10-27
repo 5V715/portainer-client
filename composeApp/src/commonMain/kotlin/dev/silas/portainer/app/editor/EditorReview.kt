@@ -25,6 +25,7 @@ import dev.silas.portainer.core.recreate.PlanOptions
 import dev.silas.portainer.core.recreate.RecreateEdits
 import dev.silas.portainer.core.recreate.RecreatePlan
 import dev.silas.portainer.core.recreate.RecreatePlanner
+import dev.silas.portainer.core.recreate.RecreateWarning
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -64,6 +65,8 @@ sealed interface FinishPhase {
         val startEditable: Boolean = false,
         /** Sections the user edited that also changed outside the editor ([EditorViewModel.reloadCurrent]). */
         val stale: Set<FormField> = emptySet(),
+        /** The Compose project of the stack-member warning (Replace only); the pane offers to open that stack. */
+        val stackProject: String? = null,
         val starting: Boolean = false,
     ) : FinishPhase {
         val canConfirm get() = blocked == null && nameError == null && blocking.isEmpty() && !starting
@@ -260,6 +263,7 @@ internal fun buildReview(
     }
     val warnings = plan.warnings.map(::warningText) + unusedAnonymous.map { "The existing anonymous volume at $it will no longer be used." }
     val review = review(ctx, plan.containerName, copy, summaryLines(plan.changes), warnings, conflicts, blocking, start, copy)
+        .copy(stackProject = plan.warnings.filterIsInstance<RecreateWarning.StackMember>().firstOrNull()?.project)
     val request = if (copy) {
         DeployRequest(plan.containerName, plan.createBody, plan.extraNetworks, plan.image, plan.pull, plan.registryId, start = start)
     } else {

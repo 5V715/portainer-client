@@ -6,6 +6,7 @@ import dev.silas.portainer.app.AppContainer
 import dev.silas.portainer.app.StackDetail
 import dev.silas.portainer.app.stacks.loadStackLink
 import dev.silas.portainer.app.support.failureMessage
+import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import dev.silas.portainer.core.recreate.isProtectedImage
@@ -61,6 +62,8 @@ class ContainerDetailViewModel(
     val state: StateFlow<ContainerDetailState> = _state
 
     private var loadJob: Job? = null
+    private var linkJob: Job? = null
+    private var linkProject: String? = null
 
     init {
         refresh()
@@ -79,15 +82,26 @@ class ContainerDetailViewModel(
         val message = try {
             val client = container.client(serverId)
             val overview = parseOverview(client.inspectContainer(endpointId, containerId))
-            _state.update { it.copy(overview = overview, stackLink = if (overview.stack == it.overview?.stack) it.stackLink else null) }
-            // Once the overview shows, look the stack up; a failure only hides the button.
-            val link = loadStackLink(client, serverId, endpointId, overview.stack)
-            _state.update { it.copy(stackLink = link) }
+            _state.update { it.copy(overview = overview) }
+            loadLinkIfStackChanged(client, overview.stack)
             null
         } catch (e: Exception) {
             failureMessage(e)
         }
         _state.update { it.copy(loading = false, error = message) }
+    }
+
+    /** The stack lookup runs apart from the overview load, and only when the container's stack differs from the last one looked up. */
+    private fun loadLinkIfStackChanged(client: PortainerClient, project: String?) {
+        if (linkProject == project) return
+        linkProject = project
+        linkJob?.cancel()
+        _state.update { it.copy(stackLink = null) }
+        if (project == null) return
+        linkJob = viewModelScope.launch {
+            val link = loadStackLink(client, serverId, endpointId, project)
+            _state.update { it.copy(stackLink = link) }
+        }
     }
 }
 
