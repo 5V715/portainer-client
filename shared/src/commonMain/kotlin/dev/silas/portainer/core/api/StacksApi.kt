@@ -8,14 +8,21 @@ import dev.silas.portainer.core.model.Stack
 import dev.silas.portainer.core.model.StackControl
 import dev.silas.portainer.core.model.StackStatus
 import dev.silas.portainer.core.model.StackType
+import dev.silas.portainer.core.stacks.stackFeatures
 import io.ktor.client.call.body
 import io.ktor.client.plugins.timeout
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.parameter
+import io.ktor.client.request.setBody
+import io.ktor.http.ContentType
 import io.ktor.http.HttpMethod
+import io.ktor.http.contentType
 import io.ktor.http.HttpStatusCode
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 // Field names: docs/superpowers/notes/portainer-ce-stacks-api.md (verified against CE 2.45.3).
 
@@ -195,5 +202,27 @@ private suspend fun PortainerClient.stackOperation(path: String, endpointId: Int
             socketTimeoutMillis = STACK_OPERATION_TIMEOUT_MS
         }
         block()
+    }
+}
+
+/**
+ * Updates a web-editor stack with [file] and [env] and redeploys it (`PUT /api/stacks/{id}`). [pullImage] is sent as
+ * both `RepullImageAndRedeploy` (2.36+) and the older `PullImage`, which every checked version honours. `Prune` exists
+ * from CE 2.40 only, so a [prune] request is sent only when the server's version has it (an older server would ignore
+ * it); prune off is the default everywhere and needs no field. From 2.41 the deploy continues after the response.
+ */
+suspend fun PortainerClient.updateStack(id: Int, endpointId: Int, file: String, env: List<EnvVar>, pullImage: Boolean, prune: Boolean) {
+    val sendPrune = prune && stackFeatures(status().version).pruneOnUpdate
+    val body = buildJsonObject {
+        put("StackFileContent", file)
+        put("Env", JsonArray(env.map { buildJsonObject { put("name", it.name); put("value", it.value) } }))
+        if (sendPrune) put("Prune", true)
+        put("RepullImageAndRedeploy", pullImage)
+        put("PullImage", pullImage)
+    }
+    stackOperation("/api/stacks/$id", endpointId) {
+        method = HttpMethod.Put
+        contentType(ContentType.Application.Json)
+        setBody(body)
     }
 }

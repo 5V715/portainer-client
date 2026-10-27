@@ -7,6 +7,8 @@ import dev.silas.portainer.core.api.deleteStack
 import dev.silas.portainer.core.api.stack
 import dev.silas.portainer.core.api.startStack
 import dev.silas.portainer.core.api.stopStack
+import dev.silas.portainer.core.api.updateStack
+import dev.silas.portainer.core.model.EnvVar
 import dev.silas.portainer.core.model.StackStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -26,11 +28,20 @@ const val STACK_STILL_WORKING_MESSAGE = "Portainer is still working on this stac
 /** One stack on one endpoint; the name is unique per endpoint (external stacks have no id). */
 data class StackKey(val serverId: String, val endpointId: Int, val stackName: String)
 
-/** A lifecycle operation on a Portainer-managed stack. CE's compose delete has no volume option. */
+/** An operation on a Portainer-managed stack. CE's compose delete has no volume option. */
 sealed interface StackOp {
     data object Start : StackOp
     data object Stop : StackOp
     data object Delete : StackOp
+
+    /**
+     * Updates a web-editor stack with [file] and [env] (sent as given) and redeploys it. [prune] is only sent to
+     * servers that have it (`updateStack`). The values stay here so a failed update can give the edits back.
+     */
+    data class Update(val file: String, val env: List<EnvVar>, val pullImage: Boolean, val prune: Boolean) : StackOp {
+        // Env values can be secrets: never in logs or crash reports.
+        override fun toString(): String = "Update(lines=${file.lines().size}, env=${env.size}, pullImage=$pullImage, prune=$prune)"
+    }
 }
 
 /**
@@ -115,6 +126,10 @@ class StackSessions(
             StackOp.Delete -> {
                 client.deleteStack(id, endpointId)
                 awaitStatus(client, id, expected = null, "Portainer still lists the stack after deleting it.")
+            }
+            is StackOp.Update -> {
+                client.updateStack(id, endpointId, op.file, op.env, op.pullImage, op.prune)
+                awaitStatus(client, id, StackStatus.Active, "Portainer reports the stack as stopped after updating it.")
             }
         }
     }

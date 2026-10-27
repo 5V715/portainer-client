@@ -41,6 +41,7 @@ import dev.silas.portainer.app.networks.NetworksScreen
 import dev.silas.portainer.app.networks.NetworksViewModel
 import dev.silas.portainer.app.stacks.StackDetailScreen
 import dev.silas.portainer.app.stacks.StackDetailViewModel
+import dev.silas.portainer.app.stacks.StackEditorViewModel
 import dev.silas.portainer.app.stacks.StacksScreen
 import dev.silas.portainer.app.stacks.StacksViewModel
 import dev.silas.portainer.app.volumes.VolumeDetailScreen
@@ -261,8 +262,12 @@ private fun AppNavHost(container: AppContainer) {
             val vm = viewModel(key = "stack-${route.serverId}-${route.endpointId}-${route.stackId}-${route.name}") {
                 StackDetailViewModel(container, route.serverId, route.endpointId, route.stackId, route.name)
             }
+            val editor = viewModel(key = "stack-editor-${route.serverId}-${route.endpointId}-${route.stackId}-${route.name}") {
+                StackEditorViewModel(container, vm, route.serverId, route.endpointId, route.name)
+            }
             StackDetailScreen(
                 viewModel = vm,
+                editor = editor,
                 onOpenContainer = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
                 onBack = { nav.popBackStack() },
             )

@@ -12,10 +12,15 @@ import io.ktor.client.request.HttpRequestData
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -266,6 +271,7 @@ class StacksApiTest {
         for ((status, body) in cases) {
             val calls: List<suspend PortainerClient.() -> Unit> = listOf(
                 { stacks(1) }, { stack(1) }, { stackFile(1) }, { startStack(1, 1) }, { stopStack(1, 1) }, { deleteStack(1, 1) },
+                { updateStack(1, 1, "services: {}\n", emptyList(), pullImage = false, prune = false) },
             )
             for (call in calls) {
                 val e = assertFailsWith<PortainerException> { client(status, body).call() }
@@ -279,5 +285,63 @@ class StacksApiTest {
     @Test
     fun unexpectedBodyIsApiError() = runTest {
         assertFailsWith<PortainerException.Api> { client(body = "<html>login</html>").stack(1) }
+    }
+
+    private fun updateClient(version: String, status: HttpStatusCode = HttpStatusCode.OK, body: String = editorStackJson) = client { req ->
+        if (req.url.encodedPath == "/api/status") HttpStatusCode.OK to """{"Version":"$version"}""" else status to body
+    }
+
+    private fun sentUpdate(): Pair<HttpRequestData, JsonObject> {
+        val r = requests.value.single { it.method == HttpMethod.Put }
+        return r to Json.parseToJsonElement((r.body as TextContent).text).jsonObject
+    }
+
+    @Test
+    fun updateSendsFileEnvAndBothPullFieldsWithPruneOnNewServers() = runTest {
+        val file = "services:\n  web:\n    image: nginx # \"x\"\n"
+        updateClient("2.45.3").updateStack(5, 3, file, listOf(EnvVar("A", "x=y"), EnvVar("B", "")), pullImage = true, prune = true)
+        val (r, body) = sentUpdate()
+        assertEquals("/api/stacks/5", r.url.encodedPath)
+        assertEquals(setOf("endpointId"), r.url.parameters.names())
+        assertEquals("3", r.url.parameters["endpointId"])
+        assertEquals(
+            Json.parseToJsonElement(
+                """{"StackFileContent":${Json.encodeToString(String.serializer(), file)},
+                "Env":[{"name":"A","value":"x=y"},{"name":"B","value":""}],
+                "Prune":true,"RepullImageAndRedeploy":true,"PullImage":true}""",
+            ),
+            body,
+        )
+    }
+
+    @Test
+    fun updateOmitsPruneBefore240() = runTest {
+        for (version in listOf("2.39.8", "2.33.7", "garbage")) {
+            requests.value = emptyList()
+            updateClient(version).updateStack(5, 3, "a: b\n", emptyList(), pullImage = false, prune = true)
+            val (_, body) = sentUpdate()
+            assertFalse("Prune" in body, version)
+            assertEquals("false", body["RepullImageAndRedeploy"].toString(), version)
+            assertEquals("false", body["PullImage"].toString(), version)
+            assertEquals("[]", body["Env"].toString(), version)
+        }
+        requests.value = emptyList()
+        updateClient("2.40.0").updateStack(5, 3, "a: b\n", emptyList(), pullImage = false, prune = true)
+        assertEquals("true", sentUpdate().second["Prune"].toString())
+        // Prune off is Portainer's default on every version: nothing to gate, so no version check either.
+        requests.value = emptyList()
+        updateClient("2.45.3").updateStack(5, 3, "a: b\n", emptyList(), pullImage = false, prune = false)
+        assertFalse("Prune" in sentUpdate().second)
+        assertEquals(listOf("/api/stacks/5"), requests.value.map { it.url.encodedPath })
+    }
+
+    @Test
+    fun updateFailureIsRedacted() = runTest {
+        val e = assertFailsWith<PortainerException.Api> {
+            updateClient("2.45.3", HttpStatusCode.InternalServerError, """{"message":"compose up failed $key"}""")
+                .updateStack(5, 3, "a: b\n", emptyList(), pullImage = false, prune = false)
+        }
+        assertEquals(500, e.status)
+        assertFalse(e.message!!.contains(key))
     }
 }

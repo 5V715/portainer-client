@@ -60,7 +60,8 @@ private const val MULTIPLE_DOCUMENTS = "Multiple YAML documents ('---'). A compo
 private fun yamlError(e: Throwable): YamlError {
     val marked = e as? MarkedYamlEngineException
     val multi = marked?.problem?.startsWith("expected a single document") == true
-    val mark = marked?.problemMark ?: marked?.contextMark
+    // For the "single document" error the library swaps the roles: contextMark is the extra `---`.
+    val mark = if (multi) marked.contextMark ?: marked.problemMark else marked?.problemMark ?: marked?.contextMark
     val message = if (multi) MULTIPLE_DOCUMENTS else (marked?.problem ?: e.message)?.lineSequence()
         ?.firstOrNull { it.isNotBlank() }?.trim()?.takeIf { it.isNotEmpty() } ?: "Invalid YAML"
     return YamlError(line = (mark?.line ?: 0) + 1, column = mark?.let { it.column + 1 }, message = message)

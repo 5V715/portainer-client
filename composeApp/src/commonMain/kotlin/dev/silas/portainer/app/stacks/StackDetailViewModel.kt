@@ -98,6 +98,11 @@ class StackDetailViewModel(
     private fun finished(p: StackProgress) {
         val error = p.error
         when {
+            // The editor shows an update's result (and keeps the edits); here the stack is only read again.
+            p.op is StackOp.Update -> {
+                _state.update { it.copy(running = null) }
+                refresh()
+            }
             error != null -> {
                 _state.update { it.copy(running = null, failure = p.op to error) }
                 refresh()
@@ -193,6 +198,16 @@ class StackDetailViewModel(
     }
 
     fun clearError() = _state.update { it.copy(error = null) }
+
+    /** Reads the stack again now, for a check right before an operation starts; failures are thrown. */
+    internal suspend fun reloadNow() {
+        loadJob?.cancel()
+        try {
+            load()
+        } finally {
+            _state.update { it.copy(loading = false) }
+        }
+    }
 
     private suspend fun load() {
         val client = container.client(serverId)

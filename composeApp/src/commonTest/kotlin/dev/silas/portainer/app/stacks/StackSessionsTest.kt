@@ -15,6 +15,7 @@ import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.api.stack
 import dev.silas.portainer.core.cleanup.CleanupItem
 import dev.silas.portainer.core.cleanup.CleanupKind
+import dev.silas.portainer.core.model.EnvVar
 import dev.silas.portainer.core.model.ImageRef
 import dev.silas.portainer.core.recreate.ChangeSummary
 import dev.silas.portainer.core.recreate.RecreatePlan
@@ -92,6 +93,7 @@ class StackSessionsTest {
         val query = req.url.encodedQuery.takeIf { it.isNotEmpty() }?.let { "?$it" }.orEmpty()
         requestLog.update { it + "${req.method.value} $path$query" }
         when {
+            path == "/api/status" -> respond("""{"Version":"2.45.3"}""", HttpStatusCode.OK, json)
             path == "/api/stacks/5" && req.method == HttpMethod.Get -> {
                 if (pollFailsWithNetworkError) throw RuntimeException("connection reset secret-api-key")
                 if (pollDelayMs > 0) withContext(Dispatchers.Default) { delay(pollDelayMs) }
@@ -178,6 +180,28 @@ class StackSessionsTest {
         val sessions = sessions()
         sessions.start(key, 5, StackOp.Stop)
         assertNotNull(finished(sessions).error)
+    }
+
+    @Test
+    fun updatePutsTheFileThenWaitsForTheAsyncDeploy() = runTest {
+        statuses = mutableListOf(3, 3, 1)
+        val sessions = sessions()
+        val op = StackOp.Update("services: {}\n", listOf(EnvVar("A", "1")), pullImage = true, prune = true)
+        assertTrue(sessions.start(key, 5, op))
+        assertEquals(StackProgress(op, running = false, error = null, stackId = 5), finished(sessions))
+        assertEquals(
+            listOf("GET /api/status", "PUT /api/stacks/5?endpointId=1") + List(3) { "GET /api/stacks/5" },
+            requests,
+        )
+    }
+
+    @Test
+    fun updateWhoseDeployFailsReportsPortainersMessage() = runTest {
+        statuses = mutableListOf(3, 4)
+        statusMessage = "manifest unknown"
+        val sessions = sessions()
+        sessions.start(key, 5, StackOp.Update("a: b\n", emptyList(), pullImage = false, prune = false))
+        assertEquals("manifest unknown", finished(sessions).error)
     }
 
     @Test

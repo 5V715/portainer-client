@@ -1,25 +1,26 @@
 package dev.silas.portainer.app.stacks
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -27,9 +28,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.backhandler.BackHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -40,16 +46,74 @@ import dev.silas.portainer.core.model.StackControl
 import dev.silas.portainer.core.model.StackStatus
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** The detail screen's tabs: web-editor stacks add the Editor, git stacks a read-only File; external stacks neither. */
+enum class StackDetailTab { Overview, Editor, File }
+
+fun stackDetailTabs(state: StackDetailState): List<StackDetailTab> {
+    val stack = state.stack ?: return listOf(StackDetailTab.Overview)
+    return when {
+        stack.control != StackControl.Full || stack.id == null -> listOf(StackDetailTab.Overview)
+        stack.git != null -> listOf(StackDetailTab.Overview, StackDetailTab.File)
+        else -> listOf(StackDetailTab.Overview, StackDetailTab.Editor)
+    }
+}
+
+@Suppress("DEPRECATION") // BackHandler, as in App.kt
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun StackDetailScreen(
     viewModel: StackDetailViewModel,
+    editor: StackEditorViewModel,
     onOpenContainer: (containerId: String) -> Unit,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
+    val editorState by editor.state.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     val stack = state.stack
+    val tabs = stackDetailTabs(state)
+    var selected by rememberSaveable { mutableStateOf(StackDetailTab.Overview) }
+    val tab = selected.takeIf { it in tabs } ?: StackDetailTab.Overview
+    val back = { if (editor.requestBack()) onBack() }
+    BackHandler(enabled = editorState.hasUnsavedChanges && !editorState.updating) { back() }
+
+    LaunchedEffect(editorState.error) {
+        editorState.error?.let {
+            snackbar.showSnackbar(it)
+            editor.clearError()
+        }
+    }
+    LaunchedEffect(editorState.notice) {
+        editorState.notice?.let {
+            snackbar.showSnackbar(it)
+            editor.clearNotice()
+        }
+    }
+    editorState.review?.let { review ->
+        StackReviewSheet(review, editor::setPullImage, editor::setPrune, editor::confirmUpdate, editor::dismissReview)
+    }
+    editorState.updateError?.let { message ->
+        AlertDialog(
+            onDismissRequest = editor::clearUpdateError,
+            title = { Text("Couldn't update the stack") },
+            text = { Text("$message\n\nYour changes are kept in the editor.") },
+            confirmButton = { TextButton(onClick = editor::clearUpdateError) { Text("OK") } },
+        )
+    }
+    if (editorState.confirmDiscard) {
+        AlertDialog(
+            onDismissRequest = editor::dismissDiscard,
+            title = { Text("Discard changes?") },
+            text = { Text("Your edits to the compose file and environment are not saved.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    editor.dismissDiscard()
+                    onBack()
+                }) { Text("Discard", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = editor::dismissDiscard) { Text("Keep editing") } },
+        )
+    }
 
     LaunchedEffect(state.error) {
         state.error?.let {
@@ -83,14 +147,42 @@ fun StackDetailScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(stack?.name ?: viewModel.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                navigationIcon = { BackButton(onBack) },
-            )
+            Column {
+                TopAppBar(
+                    title = { Text(stack?.name ?: viewModel.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    navigationIcon = { BackButton(back) },
+                )
+                if (tabs.size > 1) {
+                    PrimaryTabRow(selectedTabIndex = tabs.indexOf(tab)) {
+                        tabs.forEach { t ->
+                            Tab(selected = t == tab, onClick = { selected = t }, text = { Text(tabLabel(t)) })
+                        }
+                    }
+                }
+            }
         },
-        bottomBar = { StackActionBar(state.ops, state.running, state.starting || state.loading, viewModel::request) },
+        bottomBar = {
+            when (tab) {
+                StackDetailTab.Overview -> StackActionBar(state.ops, state.running, state.starting || state.loading, viewModel::request)
+                StackDetailTab.Editor -> StackEditorBar(editorState, editor::requestUpdate)
+                StackDetailTab.File -> Unit
+            }
+        },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
+        // The editor tabs get a bounded height (no scrolling parent) that shrinks above the keyboard.
+        val bounded = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()
+        when (tab) {
+            StackDetailTab.Editor -> {
+                StackEditorContent(editorState, editor, state.fileError, bounded)
+                return@Scaffold
+            }
+            StackDetailTab.File -> {
+                StackFileView(state.file, state.fileError, bounded)
+                return@Scaffold
+            }
+            StackDetailTab.Overview -> Unit
+        }
         PullToRefreshBox(
             isRefreshing = state.loading,
             onRefresh = viewModel::refresh,
@@ -154,34 +246,21 @@ fun StackDetailScreen(
                     }
                 }
 
-                if (stack.control == StackControl.Full) {
+                // The file itself is on the Editor / File tab; a failure to read it matters here (protection unknown).
+                state.fileError?.let {
                     HorizontalDivider()
                     Text("Compose file", style = MaterialTheme.typography.titleMedium)
-                    when {
-                        state.file != null -> ComposeFileText(state.file!!)
-                        state.fileError != null -> Text(state.fileError!!, color = MaterialTheme.colorScheme.error)
-                        else -> Text("Loading…")
-                    }
+                    Text(it, color = MaterialTheme.colorScheme.error)
                 }
             }
         }
     }
 }
 
-/** Read-only compose file; it scrolls sideways inside its own box so the page never does. */
-@Composable
-private fun ComposeFileText(text: String) {
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
-        SelectionContainer {
-            Text(
-                text,
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.bodySmall,
-                softWrap = false,
-                modifier = Modifier.horizontalScroll(rememberScrollState()).padding(12.dp),
-            )
-        }
-    }
+private fun tabLabel(tab: StackDetailTab): String = when (tab) {
+    StackDetailTab.Overview -> "Overview"
+    StackDetailTab.Editor -> "Editor"
+    StackDetailTab.File -> "Compose file"
 }
 
 @Composable

@@ -55,7 +55,7 @@ class AppContainer(
     }
 
     /**
-     * Running and finished stack start/stop/delete, so leaving the stack never stops or loses one. Refused while a
+     * Running and finished stack start/stop/delete/update, so leaving the stack never stops or loses one. Refused while a
      * recreate, any cleanup or an editor deploy runs on the endpoint: each touches containers the stack may own.
      */
     val stackSessions: StackSessions = StackSessions(appScope, { dedicatedClient(it) }, otherWork = { serverId, endpointId ->

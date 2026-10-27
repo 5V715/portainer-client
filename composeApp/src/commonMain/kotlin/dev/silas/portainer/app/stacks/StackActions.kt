@@ -64,7 +64,7 @@ fun stackOpRefusal(state: StackDetailState, op: StackOp): String? {
 /** The confirmation of [op] (stop or delete; start asks nothing) on [stackName]; delete needs the name typed exactly. */
 data class StackConfirm(val op: StackOp, val stackName: String, val typedName: String = "") {
     init {
-        require(needsConfirm(op)) { "Start needs no confirmation" }
+        require(op == StackOp.Stop || op == StackOp.Delete) { "Only stop and delete use this confirmation" }
     }
 
     val reminder: String get() = CONNECTION_DEPENDENCY_REMINDER
@@ -82,25 +82,28 @@ data class StackConfirm(val op: StackOp, val stackName: String, val typedName: S
         }
 }
 
-/** Start needs no confirmation; operations that take containers down do. */
+/** Start needs no confirmation; operations that take containers down do (an update has its own review). */
 fun needsConfirm(op: StackOp): Boolean = op != StackOp.Start
 
 internal fun opLabel(op: StackOp): String = when (op) {
     StackOp.Start -> "Start"
     StackOp.Stop -> "Stop"
     StackOp.Delete -> "Delete"
+    is StackOp.Update -> "Update"
 }
 
 internal fun runningLabel(op: StackOp): String = when (op) {
     StackOp.Start -> "Starting the stack…"
     StackOp.Stop -> "Stopping the stack…"
     StackOp.Delete -> "Deleting the stack…"
+    is StackOp.Update -> "Updating the stack…"
 }
 
 internal fun failureTitle(op: StackOp): String = when (op) {
     StackOp.Start -> "Couldn't start the stack"
     StackOp.Stop -> "Couldn't stop the stack"
     StackOp.Delete -> "Couldn't delete the stack"
+    is StackOp.Update -> "Couldn't update the stack"
 }
 
 /** Bottom action bar: the stack's operations, or the one running. */

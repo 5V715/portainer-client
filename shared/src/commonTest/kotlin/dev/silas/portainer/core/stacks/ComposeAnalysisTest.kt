@@ -156,10 +156,12 @@ class ComposeAnalysisTest {
     }
 
     @Test
-    fun multipleDocumentsExplainedWithLibraryLine() {
+    fun multipleDocumentsPointAtTheExtraMarker() {
         val e = assertNotNull(analyzeCompose("a: b\n---\nc: d", webEditor = true).error)
         assertEquals("Multiple YAML documents ('---'). A compose file must contain exactly one.", e.message)
-        assertEquals(1, e.line)
+        assertEquals(2, e.line)
+        val later = assertNotNull(analyzeCompose("---\nservices:\n  web:\n    image: nginx\n\n---\nx: 1\n", webEditor = true).error)
+        assertEquals(6, later.line)
     }
 
     @Test
