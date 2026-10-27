@@ -34,6 +34,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -41,6 +43,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.JsonObject
+import kotlin.concurrent.Volatile
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -91,7 +94,7 @@ class StackSessionsTest {
         when {
             path == "/api/stacks/5" && req.method == HttpMethod.Get -> {
                 if (pollFailsWithNetworkError) throw RuntimeException("connection reset secret-api-key")
-                if (pollDelayMs > 0) Thread.sleep(pollDelayMs)
+                if (pollDelayMs > 0) withContext(Dispatchers.Default) { delay(pollDelayMs) }
                 val code = if (statuses.size > 1) statuses.removeAt(0) else statuses.first()
                 if (code == null) {
                     respond("""{"message":"Unable to find a stack with the specified identifier inside the database"}""", HttpStatusCode.NotFound, json)
