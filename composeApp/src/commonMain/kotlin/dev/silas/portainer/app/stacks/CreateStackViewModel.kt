@@ -114,6 +114,8 @@ data class CreateStackState(
     val text: String = "",
     /** The uploaded file or the template the text came from. */
     val sourceName: String? = null,
+    /** The text came from a custom template: the create says so (`FromAppTemplate`), as CE's UI does. */
+    val fromTemplate: Boolean = false,
     val analysis: ComposeAnalysis? = null,
     /** The text [analysis] was run on (the empty start needs none). */
     val analyzedText: String? = "",
@@ -127,14 +129,19 @@ data class CreateStackState(
     val templates: List<CustomTemplate>? = null,
     val loadingTemplates: Boolean = false,
     val selectedTemplate: CustomTemplate? = null,
-    /** The selected template's file, variables not filled in yet; null while loading. */
+    /**
+     * The selected template's file with its variables' defaults filled in (CE has no variable inputs: they are
+     * Business Edition only); null while loading.
+     */
     val templateFile: String? = null,
-    val templateValues: Map<String, String> = emptyMap(),
     /** Checking the name and the endpoint right before the create starts. */
     val checking: Boolean = false,
     /** The create is running in the app's stack sessions. */
     val running: Boolean = false,
-    /** The create failed (the form is kept); [failedStackId] is set when Portainer created the stack but its deploy failed. */
+    /**
+     * The create failed (the form is kept); [failedStackId] is set when Portainer created the stack anyway (its
+     * deployment didn't finish), so it can be opened.
+     */
     val failure: String? = null,
     val failedStackId: Int? = null,
     val created: CreatedStack? = null,
@@ -254,7 +261,7 @@ class CreateStackViewModel(
     private fun restore(key: StackKey, op: StackOp) {
         when (op) {
             is StackOp.Create.Text -> _state.update {
-                it.copy(method = CreateMethod.Editor, name = key.stackName, text = op.file, env = op.env, envMode = EnvMode.Rows)
+                it.copy(method = CreateMethod.Editor, name = key.stackName, text = op.file, env = op.env, envMode = EnvMode.Rows, fromTemplate = op.fromTemplate)
             }
             is StackOp.Create.Repository -> {
                 val r = op.request
@@ -291,10 +298,29 @@ class CreateStackViewModel(
         when {
             p == null || p.op !is StackOp.Create -> _state.update { it.copy(running = false) }
             p.running -> _state.update { it.copy(running = true) }
-            p.error != null -> _state.update {
-                it.copy(running = false, failure = p.error, failedStackId = p.stackId.takeIf { id -> id != STACK_NOT_CREATED })
+            p.error != null -> {
+                val id = p.stackId.takeIf { it != STACK_NOT_CREATED }
+                _state.update { it.copy(running = false, failure = p.error, failedStackId = id) }
+                if (id == null) findCreatedAnyway(key.stackName)
             }
             else -> _state.update { it.copy(running = false, created = CreatedStack(p.stackId, key.stackName)) }
+        }
+    }
+
+    /**
+     * The request failed before Portainer answered (e.g. the connection dropped): the stack may exist all the same.
+     * If the endpoint now has a managed stack of that name, the failure offers to open it.
+     */
+    private fun findCreatedAnyway(name: String) {
+        viewModelScope.launch {
+            val id = try {
+                container.client(serverId).stacks(endpointId).firstOrNull { it.name == name && it.id != null }?.id
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null // unknown: the failure stays as it is
+            }
+            if (id != null) _state.update { if (it.failure != null && it.failedStackId == null) it.copy(failedStackId = id) else it }
         }
     }
 
@@ -316,7 +342,8 @@ class CreateStackViewModel(
     /** Pass back exactly what the code editor emitted; the text is never rewritten here. */
     fun setText(text: String) {
         if (!editable() || text == _state.value.text) return
-        _state.update { it.copy(text = text) }
+        // An emptied editor holds a new file, not the template's.
+        _state.update { it.copy(text = text, fromTemplate = it.fromTemplate && text.isNotEmpty(), sourceName = it.sourceName.takeIf { text.isNotEmpty() }) }
         validate()
     }
 
@@ -327,7 +354,7 @@ class CreateStackViewModel(
             is PickedFile.Text -> {
                 if (!editable()) return
                 _state.update {
-                    it.copy(method = CreateMethod.Editor, text = normalizeLineEndings(picked.text), sourceName = picked.name)
+                    it.copy(method = CreateMethod.Editor, text = normalizeLineEndings(picked.text), sourceName = picked.name, fromTemplate = false)
                 }
                 validate()
             }
@@ -420,20 +447,18 @@ class CreateStackViewModel(
         }
     }
 
-    /** Reads [template]'s file; its variables start with their defaults. */
+    /**
+     * Reads [template]'s file (a git-backed one from its repository, as CE does) and fills in its variables' defaults:
+     * CE offers no variable inputs (Business Edition only), so the defaults are what it deploys too.
+     */
     fun selectTemplate(template: CustomTemplate) {
         if (!editable()) return
-        _state.update {
-            it.copy(
-                selectedTemplate = template,
-                templateFile = null,
-                templateValues = template.variables.associate { v -> v.name to v.defaultValue },
-            )
-        }
+        _state.update { it.copy(selectedTemplate = template, templateFile = null) }
         viewModelScope.launch {
             try {
-                val file = container.client(serverId).customTemplateFile(template.id)
-                _state.update { if (it.selectedTemplate == template) it.copy(templateFile = normalizeLineEndings(file)) else it }
+                val file = container.client(serverId).customTemplateFile(template.id, git = template.gitBacked)
+                val rendered = renderCustomTemplate(normalizeLineEndings(file), template.variables, emptyMap())
+                _state.update { if (it.selectedTemplate == template) it.copy(templateFile = rendered) else it }
             } catch (e: Exception) {
                 val message = failureMessage(e, "Couldn't load the template's file")
                 _state.update { if (it.selectedTemplate == template) it.copy(selectedTemplate = null, error = message) else it }
@@ -441,21 +466,15 @@ class CreateStackViewModel(
         }
     }
 
-    fun clearTemplate() = _state.update { it.copy(selectedTemplate = null, templateFile = null, templateValues = emptyMap()) }
+    fun clearTemplate() = _state.update { it.copy(selectedTemplate = null, templateFile = null) }
 
-    fun setTemplateValue(name: String, value: String) {
-        if (!editable()) return
-        _state.update { it.copy(templateValues = it.templateValues + (name to value)) }
-    }
-
-    /** Fills the variables in and opens the result in the web editor, where it is checked and created. */
+    /** Opens the template's file in the web editor, where it is checked (and can be changed) before the create. */
     fun useTemplate() {
         val s = _state.value
         val template = s.selectedTemplate ?: return
         val file = s.templateFile ?: return
         if (!editable()) return
-        val text = renderCustomTemplate(file, template.variables, s.templateValues)
-        _state.update { it.copy(method = CreateMethod.Editor, text = text, sourceName = template.title) }
+        _state.update { it.copy(method = CreateMethod.Editor, text = file, sourceName = template.title, fromTemplate = true) }
         validate()
     }
 
@@ -464,9 +483,8 @@ class CreateStackViewModel(
         val s = _state.value
         if (!s.canCreate) return
         val name = s.name
-        val op = if (s.method == CreateMethod.Repository) StackOp.Create.Repository(s.git.url.trim(), gitRequest(s)) else StackOp.Create.Text(s.text, s.effectiveEnv)
-        // The password goes into the request only; the form forgets it.
-        _state.update { it.copy(checking = true, failure = null, failedStackId = null, git = it.git.copy(password = "")) }
+        val op = if (s.method == CreateMethod.Repository) StackOp.Create.Repository(s.git.url.trim(), gitRequest(s)) else StackOp.Create.Text(s.text, s.effectiveEnv, fromTemplate = s.fromTemplate)
+        _state.update { it.copy(checking = true, failure = null, failedStackId = null) }
         viewModelScope.launch {
             try {
                 val names = loadNames()
@@ -480,6 +498,8 @@ class CreateStackViewModel(
                         it.copy(error = sessions.refusal(serverId, endpointId) ?: STACK_OPERATION_IN_PROGRESS_MESSAGE)
                     }
                     else -> {
+                        // The password went into the request only; once it is on its way the form forgets it.
+                        _state.update { it.copy(git = it.git.copy(password = "")) }
                         attached?.takeIf { it != key }?.let(sessions::clear)
                         attach(key)
                     }

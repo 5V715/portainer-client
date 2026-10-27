@@ -76,9 +76,9 @@ sealed interface StackOp {
      */
     sealed interface Create : StackOp {
         /** A web-editor stack: typed, uploaded or from a custom template. */
-        data class Text(val file: String, val env: List<EnvVar>) : Create {
+        data class Text(val file: String, val env: List<EnvVar>, val fromTemplate: Boolean = false) : Create {
             // Env values can be secrets: never in logs or crash reports.
-            override fun toString(): String = "Create.Text(lines=${file.lines().size}, env=${env.size})"
+            override fun toString(): String = "Create.Text(lines=${file.lines().size}, env=${env.size}, fromTemplate=$fromTemplate)"
         }
 
         /** A git stack from [url]; [request]'s prune and source don't apply. */
@@ -256,7 +256,7 @@ class StackSessions(
             }
             is StackOp.Create -> {
                 val created = when (op) {
-                    is StackOp.Create.Text -> client.createStackFromText(endpointId, key.stackName, op.file, op.env)
+                    is StackOp.Create.Text -> client.createStackFromText(endpointId, key.stackName, op.file, op.env, fromAppTemplate = op.fromTemplate)
                     is StackOp.Create.Repository -> client.createStackFromRepository(endpointId, key.stackName, op.url, op.request)
                 }
                 val newId = created.id?.takeIf { it != STACK_NOT_CREATED }

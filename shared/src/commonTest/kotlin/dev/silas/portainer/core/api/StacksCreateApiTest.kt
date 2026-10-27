@@ -158,7 +158,8 @@ class StacksCreateApiTest {
             {"Id":2,"Title":"Swarm","Description":"","Type":1,"EdgeTemplate":false},
             {"Id":3,"Title":"Edge","Description":"","Type":2,"EdgeTemplate":true},
             {"Id":4,"Title":"K8s","Description":"","Type":3},
-            {"Id":5,"Title":"Plain","Description":"","Type":2,"Variables":null}
+            {"Id":5,"Title":"Plain","Description":"","Type":2,"Variables":null},
+            {"Id":6,"Title":"FromGit","Description":"","Type":2,"GitConfig":{"URL":"https://git.example/t.git"}}
         ]"""
         val c = client { if (it.url.encodedPath == "/api/custom_templates") HttpStatusCode.OK to list else null }
         val templates = c.customTemplates()
@@ -166,6 +167,7 @@ class StacksCreateApiTest {
             listOf(
                 CustomTemplate(1, "Web", "nginx", listOf(TemplateVariable("PORT", "Port", "8080"))),
                 CustomTemplate(5, "Plain", "", emptyList()),
+                CustomTemplate(6, "FromGit", "", emptyList(), gitBacked = true),
             ),
             templates,
         )
@@ -179,5 +181,20 @@ class StacksCreateApiTest {
     fun customTemplateFileReadsFileContent() = runTest {
         val c = client { if (it.url.encodedPath == "/api/custom_templates/1/file") HttpStatusCode.OK to """{"FileContent":"services: {}\n"}""" else null }
         assertEquals("services: {}\n", c.customTemplateFile(1))
+    }
+
+    @Test
+    fun gitBackedTemplateFileIsFetchedFromTheRepositoryAsCeDoes() = runTest {
+        val c = client { if (it.url.encodedPath == "/api/custom_templates/6/git_fetch") HttpStatusCode.OK to """{"FileContent":"services: {}\n"}""" else null }
+        assertEquals("services: {}\n", c.customTemplateFile(6, git = true))
+        val r = requests.value.single()
+        assertEquals(HttpMethod.Put, r.method)
+        assertEquals("/api/custom_templates/6/git_fetch", r.url.encodedPath)
+    }
+
+    @Test
+    fun templateCreatesSendFromAppTemplate() = runTest {
+        client().createStackFromText(3, "web", "services: {}\n", emptyList(), fromAppTemplate = true)
+        assertEquals("true", sent(HttpMethod.Post, "/api/stacks/create/standalone/string").second["FromAppTemplate"].toString())
     }
 }

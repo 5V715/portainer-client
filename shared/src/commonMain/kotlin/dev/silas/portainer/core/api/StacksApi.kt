@@ -429,15 +429,21 @@ private const val DEFAULT_COMPOSE_FILE = "docker-compose.yml"
 
 /**
  * Creates a web-editor stack named [name] from [file] and [env] (`POST /api/stacks/create/standalone/string`). Uploaded
- * files and custom templates are created this way too. From CE 2.44 the deploy continues after the response: the
- * returned stack may still be deploying.
+ * files and custom templates are created this way too; [fromAppTemplate] is true for a custom template, as CE's UI
+ * sends it. From CE 2.44 the deploy continues after the response: the returned stack may still be deploying.
  */
-suspend fun PortainerClient.createStackFromText(endpointId: Int, name: String, file: String, env: List<EnvVar>): Stack {
+suspend fun PortainerClient.createStackFromText(
+    endpointId: Int,
+    name: String,
+    file: String,
+    env: List<EnvVar>,
+    fromAppTemplate: Boolean = false,
+): Stack {
     val body = buildJsonObject {
         put("Name", name)
         put("StackFileContent", file)
         put("Env", envJson(env))
-        put("FromAppTemplate", false)
+        put("FromAppTemplate", fromAppTemplate)
     }
     return createStack("/api/stacks/create/standalone/string", endpointId, body)
 }
@@ -508,8 +514,17 @@ suspend fun PortainerClient.migrateStack(id: Int, fromEndpointId: Int, toEndpoin
 /** A custom template's variable: `{{ name }}` in its file. */
 data class TemplateVariable(val name: String, val label: String, val defaultValue: String)
 
-/** A Docker standalone compose custom template. */
-data class CustomTemplate(val id: Int, val title: String, val description: String, val variables: List<TemplateVariable>)
+/**
+ * A Docker standalone compose custom template. [gitBacked]: created from a git repository, so its current file is
+ * fetched from the repository ([customTemplateFile] with `git = true`).
+ */
+data class CustomTemplate(
+    val id: Int,
+    val title: String,
+    val description: String,
+    val variables: List<TemplateVariable>,
+    val gitBacked: Boolean = false,
+)
 
 @Serializable
 private data class TemplateVariableDto(
@@ -526,6 +541,7 @@ private data class CustomTemplateDto(
     @SerialName("Type") val type: Int = 0,
     @SerialName("EdgeTemplate") val edgeTemplate: Boolean = false,
     @SerialName("Variables") val variables: List<TemplateVariableDto>? = null,
+    @SerialName("GitConfig") val gitConfig: JsonObject? = null,
 )
 
 @Serializable
@@ -541,9 +557,22 @@ suspend fun PortainerClient.customTemplates(): List<CustomTemplate> {
     return decodeBody(response) { response.body<List<CustomTemplateDto>>() }
         .filter { it.type == COMPOSE_STACK_TYPE && !it.edgeTemplate }
         .map { t ->
-            CustomTemplate(t.id, t.title, t.description, t.variables.orEmpty().map { TemplateVariable(it.name, it.label, it.defaultValue) })
+            CustomTemplate(
+                t.id,
+                t.title,
+                t.description,
+                t.variables.orEmpty().map { TemplateVariable(it.name, it.label, it.defaultValue) },
+                gitBacked = t.gitConfig != null,
+            )
         }
 }
 
-/** The template's compose file, variables not yet filled in. */
-suspend fun PortainerClient.customTemplateFile(id: Int): String = getJson<CustomTemplateFileDto>("/api/custom_templates/$id/file").content
+/**
+ * The template's compose file, variables not yet filled in. A [git]-backed template's file is fetched from its
+ * repository now (`PUT /api/custom_templates/{id}/git_fetch`), as CE's UI does; otherwise the stored file is read.
+ */
+suspend fun PortainerClient.customTemplateFile(id: Int, git: Boolean = false): String {
+    if (!git) return getJson<CustomTemplateFileDto>("/api/custom_templates/$id/file").content
+    val response = execute("/api/custom_templates/$id/git_fetch") { method = HttpMethod.Put }
+    return decodeBody(response) { response.body<CustomTemplateFileDto>() }.content
+}

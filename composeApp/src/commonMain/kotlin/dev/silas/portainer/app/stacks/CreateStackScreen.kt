@@ -104,7 +104,7 @@ fun CreateStackScreen(
             title = { Text("Couldn't create the stack") },
             text = {
                 val more = if (failedId != null) {
-                    "\n\nPortainer created the stack but its deployment failed."
+                    "\n\nThe stack was created; its deployment didn't finish."
                 } else {
                     "\n\nYour form is kept" + (if (state.git.authEnabled) "; type the password again." else ".")
                 }
@@ -318,10 +318,15 @@ private fun TemplateVariables(state: CreateStackState, template: CustomTemplate,
     ) {
         Title(template.title)
         if (template.description.isNotEmpty()) Text(template.description)
-        if (template.variables.isEmpty()) Hint("This template has no variables.")
-        template.variables.forEach { v ->
-            TextInput(v.label.ifEmpty { v.name }, state.templateValues[v.name].orEmpty(), !state.busy, supporting = v.name) {
-                viewModel.setTemplateValue(v.name, it)
+        if (template.gitBacked) Hint("The file is read from the template's git repository now.")
+        if (template.variables.isNotEmpty()) {
+            // CE has no variable inputs (Business Edition only): the defaults are filled in; edit the file to change them.
+            Hint("Variables are filled in with their defaults; change them in the editor.")
+            template.variables.forEach { v ->
+                Text(
+                    "${v.label.ifEmpty { v.name }}: ${v.defaultValue.ifEmpty { "(no default — stays {{ ${v.name} }})" }}",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -344,6 +349,7 @@ private fun RepositoryFields(state: CreateStackState, viewModel: CreateStackView
     ) {
         GitErrors(state)
         TextInput("Repository URL", form.url, enabled, supporting = "e.g. https://github.com/org/repo") { viewModel.editGit { copy(url = it) } }
+        Hint("If another stack already uses this repository, Portainer may attach this one to the same git source (including its polling).")
         // CE has no ref listing (Business Edition only): a text field.
         TextInput("Reference", form.referenceName, enabled, supporting = "e.g. refs/heads/main; empty = the default branch") {
             viewModel.editGit { copy(referenceName = it) }

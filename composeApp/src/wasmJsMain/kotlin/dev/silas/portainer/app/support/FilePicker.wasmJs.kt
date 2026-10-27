@@ -34,7 +34,7 @@ private fun openFileInput(
     """{
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.yml,.yaml,.txt,.env,text/*,application/yaml,application/x-yaml';
+    // No accept filter (as on Android): compose files may have any or no extension; the text check decides.
     input.style.display = 'none';
     input.addEventListener('change', () => {
         const file = input.files && input.files[0];

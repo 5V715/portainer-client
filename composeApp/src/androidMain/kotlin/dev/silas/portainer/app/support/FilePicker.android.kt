@@ -14,7 +14,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** The system document picker (Storage Access Framework); the file is read off the main thread. */
+/**
+ * The system document picker (Storage Access Framework); the file is read off the main thread.
+ *
+ * Limitation: if Android kills the app process while the picker is open, the activity-result registry delivers the
+ * chosen file to the recreated screen, but the create form's view model is not saved state, so what was typed before
+ * opening the picker (name, env) is lost; the file itself still loads.
+ */
 @Composable
 actual fun rememberFilePicker(onPicked: (PickedFile) -> Unit): () -> Unit {
     val context = LocalContext.current

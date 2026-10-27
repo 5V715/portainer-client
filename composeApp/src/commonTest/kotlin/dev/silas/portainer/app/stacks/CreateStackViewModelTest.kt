@@ -56,6 +56,7 @@ class CreateStackViewModelTest {
     private val statuses = MutableStateFlow(listOf(3, 1))
     @Volatile private var statusMessage = ""
     @Volatile private var createStatus = HttpStatusCode.OK
+    @Volatile private var createdAnyway = false
     @Volatile private var createGate: CompletableDeferred<Unit>? = null
     /** Holds a stop of stack 1 (another stack operation on the endpoint). */
     private val stopGate = CompletableDeferred<Unit>()
@@ -81,7 +82,11 @@ class CreateStackViewModelTest {
             requestLog.update { it + "${req.method.value} $path" }
             when {
                 path == "/api/status" -> respond("""{"Version":"$version"}""", HttpStatusCode.OK, json)
-                path == "/api/stacks" -> respond("""[{"Id":1,"Name":"shop","Type":2,"EndpointId":1,"Status":1}]""", HttpStatusCode.OK, json)
+                path == "/api/stacks" -> {
+                    // After a create that "failed" on the wire, Portainer may still have made the stack.
+                    val made = if (createdAnyway && createBodies.value.isNotEmpty()) """,{"Id":12,"Name":"web","Type":2,"EndpointId":1,"Status":4}""" else ""
+                    respond("""[{"Id":1,"Name":"shop","Type":2,"EndpointId":1,"Status":1}$made]""", HttpStatusCode.OK, json)
+                }
                 path.endsWith("/containers/json") -> respond(
                     """[{"Id":"c1","Names":["/legacy-db-1"],"Image":"postgres","State":"running","Status":"Up","Labels":{"com.docker.compose.project":"legacy"}}]""",
                     HttpStatusCode.OK,
@@ -110,10 +115,13 @@ class CreateStackViewModelTest {
                     """[{"Id":1,"Title":"Web","Description":"nginx","Type":2,"EdgeTemplate":false,
                         "Variables":[{"name":"TAG","label":"Tag","defaultValue":"1.27"},{"name":"PORT","label":"Port","defaultValue":""},
                                      {"name":"UNSET","label":"Unset","defaultValue":""}]},
-                        {"Id":2,"Title":"Swarm","Description":"","Type":1}]""",
+                        {"Id":2,"Title":"Swarm","Description":"","Type":1},
+                        {"Id":3,"Title":"Git","Description":"","Type":2,"GitConfig":{"URL":"https://git.example/t.git"}}]""",
                     HttpStatusCode.OK,
                     json,
                 )
+                path == "/api/custom_templates/3/git_fetch" && req.method == HttpMethod.Put ->
+                    respond("""{"FileContent":${Json.encodeToString(String.serializer(), file)}}""", HttpStatusCode.OK, json)
                 path == "/api/custom_templates/1/file" ->
                     respond("""{"FileContent":${Json.encodeToString(String.serializer(), templateFile)}}""", HttpStatusCode.OK, json)
                 else -> respond("{}", HttpStatusCode.NotFound, json)
@@ -297,18 +305,59 @@ class CreateStackViewModelTest {
         vm.setMethod(CreateMethod.Template)
         settle { !vm.state.value.loadingTemplates }
         val templates = assertNotNull(vm.state.value.templates)
-        assertEquals(listOf(1), templates.map { it.id })
-        vm.selectTemplate(templates.single())
+        assertEquals(listOf(3, 1), templates.map { it.id }, "type 2 only, by title")
+        vm.selectTemplate(templates.single { it.id == 1 })
         settle { vm.state.value.templateFile != null }
-        assertEquals(mapOf("TAG" to "1.27", "PORT" to "", "UNSET" to ""), vm.state.value.templateValues)
-        vm.setTemplateValue("PORT", "8080")
         vm.useTemplate()
         val s = vm.state.value
         assertEquals(CreateMethod.Editor, s.method)
+        // CE has no variable inputs (Business Edition only): each variable's default, else the tag as `{{ NAME }}`.
         assertEquals(
-            "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"8080:80\"\n    # {{ UNSET }} {{ OTHER }}\n",
+            "services:\n  web:\n    image: nginx:1.27\n    ports:\n      - \"{{ PORT }}:80\"\n    # {{ UNSET }} {{ OTHER }}\n",
             s.text,
         )
+        assertTrue(s.fromTemplate)
+        settle { !vm.state.value.validating }
+        vm.setName("web")
+        vm.create()
+        settle { vm.state.value.created != null }
+        assertEquals("true", createBodies.value.single()["FromAppTemplate"].toString())
+    }
+
+    @Test
+    fun gitBackedTemplatesAreFetchedFromTheirRepository() = createTest {
+        val vm = model()
+        vm.setMethod(CreateMethod.Template)
+        settle { !vm.state.value.loadingTemplates }
+        vm.selectTemplate(vm.state.value.templates!!.single { it.id == 3 })
+        settle { vm.state.value.templateFile != null }
+        assertEquals(file, vm.state.value.templateFile)
+        assertTrue("PUT /api/custom_templates/3/git_fetch" in requests)
+    }
+
+    @Test
+    fun aCreateThatFailedWithoutAnIdOffersTheStackIfPortainerMadeItAnyway() = createTest {
+        createStatus = HttpStatusCode.InternalServerError
+        createdAnyway = true
+        val vm = model()
+        typed(vm, "web", file)
+        vm.create()
+        settle { vm.state.value.failedStackId != null }
+        assertEquals(12, vm.state.value.failedStackId)
+    }
+
+    @Test
+    fun aRefusedRepositoryCreateKeepsThePassword() = createTest {
+        val vm = model()
+        vm.setMethod(CreateMethod.Repository)
+        vm.setName("app")
+        vm.editGit { copy(url = "https://git.example/app.git", authEnabled = true, username = "deploy", password = "s3cret-token") }
+        assertTrue(container.stackSessions.start(StackKey("s1", 1, "shop"), 1, StackOp.Stop))
+        vm.create()
+        settle { vm.state.value.error != null }
+        assertEquals("s3cret-token", vm.state.value.git.password)
+        stopGate.complete(Unit)
+        settle { !container.stackSessions.isRunning("s1", 1) }
     }
 
     @Test

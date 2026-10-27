@@ -247,6 +247,9 @@ it). Same in all checked versions.
   rules as above (2.44+: `Interval` ignored for scheduling).
 - From file (multipart `Name`, `Env` JSON, `file`): `POST /api/stacks/create/standalone/file` — not needed (upload
   fills the text create).
+- **No GitOps Source picker at create in v1.2** (ruling): the app never sends `SourceID` on create. If another stack
+  already uses the repository, Portainer may attach the new stack to the same Source (including its polling); the
+  repository form says so. Follow-up: offer choosing an existing Source at create (2.43+).
 - **2.44+: create returns before the deploy finishes** (`BuildAndAsyncDeploy`): poll status as for PUT.
 - **Name rule** (`app/constants.ts` `STACK_NAME_VALIDATION_REGEX = '^[-_a-z0-9]+$'`, `NameField.tsx`): lower-case
   alphanumerics, `-`, `_`; message "This field must consist of lower case alphanumeric characters, '_' or '-'
@@ -257,13 +260,24 @@ it). Same in all checked versions.
 ## Custom templates
 
 `api/http/handler/customtemplates/`. `GET /api/custom_templates?type=2&edge=false` (repeat `type` for several;
-`2` = compose standalone, as CE's create-stack template selector passes `type: [stackType]`). Item keys:
+`2` = compose standalone). CE 2.45's create-stack form (`CustomTemplateSelector.tsx`) passes no filter at all; the app
+asks for `type=2&edge=false` and also filters `Type == 2 && !EdgeTemplate` client-side. Item keys:
 `Id`, `Title`, `Description`, `Note`, `Logo`, `Platform` (1 linux, 2 windows), `Type`, `EdgeTemplate`, `GitConfig`,
-`Variables: [{"name","label","defaultValue","description"}]`.
-`GET /api/custom_templates/{id}/file` → `{"FileContent": "..."}`.
-Variables are substituted client-side with Mustache, no HTML escaping (`app/react/portainer/custom-templates/components/utils.ts`
-`renderTemplate`): `{{ NAME }}` → entered value, else `defaultValue`, else left as `{{ NAME }}`. Deploy = create from
-text with `FromAppTemplate: false` (CE create view).
+`Variables: [{"name","label","defaultValue","description"}]`. CE does not filter templates by the endpoint's
+platform; neither does the app.
+
+- File: `GET /api/custom_templates/{id}/file` → `{"FileContent": "..."}`. For a git-backed template (`GitConfig`
+  non-null) CE's UI instead calls `PUT /api/custom_templates/{id}/git_fetch` (same response; fetches the current file
+  from the repository; `customtemplate_git_fetch.go`, `useCustomTemplateFile.ts` `getCustomTemplateGitFetch`); the app
+  does the same.
+- **Variables are Business Edition only in the UI**: `isTemplateVariablesEnabled = isBE`
+  (`app/react/portainer/custom-templates/components/utils.ts`), so CE shows no variable inputs. CE still renders the
+  file with the defaults (`useTemplateInitialization.ts` → `getVariablesFieldDefaultValues` → `renderTemplate`):
+  Mustache, no HTML escaping, each variable → its `defaultValue`, else left as `{{ NAME }}`. The app does the same
+  (defaults listed read-only; the result opens in the web editor). Mustache would blank tags that aren't template
+  variables; the app leaves them untouched.
+- Deploy = create from text with **`FromAppTemplate: true`** (CE 2.45 `CreateStackForm.tsx`, `method: 'template'`).
+  The web editor and upload send `false`.
 
 ## Migrate / duplicate — `POST /api/stacks/{id}/migrate?endpointId=<source>`
 
