@@ -496,19 +496,27 @@ private suspend fun PortainerClient.createStack(path: String, endpointId: Int, b
 /**
  * Moves a stack to another Docker environment (`POST /api/stacks/{id}/migrate?endpointId=<source>`): Portainer deploys it
  * on [toEndpointId], then removes it from [fromEndpointId], all inside the request. [newName] (blank or null: keep the
- * name) is not normalised by Portainer, so callers validate it first. 409 when the name is used on the target.
+ * name) is not normalised by Portainer, so callers validate it first. 409 when the name is used on the target. CE has no
+ * rollback: a failure after the deploy may leave both environments touched. Returns the stack Portainer answers with
+ * (same id; its endpoint is the target once moved).
  */
-suspend fun PortainerClient.migrateStack(id: Int, fromEndpointId: Int, toEndpointId: Int, newName: String?) {
+suspend fun PortainerClient.migrateStack(id: Int, fromEndpointId: Int, toEndpointId: Int, newName: String?): Stack {
     val body = buildJsonObject {
         put("EndpointID", toEndpointId)
         put("SwarmID", "")
         newName?.trim()?.takeIf { it.isNotEmpty() }?.let { put("Name", it) }
     }
-    stackOperation("/api/stacks/$id/migrate", fromEndpointId) {
+    val response = execute("/api/stacks/$id/migrate") {
+        parameter("endpointId", fromEndpointId)
+        timeout {
+            requestTimeoutMillis = STACK_OPERATION_TIMEOUT_MS
+            socketTimeoutMillis = STACK_OPERATION_TIMEOUT_MS
+        }
         method = HttpMethod.Post
         contentType(ContentType.Application.Json)
         setBody(body)
     }
+    return decodeBody(response) { response.body<StackDto>() }.toModel()
 }
 
 /** A custom template's variable: `{{ name }}` in its file. */

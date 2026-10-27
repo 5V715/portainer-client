@@ -32,6 +32,9 @@ import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 /** The compose file couldn't be read, so whether the stack runs Portainer is unknown. */
 const val PROTECTION_UNKNOWN_MESSAGE = "Couldn't check whether this stack runs Portainer — try again."
 
+/** A web-editor stack's file is what a duplicate copies. */
+const val DUPLICATE_FILE_UNREADABLE_MESSAGE = "The stack's compose file couldn't be read, so it can't be copied."
+
 /** Portainer CE can't act on stacks it didn't create (its own UI offers nothing for them). */
 const val EXTERNAL_STACK_MESSAGE = "Portainer did not create this stack, so it can only be viewed here."
 
@@ -72,7 +75,7 @@ fun transferRefusal(state: StackDetailState, mode: TransferMode): String? {
     if (stack.status == StackStatus.Deploying) return STACK_DEPLOYING_MESSAGE
     return when (mode) {
         TransferMode.Migrate -> stackOpRefusal(state, StackOp.Migrate(targetEndpointId = 0, newName = null))
-        TransferMode.Duplicate -> if (stack.git == null && state.file == null) state.fileError ?: PROTECTION_UNKNOWN_MESSAGE else null
+        TransferMode.Duplicate -> if (stack.git == null && state.file == null) DUPLICATE_FILE_UNREADABLE_MESSAGE else null
     }
 }
 

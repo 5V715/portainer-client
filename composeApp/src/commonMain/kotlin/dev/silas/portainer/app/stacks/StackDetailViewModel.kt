@@ -103,6 +103,16 @@ class StackDetailViewModel(
         }
     }
 
+    init {
+        // A duplicate started from an earlier screen: re-attach to it, running or finished meanwhile.
+        stackId?.let { id ->
+            sessions.copyOf(serverId, id)?.let { copyKey ->
+                sessions.progress(copyKey).value?.let { p -> if (p.running) _state.update { it.copy(running = p.op) } }
+                duplicateJob = viewModelScope.launch { awaitDuplicate(copyKey, targetName = null) }
+            }
+        }
+    }
+
     private val StackOp.shownElsewhere: Boolean
         get() = this is StackOp.Update || this is StackOp.GitSettings || this is StackOp.GitRedeploy || this == StackOp.Detach
 
@@ -120,7 +130,11 @@ class StackDetailViewModel(
                 refresh()
             }
             // The stack is gone from this environment once Portainer has it on the target.
-            p.op is StackOp.Migrate && error == null -> _state.update { it.copy(running = null, transfer = null, deleted = true) }
+            p.op is StackOp.Migrate && error == null -> {
+                val moved = p.op.newName?.takeIf { it.isNotBlank() } ?: key.stackName
+                sessions.announce(serverId, endpointId, "Moved $moved to ${p.op.targetName ?: "environment ${p.op.targetEndpointId}"}")
+                _state.update { it.copy(running = null, transfer = null, deleted = true) }
+            }
             // A failed migrate shows in its sheet, which keeps the form; without the sheet (left and came back) a dialog.
             p.op is StackOp.Migrate -> {
                 val sheetOpen = _state.value.transfer != null
@@ -234,15 +248,18 @@ class StackDetailViewModel(
             passwordNeeded = mode == TransferMode.Duplicate && git != null && git.authenticated && !usesSource,
             usesGitSource = usesSource && git?.authenticated == true,
             autoUpdateDropped = mode == TransferMode.Duplicate && stack.autoUpdate != null,
-            protectedWarning = mode == TransferMode.Duplicate && s.protected,
+            protectedWarning = mode == TransferMode.Duplicate && (s.protected || s.protectionUnknown),
+            pruneNotCopied = mode == TransferMode.Duplicate && stack.prune,
         )
         _state.update { it.copy(transfer = form) }
         transferJob = viewModelScope.launch {
             try {
-                val all = container.client(serverId).endpoints().filter { it.type.supported && it.online }
+                val everything = container.client(serverId).endpoints()
+                val all = everything.filter { it.dockerStandalone && it.online }
+                val sourceName = everything.firstOrNull { it.id == endpointId }?.name
                 val targets = if (mode == TransferMode.Migrate) all.filter { it.id != endpointId } else all
                 val first = (targets.firstOrNull { it.id == endpointId } ?: targets.firstOrNull())?.id
-                _state.update { it.copy(transfer = it.transfer?.copy(targets = targets, loadingTargets = false, targetId = first)) }
+                _state.update { it.copy(transfer = it.transfer?.copy(targets = targets, sourceEndpointName = sourceName, loadingTargets = false, targetId = first)) }
                 if (first != null) loadTargetNames(first)
             } catch (e: CancellationException) {
                 throw e
@@ -315,13 +332,12 @@ class StackDetailViewModel(
                     refusal != null -> transferFailed(refusal)
                     id == null -> transferFailed("The stack couldn't be loaded — try again.")
                     form.mode == TransferMode.Migrate ->
-                        if (!sessions.start(key, id, StackOp.Migrate(targetId, form.newName))) transferFailed(STACK_OPERATION_IN_PROGRESS_MESSAGE)
+                        if (!sessions.start(key, id, StackOp.Migrate(targetId, form.newName, targetName(form, targetId), form.sourceEndpointName))) transferFailed(STACK_OPERATION_IN_PROGRESS_MESSAGE)
                     else -> {
                         val copyKey = StackKey(serverId, targetId, form.effectiveName)
                         if (sessions.create(copyKey, duplicateOp(s, password))) {
-                            val targetName = form.targets.firstOrNull { it.id == targetId }?.name.orEmpty()
                             duplicateJob?.cancel()
-                            duplicateJob = viewModelScope.launch { awaitDuplicate(copyKey, targetName) }
+                            duplicateJob = viewModelScope.launch { awaitDuplicate(copyKey, targetName(form, targetId)) }
                         } else {
                             transferFailed(STACK_OPERATION_IN_PROGRESS_MESSAGE)
                         }
@@ -337,20 +353,33 @@ class StackDetailViewModel(
         }
     }
 
+    private fun targetName(form: TransferForm, targetId: Int): String? = form.targets.firstOrNull { it.id == targetId }?.name
+
     private fun transferFailed(message: String) =
         _state.update { it.copy(transfer = it.transfer?.copy(running = false, error = message)) }
 
-    /** The create of the copy: its sheet closes when Portainer has the copy running, else shows why not. */
-    private suspend fun awaitDuplicate(copyKey: StackKey, targetName: String) {
+    /**
+     * The create of the copy: its sheet closes when Portainer has the copy running, else shows why not. [targetName] is
+     * null when the screen was reopened (a result nobody has looked at yet); a failure then shows as a dialog.
+     */
+    private suspend fun awaitDuplicate(copyKey: StackKey, targetName: String?) {
         val p = sessions.progress(copyKey).first { it != null && !it.running } ?: return
         sessions.clear(copyKey)
         val error = p.error
+        val where = targetName ?: "the target environment"
         if (error == null) {
-            _state.update { it.copy(transfer = null, notice = "Created ${copyKey.stackName} on $targetName") }
+            _state.update { it.copy(running = it.running.takeUnless { r -> r is StackOp.Create }, transfer = null, notice = "Created ${copyKey.stackName} on $where") }
         } else {
             // A copy whose deploy failed exists on the target: the name is taken there now.
-            val hint = if (p.stackId != STACK_NOT_CREATED) " The copy exists on $targetName; fix or delete it there, or pick another name." else ""
-            transferFailed(error + hint)
+            val hint = if (p.stackId != STACK_NOT_CREATED) " The copy exists on $where; fix or delete it there, or pick another name." else ""
+            val message = error + hint
+            _state.update {
+                it.copy(
+                    running = it.running.takeUnless { r -> r is StackOp.Create },
+                    transfer = it.transfer?.copy(running = false, error = message),
+                    failure = if (it.transfer == null) p.op to message else null,
+                )
+            }
         }
     }
 
@@ -361,7 +390,7 @@ class StackDetailViewModel(
      */
     private fun duplicateOp(s: StackDetailState, password: String): StackOp.Create {
         val stack = checkNotNull(s.stack)
-        val git = stack.git ?: return StackOp.Create.Text(checkNotNull(s.file), stack.env)
+        val git = stack.git ?: return StackOp.Create.Text(checkNotNull(s.file), stack.env, copiedFrom = stack.id)
         val sourceId = git.sourceId?.takeIf { s.features.savedGitCredentials }
         val auth = if (sourceId == null && git.authenticated) GitAuth(git.username.orEmpty(), password) else null
         return StackOp.Create.Repository(
@@ -377,6 +406,7 @@ class StackDetailViewModel(
                 prune = false,
                 sourceId = sourceId,
             ),
+            copiedFrom = stack.id,
         )
     }
 

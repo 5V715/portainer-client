@@ -61,6 +61,13 @@ fun StacksScreen(
         }
     }
 
+    LaunchedEffect(state.notice) {
+        state.notice?.let {
+            snackbar.showSnackbar(it)
+            viewModel.clearNotice()
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(

@@ -18,4 +18,8 @@ enum class EndpointType(val code: Int) {
     }
 }
 
-data class Endpoint(val id: Int, val name: String, val type: EndpointType, val online: Boolean)
+/** [swarm]: the environment's Docker snapshot says it runs in Swarm mode (stacks there are Swarm stacks, out of scope). */
+data class Endpoint(val id: Int, val name: String, val type: EndpointType, val online: Boolean, val swarm: Boolean = false) {
+    /** An environment this app can run compose stacks on. */
+    val dockerStandalone: Boolean get() = type.supported && !swarm
+}

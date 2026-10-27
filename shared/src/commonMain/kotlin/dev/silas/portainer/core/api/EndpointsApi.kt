@@ -16,12 +16,16 @@ private data class EndpointDto(
     @SerialName("Name") val name: String,
     @SerialName("Type") val type: Int,
     @SerialName("Status") val status: Int = 0,
+    @SerialName("Snapshots") val snapshots: List<SnapshotDto>? = null,
 )
+
+@Serializable
+private data class SnapshotDto(@SerialName("Swarm") val swarm: Boolean = false)
 
 suspend fun PortainerClient.status(): PortainerStatus =
     PortainerStatus(getJson<StatusDto>("/api/status").version)
 
 suspend fun PortainerClient.endpoints(): List<Endpoint> =
     getJson<List<EndpointDto>>("/api/endpoints").map {
-        Endpoint(it.id, it.name, EndpointType.fromCode(it.type), online = it.status == 1)
+        Endpoint(it.id, it.name, EndpointType.fromCode(it.type), online = it.status == 1, swarm = it.snapshots.orEmpty().any { s -> s.swarm })
     }

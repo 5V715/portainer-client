@@ -52,6 +52,8 @@ data class StacksState(
     val query: String = "",
     val loading: Boolean = true,
     val error: String? = null,
+    /** A one-time message, e.g. a stack that was moved away from this environment. */
+    val notice: String? = null,
 ) {
     val visible: List<Stack>
         get() {
@@ -93,10 +95,13 @@ class StacksViewModel(
 
     /** Back from the detail screen: reload (the first resume is skipped, init already loads). */
     fun onScreenResumed() {
+        container.stackSessions.takeAnnouncement(serverId, endpointId)?.let { message -> _state.update { it.copy(notice = message) } }
         if (resumedBefore) refresh() else resumedBefore = true
     }
 
     fun setQuery(query: String) = _state.update { it.copy(query = query) }
 
     fun clearError() = _state.update { it.copy(error = null) }
+
+    fun clearNotice() = _state.update { it.copy(notice = null) }
 }

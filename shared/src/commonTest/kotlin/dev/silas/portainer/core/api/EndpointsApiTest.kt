@@ -162,4 +162,18 @@ class EndpointsApiTest {
     fun dockerPathBuildsProxyPath() {
         assertEquals("/api/endpoints/2/docker/containers/json", dockerPath(2, "containers/json"))
     }
+
+    @Test
+    fun swarmModeEnvironmentsAreMarkedFromTheirSnapshots() = runTest {
+        val list = client(
+            body = """[
+                {"Id":1,"Name":"a","Type":2,"Status":1,"Snapshots":[{"Swarm":true}]},
+                {"Id":2,"Name":"b","Type":2,"Status":1,"Snapshots":[{"Swarm":false}]},
+                {"Id":3,"Name":"c","Type":2,"Status":1,"Snapshots":null},
+                {"Id":4,"Name":"d","Type":2,"Status":1}
+            ]""",
+        ).endpoints()
+        assertEquals(listOf(true, false, false, false), list.map { it.swarm })
+        assertEquals(listOf(false, true, true, true), list.map { it.dockerStandalone })
+    }
 }

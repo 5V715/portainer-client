@@ -348,6 +348,16 @@ class StacksApiTest {
     private fun migrateClient(status: HttpStatusCode = HttpStatusCode.OK, body: String = "{}") = client(status, body)
 
     @Test
+    fun migrateReturnsTheStackPortainerAnswersWith() = runTest {
+        val moved = migrateClient(body = """{"Id":5,"Name":"web-2","Type":2,"EndpointId":8,"Status":4}""")
+            .migrateStack(5, fromEndpointId = 3, toEndpointId = 8, newName = "web-2")
+        assertEquals(5, moved.id)
+        assertEquals("web-2", moved.name)
+        assertEquals(8, moved.endpointId)
+        assertEquals(StackStatus.Error, moved.status)
+    }
+
+    @Test
     fun migrateSendsTheTargetAndNewNameFromTheSourceEndpoint() = runTest {
         migrateClient().migrateStack(5, fromEndpointId = 3, toEndpointId = 8, newName = "web-2")
         val r = requests.value.single()

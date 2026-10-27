@@ -65,24 +65,38 @@ sealed interface StackOp {
     data object Detach : StackOp
 
     /**
-     * Moves the stack to the Docker environment [targetEndpointId] (under [newName] when not null) and takes it down on
-     * the source. Done only once the target lists it, settled and not failed.
+     * Moves the stack to the Docker environment [targetEndpointId] (under [newName] when not null). CE answers only after
+     * it deployed on the target and removed the stack from the source, so a 200 naming the target is the result.
+     * [targetName] and [sourceName] are for messages only.
      */
-    data class Migrate(val targetEndpointId: Int, val newName: String?) : StackOp
+    data class Migrate(
+        val targetEndpointId: Int,
+        val newName: String?,
+        val targetName: String? = null,
+        val sourceName: String? = null,
+    ) : StackOp
 
     /**
      * Creates the stack named by its [StackKey] (its id is known once Portainer answers) and waits for its deploy.
      * The values stay here so a failed create can give the form back.
      */
     sealed interface Create : StackOp {
+        /** The id of the stack this create copies (a duplicate), so its screen can re-attach; null for a new stack. */
+        val copiedFrom: Int?
+
         /** A web-editor stack: typed, uploaded or from a custom template. */
-        data class Text(val file: String, val env: List<EnvVar>, val fromTemplate: Boolean = false) : Create {
+        data class Text(
+            val file: String,
+            val env: List<EnvVar>,
+            val fromTemplate: Boolean = false,
+            override val copiedFrom: Int? = null,
+        ) : Create {
             // Env values can be secrets: never in logs or crash reports.
             override fun toString(): String = "Create.Text(lines=${file.lines().size}, env=${env.size}, fromTemplate=$fromTemplate)"
         }
 
         /** A git stack from [url]; [request]'s prune and source don't apply. */
-        data class Repository(val url: String, val request: GitSettingsRequest) : Create
+        data class Repository(val url: String, val request: GitSettingsRequest, override val copiedFrom: Int? = null) : Create
     }
 }
 
@@ -148,7 +162,8 @@ class StackSessions(
         is StackOp.Create -> create(key, op)
         // A migrate also deploys on the target: it must be free of other work too.
         is StackOp.Migrate ->
-            refusal(key.serverId, op.targetEndpointId) == null && !isRunning(key.serverId, op.targetEndpointId) && launch(key, stackId, op)
+            refusal(key.serverId, op.targetEndpointId) == null && !isRunning(key.serverId, op.targetEndpointId) &&
+                !isRunning(key.serverId, key.endpointId) && launch(key, stackId, op)
         else -> launch(key, stackId, op)
     }
 
@@ -205,10 +220,27 @@ class StackSessions(
     /** Why no stack operation may start on [serverId]'s endpoint [endpointId] now, or null. */
     fun refusal(serverId: String, endpointId: Int): String? = otherWork(serverId, endpointId)
 
-    /** True while a stack operation on [serverId]'s endpoint [endpointId] has not finished yet. */
+    /** True while a stack operation on [serverId]'s endpoint [endpointId] has not finished yet (a migrate also occupies its target). */
     fun isRunning(serverId: String, endpointId: Int): Boolean = sessions.any { (key, state) ->
-        key.serverId == serverId && key.endpointId == endpointId && state.value?.running == true
+        val progress = state.value
+        key.serverId == serverId && progress?.running == true &&
+            (key.endpointId == endpointId || (progress.op as? StackOp.Migrate)?.targetEndpointId == endpointId)
     }
+
+    /** The create on [serverId] that copies the stack [stackId] (running, or finished and not yet cleared), if any. */
+    fun copyOf(serverId: String, stackId: Int): StackKey? = sessions.entries.firstOrNull { (key, state) ->
+        key.serverId == serverId && (state.value?.op as? StackOp.Create)?.copiedFrom == stackId
+    }?.key
+
+    private val announcements = mutableMapOf<Pair<String, Int>, String>()
+
+    /** Leaves a one-time message for the stack list of [serverId]'s endpoint [endpointId] (e.g. a stack that moved away). */
+    fun announce(serverId: String, endpointId: Int, message: String) {
+        announcements[serverId to endpointId] = message
+    }
+
+    /** The message left for that stack list, once. */
+    fun takeAnnouncement(serverId: String, endpointId: Int): String? = announcements.remove(serverId to endpointId)
 
     /** Forgets a finished result (never a running one). */
     fun clear(key: StackKey) {
@@ -250,10 +282,7 @@ class StackSessions(
                 val stack = awaitStatus(client, id, StackStatus.Active, "Portainer reports the stack as stopped after detaching it.")
                 if (stack?.git != null) throw IllegalStateException("Portainer still reports the stack as deployed from git.")
             }
-            is StackOp.Migrate -> {
-                client.migrateStack(id, endpointId, op.targetEndpointId, op.newName)
-                awaitMigrated(client, op.targetEndpointId, op.newName?.trim()?.takeIf { it.isNotEmpty() } ?: key.stackName)
-            }
+            is StackOp.Migrate -> migrate(client, key, id, op)
             is StackOp.Create -> {
                 val created = when (op) {
                     is StackOp.Create.Text -> client.createStackFromText(endpointId, key.stackName, op.file, op.env, fromAppTemplate = op.fromTemplate)
@@ -305,37 +334,72 @@ class StackSessions(
     }
 
     /**
-     * Reads [endpointId]'s stacks until the Portainer-managed one named [name] is there and no longer deploying.
-     * Missing for [MIGRATE_LISTING_GRACE_MS] (or the poll timeout, if shorter) fails: a migrate that can't be seen
-     * on the target is not reported as done.
+     * CE 2.45 migrates synchronously with no rollback: it deploys on the target, removes the stack's resources from the
+     * source, then moves the record and answers with the stack (same id). So a 200 naming the target is the result. A
+     * request refused up front (400/401/403/404/409) changed nothing; any other failure may have stopped half way, so
+     * the stack and the target are read to say what state it is in.
      */
-    private suspend fun awaitMigrated(client: PortainerClient, endpointId: Int, name: String) {
-        val started = TimeSource.Monotonic.markNow()
-        val grace = minOf(pollTimeoutMs, MIGRATE_LISTING_GRACE_MS).milliseconds
-        while (true) {
-            val listed = try {
-                client.stacks(endpointId)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                throw IllegalStateException("Couldn't check the result: ${safeMessage(e)}")
-            }
-            val stack = listed.firstOrNull { it.control == StackControl.Full && it.name == name }
-            when {
-                stack == null -> if (started.elapsedNow() >= grace) {
-                    throw IllegalStateException("Portainer doesn't list the stack on the target environment after migrating it.")
-                }
-                stack.status == StackStatus.Deploying -> if (started.elapsedNow() >= pollTimeoutMs.milliseconds) {
-                    throw IllegalStateException(STACK_STILL_WORKING_MESSAGE)
-                }
-                stack.status == StackStatus.Error ->
-                    throw IllegalStateException(stack.statusMessage ?: "Portainer reports that the deployment failed on the target environment.")
-                else -> return
-            }
-            delay(pollIntervalMs)
+    private suspend fun migrate(client: PortainerClient, key: StackKey, id: Int, op: StackOp.Migrate) {
+        val name = op.newName?.trim()?.takeIf { it.isNotEmpty() } ?: key.stackName
+        val moved = try {
+            client.migrateStack(id, key.endpointId, op.targetEndpointId, op.newName)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: PortainerException.Unauthorized) {
+            throw e
+        } catch (e: PortainerException.NotFound) {
+            throw e
+        } catch (e: PortainerException.Api) {
+            if (e.status in REFUSED_BEFORE_DEPLOY) throw e
+            recoverMigrate(client, key, id, op, name, e)
+            return
+        } catch (e: Exception) {
+            recoverMigrate(client, key, id, op, name, e)
+            return
+        }
+        if (moved.endpointId == op.targetEndpointId && moved.name == name) return
+        // An answer that doesn't show the move: read the stack itself before saying anything.
+        if (readStack(client, id)?.let { it.endpointId == op.targetEndpointId && it.name == name } == true) return
+        throw IllegalStateException("Portainer answered, but the stack is not on ${op.target()} under the name $name. Check both environments.")
+    }
+
+    private fun StackOp.Migrate.target() = targetName ?: "environment $targetEndpointId"
+
+    private suspend fun readStack(client: PortainerClient, id: Int): Stack? = try {
+        client.stack(id)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
+    /** The request failed after it may have started: return when the stack turns out to be on the target, else throw what is known. */
+    private suspend fun recoverMigrate(client: PortainerClient, key: StackKey, id: Int, op: StackOp.Migrate, name: String, cause: Exception) {
+        val target = op.target()
+        val source = op.sourceName ?: "environment ${key.endpointId}"
+        val unknown = IllegalStateException(
+            "${safeMessage(cause)} The outcome is unknown: check both $source and $target before retrying.",
+        )
+        val now = readStack(client, id)
+        if (now != null && now.endpointId == op.targetEndpointId && now.name == name) return
+        val external = try {
+            client.stacks(op.targetEndpointId).any { it.control == StackControl.Limited && it.name == name }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw unknown
+        }
+        when {
+            external -> throw IllegalStateException(
+                "The stack is now running on $target but isn't managed by Portainer there, and its containers on $source may " +
+                    "be partly removed. Check both environments before retrying.",
+            )
+            // Connection lost or the stack unreadable: the server may still be working, so nothing can be ruled out.
+            cause is PortainerException.Unreachable || now == null -> throw unknown
+            else -> throw IllegalStateException("${safeMessage(cause)} $target may have leftover containers named $name.")
         }
     }
 }
 
-/** How long a migrated stack may be missing from the target's list before the migrate counts as lost. */
-private const val MIGRATE_LISTING_GRACE_MS = 30_000L
+/** Migrate answers that mean Portainer refused before it deployed anything. */
+private val REFUSED_BEFORE_DEPLOY = setOf(400, 401, 403, 404, 409)

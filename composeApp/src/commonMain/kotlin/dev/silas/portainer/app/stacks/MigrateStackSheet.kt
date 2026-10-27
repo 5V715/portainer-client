@@ -43,6 +43,7 @@ data class TransferForm(
     val mode: TransferMode,
     val sourceName: String,
     val sourceEndpointId: Int,
+    val sourceEndpointName: String? = null,
     val targets: List<Endpoint> = emptyList(),
     val loadingTargets: Boolean = true,
     val targetId: Int? = null,
@@ -56,8 +57,10 @@ data class TransferForm(
     val usesGitSource: Boolean = false,
     /** The source has automatic updates: they are not copied. */
     val autoUpdateDropped: Boolean = false,
-    /** The compose file runs Portainer: the copy's own lifecycle actions will be blocked. */
+    /** The compose file runs Portainer, or whether it does is unknown: the copy's own lifecycle actions may be blocked. */
     val protectedWarning: Boolean = false,
+    /** The source has "prune services" on: CE's create requests have no such field, so the copy starts with it off. */
+    val pruneNotCopied: Boolean = false,
     val running: Boolean = false,
     val error: String? = null,
 ) {
@@ -174,6 +177,9 @@ fun TransferSheet(
             }
             if (!migrate && form.autoUpdateDropped) {
                 Text("Automatic updates are not copied; turn them on for the new stack.", style = MaterialTheme.typography.bodyMedium)
+            }
+            if (!migrate && form.pruneNotCopied) {
+                Text("Prune services is not copied; turn it on for the new stack if you need it.", style = MaterialTheme.typography.bodyMedium)
             }
             if (!migrate && form.protectedWarning) {
                 Text(PROTECTED_IMAGE_CREATE_WARNING, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
