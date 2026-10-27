@@ -19,21 +19,29 @@ fun tokenizeYaml(text: String): List<Token> {
     val scanner = LineScanner(text, out)
     val n = text.length
     var lineStart = 0
-    // While >= 0 we are inside a block scalar; its content lines are indented more than this.
+    // While >= 0 we are inside a block scalar whose content is indented more than this parent column.
     var blockParentIndent = -1
+    // The block's content indent, taken from its first non-blank line (-1 until that line is seen).
+    var blockContentIndent = -1
     while (true) {
         val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) n else it }
         val contentEnd = if (lineEnd > lineStart && text[lineEnd - 1] == '\r') lineEnd - 1 else lineEnd
         var indentEnd = lineStart
         while (indentEnd < contentEnd && isBlank(text[indentEnd])) indentEnd++
         val indent = indentEnd - lineStart
-        val inBlock = blockParentIndent >= 0 && (indentEnd == contentEnd || indent > blockParentIndent)
+        val blankLine = indentEnd == contentEnd
+        val inBlock = blockParentIndent >= 0 && (
+            blankLine ||
+                if (blockContentIndent < 0) indent > blockParentIndent else indent >= blockContentIndent
+            )
         if (inBlock) {
+            if (!blankLine && blockContentIndent < 0) blockContentIndent = indent
             var end = contentEnd
             while (end > indentEnd && isBlank(text[end - 1])) end--
             scanner.emitInterpolated(indentEnd, end, TokenKind.StringLit)
         } else {
-            blockParentIndent = if (scanner.scanLine(indentEnd, contentEnd)) indent else -1
+            blockParentIndent = scanner.scanLine(indentEnd, contentEnd)?.let { it - lineStart } ?: -1
+            blockContentIndent = -1
         }
         if (lineEnd >= n) break
         lineStart = lineEnd + 1
@@ -56,11 +64,16 @@ private class LineScanner(private val text: String, private val out: MutableList
     private fun endsIndicator(i: Int, end: Int) =
         i >= end || isBlank(text[i]) || (flowDepth > 0 && isFlowIndicator(text[i]))
 
-    /** Scans one line's content `[from, end)`; returns true when the line opens a block scalar. */
-    fun scanLine(from: Int, end: Int): Boolean {
+    /**
+     * Scans one line's content `[from, end)`. When the line opens a block scalar, returns the offset of the
+     * block's parent node (the last key or `-`/`?` indicator on the line, else the line start);
+     * its content must be indented more than that column. Otherwise returns null.
+     */
+    fun scanLine(from: Int, end: Int): Int? {
         var i = from
         var afterSpace = true
         var opensBlock = false
+        var parent = from
         if (from + 3 <= end && (text.startsWith("---", from) || text.startsWith("...", from)) &&
             (from + 3 == end || isBlank(text[from + 3]))
         ) {
@@ -78,10 +91,11 @@ private class LineScanner(private val text: String, private val out: MutableList
             when {
                 c == '#' && afterSpace -> {
                     emit(i, end, TokenKind.Comment)
-                    return opensBlock
+                    return if (opensBlock) parent else null
                 }
                 (c == '-' || c == '?') && flowDepth == 0 && endsIndicator(i + 1, end) -> {
                     emit(i, i + 1, TokenKind.Punct)
+                    parent = i
                     i++
                 }
                 c == ':' && endsIndicator(i + 1, end) -> {
@@ -122,20 +136,29 @@ private class LineScanner(private val text: String, private val out: MutableList
                 }
                 c == '"' || c == '\'' -> {
                     i = quotedEnd(i, end)
-                    if (isKeyAt(i, end)) emit(start, i, TokenKind.Key) else emitInterpolated(start, i, TokenKind.StringLit)
+                    if (isKeyAt(i, end)) {
+                        emit(start, i, TokenKind.Key)
+                        parent = start
+                    } else {
+                        emitInterpolated(start, i, TokenKind.StringLit)
+                    }
                 }
                 else -> {
                     i = plainEnd(i, end)
                     var trimmed = i
                     while (trimmed > start && isBlank(text[trimmed - 1])) trimmed--
-                    if (i < end && text[i] == ':') emit(start, trimmed, TokenKind.Key)
-                    else emitInterpolated(start, trimmed, TokenKind.Scalar)
+                    if (i < end && text[i] == ':') {
+                        emit(start, trimmed, TokenKind.Key)
+                        parent = start
+                    } else {
+                        emitInterpolated(start, trimmed, TokenKind.Scalar)
+                    }
                     if (i == start) i++ // never stall on unexpected input
                 }
             }
             afterSpace = false
         }
-        return opensBlock
+        return if (opensBlock) parent else null
     }
 
     /** End (exclusive) of the quoted string starting at [i]; an unclosed string runs to the end of the line. */
@@ -162,17 +185,39 @@ private class LineScanner(private val text: String, private val out: MutableList
         return k < end && text[k] == ':' && endsIndicator(k + 1, end)
     }
 
-    /** End of a plain scalar starting at [i]: stops before `: `, ` #` and (in flow) flow indicators. */
+    /**
+     * End of a plain scalar starting at [i]: stops before `: `, ` #` and (in flow) flow indicators. A closed
+     * `${...}` is skipped whole, so its braces never end the scalar inside a flow collection.
+     */
     private fun plainEnd(i: Int, end: Int): Int {
         var j = i
         while (j < end) {
             val ch = text[j]
+            if (ch == '$' && j + 1 < end) {
+                if (text[j + 1] == '$') {
+                    j += 2
+                    continue
+                }
+                if (text[j + 1] == '{') {
+                    val close = closingBrace(j + 2, end)
+                    if (close >= 0) {
+                        j = close + 1
+                        continue
+                    }
+                }
+            }
             if (ch == ':' && endsIndicator(j + 1, end)) break
             if (isBlank(ch) && j + 1 < end && text[j + 1] == '#') break
             if (flowDepth > 0 && isFlowIndicator(ch)) break
             j++
         }
         return j
+    }
+
+    /** Offset of the first `}` in `[from, end)`, or -1; bounded so unclosed `${` stays linear. */
+    private fun closingBrace(from: Int, end: Int): Int {
+        for (k in from until end) if (text[k] == '}') return k
+        return -1
     }
 
     /** Emits `[start, end)` as [kind], cutting out `${...}` interpolations; `$$` is an escaped dollar. */
@@ -187,8 +232,8 @@ private class LineScanner(private val text: String, private val out: MutableList
                     continue
                 }
                 if (next == '{') {
-                    val close = text.indexOf('}', j + 2)
-                    if (close in 0 until end) {
+                    val close = closingBrace(j + 2, end)
+                    if (close >= 0) {
                         emit(segment, j, kind)
                         emit(j, close + 1, TokenKind.Interpolation)
                         j = close + 1

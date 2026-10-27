@@ -27,9 +27,14 @@ private fun selectedLineStarts(t: EditorText): List<Int> {
     return starts
 }
 
-/** Inserts [INDENT] at the start of each selected line; the selection stays on the same text. */
+/**
+ * Inserts [INDENT] at the start of each selected line (empty lines of a multi-line selection are left
+ * empty); the selection stays on the same text.
+ */
 fun indent(t: EditorText): EditorText {
-    val starts = selectedLineStarts(t)
+    val starts = selectedLineStarts(t).let { all ->
+        if (all.size == 1) all else all.filter { it < t.text.length && t.text[it] != '\n' }
+    }
     val text = buildString(t.text.length + starts.size * INDENT.length) {
         var from = 0
         starts.forEach {
@@ -111,6 +116,14 @@ class EditHistory(private val limit: Int = 200) {
     val canUndo: Boolean get() = index > 0
     val canRedo: Boolean get() = index < states.size - 1
 
+    /** Starts over with [t] as the only state, e.g. for a different document: nothing to undo or redo. */
+    fun reset(t: EditorText) {
+        states.clear()
+        states.add(t)
+        index = 0
+        last = null
+    }
+
     fun push(t: EditorText) {
         if (index < 0) {
             states.add(t)
@@ -123,7 +136,7 @@ class EditHistory(private val limit: Int = 200) {
             states[index] = t
             return
         }
-        val edit = classify(current.text, t.text)
+        val edit = classify(current.text, t.text, t.selStart)
         val coalesce = when {
             edit is Typed && last is Typed -> {
                 val prev = last as Typed
@@ -166,19 +179,29 @@ class EditHistory(private val limit: Int = 200) {
 
     private fun isBlank(c: Char) = c == ' ' || c == '\t' || c == '\n'
 
-    /** A single typed character (caret = its offset), a single deleted non-newline character, or null. */
-    private fun classify(old: String, new: String): LastEdit? {
+    /**
+     * A single typed character (caret = its offset), a single deleted non-newline character, or null.
+     * The position comes from the new caret ([caret] - 1 after typing, [caret] after deleting) when that
+     * explains the change, so typing a repeated letter is placed where it was typed; otherwise from the
+     * common prefix.
+     */
+    private fun classify(old: String, new: String, caret: Int): LastEdit? {
         val delta = new.length - old.length
         if (delta != 1 && delta != -1) return null
-        val max = minOf(old.length, new.length)
-        var p = 0
-        while (p < max && old[p] == new[p]) p++
-        // The remainder after the changed character must match exactly.
-        return if (delta == 1) {
-            if (new.regionMatches(p + 1, old, p, old.length - p)) Typed(p, new[p]) else null
+        val longer = if (delta == 1) new else old
+        val shorter = if (delta == 1) old else new
+        fun explains(p: Int) = p in 0 until longer.length &&
+            longer.regionMatches(0, shorter, 0, p) &&
+            longer.regionMatches(p + 1, shorter, p, shorter.length - p)
+        val fromCaret = if (delta == 1) caret - 1 else caret
+        val p = if (explains(fromCaret)) {
+            fromCaret
         } else {
-            if (old[p] != '\n' && old.regionMatches(p + 1, new, p, new.length - p)) Deleted(p) else null
+            var q = 0
+            while (q < shorter.length && old[q] == new[q]) q++
+            if (explains(q)) q else return null
         }
+        return if (delta == 1) Typed(p, new[p]) else if (old[p] != '\n') Deleted(p) else null
     }
 }
 

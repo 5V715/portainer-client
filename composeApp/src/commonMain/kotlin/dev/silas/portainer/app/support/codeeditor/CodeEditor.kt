@@ -7,7 +7,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -55,7 +57,8 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -74,6 +77,7 @@ import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isFinite
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
@@ -83,6 +87,10 @@ import kotlinx.coroutines.launch
  * redo and find. Tab inserts two spaces (Shift+Tab outdents); Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl+Y and
  * Ctrl/Cmd+F work with a hardware keyboard. Give it a bounded height; it scrolls vertically itself.
  * Lines are split on `\n`, so callers should normalise line endings first.
+ *
+ * Controlled: pass back exactly the text [onValueChange] emitted. Any other [value] (initial load, reload,
+ * a different stack) is treated as a new document and resets undo history, so undo never crosses documents.
+ * Without a bounded height from [modifier] or its parent, it uses a fixed fallback height.
  */
 @Composable
 fun CodeEditor(
@@ -96,14 +104,15 @@ fun CodeEditor(
     val history = remember { EditHistory() }
     // Read wherever canUndo/canRedo are read, so the toolbar recomposes when the (plain) history changes.
     var historyVersion by remember { mutableIntStateOf(0) }
-    // The last text this editor produced itself; any other `value` came from outside (e.g. a load).
+    // The last text this editor produced itself; any other `value` is a new document.
     val emitted = remember { TextHolder() }
     // A value set from outside replaces the text; the caret is clamped onto it.
     val shown = if (field.text == value) field else TextFieldValue(value, clampedRange(field.selection, value.length))
     LaunchedEffect(value) {
         if (value != emitted.text) {
             emitted.text = value
-            history.push(EditorText(value, shown.toEditorText().selection))
+            field = shown
+            history.reset(shown.toEditorText())
             historyVersion++
         }
     }
@@ -116,15 +125,17 @@ fun CodeEditor(
         if (next.text != value) onValueChange(next.text)
     }
     fun applyOp(op: (EditorText) -> EditorText) = apply(op(shown.toEditorText()).toTextFieldValue())
+    val scope = rememberScrollStateScope()
+    val editorFocus = remember { FocusRequester() }
     fun restore(t: EditorText?) {
         t ?: return
         field = t.toTextFieldValue()
         emitted.text = t.text
         historyVersion++
+        scope.revealAfterLayout(t.selStart)
         if (t.text != value) onValueChange(t.text)
     }
 
-    val scope = rememberScrollStateScope()
     var findOpen by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     val matches = remember(shown.text, query, findOpen) { if (findOpen) findAll(shown.text, query) else emptyList() }
@@ -147,6 +158,10 @@ fun CodeEditor(
         findAnchor = selStart
         findOpen = true
     }
+    fun closeFind() {
+        findOpen = false
+        editorFocus.requestFocus()
+    }
 
     fun onKey(e: KeyEvent): Boolean {
         val command = e.isCtrlPressed || e.isMetaPressed
@@ -156,9 +171,18 @@ fun CodeEditor(
         }
         if (e.type != KeyEventType.KeyDown || !command) return false
         return when {
-            e.key == Key.Z && !readOnly -> { restore(if (e.isShiftPressed) history.redo() else history.undo()); true }
-            e.key == Key.Y && !readOnly -> { restore(history.redo()); true }
-            e.key == Key.F -> { openFind(); true }
+            e.key == Key.Z && !readOnly -> {
+                restore(if (e.isShiftPressed) history.redo() else history.undo())
+                true
+            }
+            e.key == Key.Y && !readOnly -> {
+                restore(history.redo())
+                true
+            }
+            e.key == Key.F -> {
+                openFind()
+                true
+            }
             else -> false
         }
     }
@@ -182,7 +206,7 @@ fun CodeEditor(
     val tokens = remember(shown.text) { tokenizeYaml(shown.text) }
     val lines = remember(shown.text) { lineCount(shown.text) }
     val validErrorLine = errorLine?.takeIf { it in 1..lines }
-    val highlighter = remember(tokens, palette, validErrorLine, matches, currentMatch) {
+    val highlighter = remember(shown.text, tokens, palette, validErrorLine, matches, currentMatch) {
         YamlHighlighter(shown.text, tokens, palette, validErrorLine, matches, currentMatch)
     }
     val codeStyle = TextStyle(
@@ -192,60 +216,65 @@ fun CodeEditor(
         color = colors.onSurface,
     )
 
-    Column(
-        modifier
-            .border(1.dp, colors.outlineVariant, RoundedCornerShape(8.dp))
-            .background(colors.surfaceContainerLowest, RoundedCornerShape(8.dp)),
-    ) {
-        EditorToolbar(
-            readOnly = readOnly,
-            canUndo = historyVersion >= 0 && history.canUndo,
-            canRedo = historyVersion >= 0 && history.canRedo,
-            onIndent = { applyOp(::indent) },
-            onOutdent = { applyOp(::outdent) },
-            onUndo = { restore(history.undo()) },
-            onRedo = { restore(history.redo()) },
-            onFind = { if (findOpen) findOpen = false else openFind() },
-        )
-        if (findOpen) {
-            FindBar(
-                query = query,
-                onQueryChange = { query = it },
-                matchCount = matches.size,
-                currentMatch = currentMatch,
-                onNext = ::findNext,
-                onPrevious = ::findPrevious,
-                onClose = { findOpen = false },
+    BoxWithConstraints(modifier) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .then(if (constraints.hasBoundedHeight) Modifier.fillMaxHeight() else Modifier.height(FALLBACK_HEIGHT))
+                .border(1.dp, colors.outlineVariant, RoundedCornerShape(8.dp))
+                .background(colors.surfaceContainerLowest, RoundedCornerShape(8.dp)),
+        ) {
+            EditorToolbar(
+                readOnly = readOnly,
+                canUndo = historyVersion >= 0 && history.canUndo,
+                canRedo = historyVersion >= 0 && history.canRedo,
+                onIndent = { applyOp(::indent) },
+                onOutdent = { applyOp(::outdent) },
+                onUndo = { restore(history.undo()) },
+                onRedo = { restore(history.redo()) },
+                onFind = { if (findOpen) closeFind() else openFind() },
             )
-        }
-        HorizontalDivider(color = colors.outlineVariant)
-        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-            val viewportHeight = maxHeight
-            Row(Modifier.verticalScroll(scope.vertical).heightIn(min = viewportHeight)) {
-                Gutter(lines, validErrorLine, codeStyle, Modifier.heightIn(min = viewportHeight))
-                BoxWithConstraints(Modifier.weight(1f)) {
-                    val viewportWidth = maxWidth
-                    Row(Modifier.horizontalScroll(scope.horizontal)) {
-                    BasicTextField(
-                        value = shown,
-                        onValueChange = { if (!readOnly || it.text == shown.text) apply(it) },
-                        readOnly = readOnly,
-                        textStyle = codeStyle,
-                        cursorBrush = SolidColor(colors.primary),
-                        visualTransformation = highlighter,
-                        keyboardOptions = KeyboardOptions(
-                            capitalization = KeyboardCapitalization.None,
-                            autoCorrectEnabled = false,
-                            keyboardType = KeyboardType.Ascii,
-                        ),
-                        onTextLayout = { scope.layout = it },
-                        modifier = Modifier
-                            .widthIn(min = viewportWidth)
-                            .heightIn(min = viewportHeight)
-                            .padding(horizontal = 8.dp, vertical = EDITOR_VERTICAL_PADDING)
-                            .onPreviewKeyEvent(::onKey)
-                            .semantics { contentDescription = "YAML editor" },
-                    )
+            if (findOpen) {
+                FindBar(
+                    query = query,
+                    onQueryChange = { query = it },
+                    matchCount = matches.size,
+                    currentMatch = currentMatch,
+                    onNext = ::findNext,
+                    onPrevious = ::findPrevious,
+                    onClose = ::closeFind,
+                )
+            }
+            HorizontalDivider(color = colors.outlineVariant)
+            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().semantics { paneTitle = "YAML editor" }) {
+                val viewportHeight = if (maxHeight.isFinite) maxHeight else 0.dp
+                Row(Modifier.verticalScroll(scope.vertical).heightIn(min = viewportHeight)) {
+                    Gutter(lines, validErrorLine, codeStyle, Modifier.heightIn(min = viewportHeight))
+                    BoxWithConstraints(Modifier.weight(1f)) {
+                        val viewportWidth = maxWidth
+                        Row(Modifier.horizontalScroll(scope.horizontal)) {
+                            BasicTextField(
+                                value = shown,
+                                onValueChange = { if (!readOnly || it.text == shown.text) apply(it) },
+                                readOnly = readOnly,
+                                textStyle = codeStyle,
+                                cursorBrush = SolidColor(colors.primary),
+                                visualTransformation = highlighter,
+                                keyboardOptions = KeyboardOptions(
+                                    capitalization = KeyboardCapitalization.None,
+                                    autoCorrectEnabled = false,
+                                    keyboardType = KeyboardType.Text,
+                                ),
+                                onTextLayout = scope::onLayout,
+                                modifier = Modifier
+                                    .widthIn(min = viewportWidth)
+                                    .heightIn(min = viewportHeight)
+                                    .padding(horizontal = EDITOR_HORIZONTAL_PADDING, vertical = EDITOR_VERTICAL_PADDING)
+                                    .focusRequester(editorFocus)
+                                    .onPreviewKeyEvent(::onKey)
+                                    .semantics { if (validErrorLine != null) stateDescription = "Error on line $validErrorLine" },
+                            )
+                        }
                     }
                 }
             }
@@ -254,6 +283,9 @@ fun CodeEditor(
 }
 
 private val EDITOR_VERTICAL_PADDING = 8.dp
+private val EDITOR_HORIZONTAL_PADDING = 8.dp
+private val REVEAL_MARGIN = 24.dp
+private val FALLBACK_HEIGHT = 400.dp
 private val GUTTER_MIN_WIDTH = 36.dp
 
 private class TextHolder(var text: String? = null)
@@ -268,14 +300,30 @@ private fun TextFieldValue.toEditorText(): EditorText {
 
 private fun EditorText.toTextFieldValue() = TextFieldValue(text, TextRange(selStart, selEnd))
 
-/** Vertical and horizontal scroll state plus the last layout, so find can scroll a match into view. */
+/** Vertical and horizontal scroll state plus the last layout, so find and undo can scroll a spot into view. */
 private class EditorScroll(
     val vertical: androidx.compose.foundation.ScrollState,
     val horizontal: androidx.compose.foundation.ScrollState,
     private val scope: kotlinx.coroutines.CoroutineScope,
     private val topPaddingPx: Float,
+    private val startPaddingPx: Float,
+    private val marginPx: Int,
 ) {
-    var layout: TextLayoutResult? = null
+    private var layout: TextLayoutResult? = null
+    private var pendingReveal: Int? = null
+
+    fun onLayout(result: TextLayoutResult) {
+        layout = result
+        pendingReveal?.let {
+            pendingReveal = null
+            reveal(it)
+        }
+    }
+
+    /** Reveals [offset] once the next layout (for text that is about to change) is ready. */
+    fun revealAfterLayout(offset: Int) {
+        pendingReveal = offset
+    }
 
     fun reveal(offset: Int) {
         val layout = layout ?: return
@@ -287,9 +335,9 @@ private class EditorScroll(
             if (top < vertical.value || top + box.height > vertical.value + viewport) {
                 vertical.animateScrollTo((top - viewport / 3).coerceAtLeast(0))
             }
-            val left = box.left.toInt()
+            val left = (box.left + startPaddingPx).toInt()
             val hViewport = horizontal.viewportSize
-            if (left < horizontal.value || left > horizontal.value + hViewport - 48) {
+            if (left < horizontal.value + marginPx || left > horizontal.value + hViewport - marginPx) {
                 horizontal.animateScrollTo((left - hViewport / 3).coerceAtLeast(0))
             }
         }
@@ -301,9 +349,18 @@ private fun rememberScrollStateScope(): EditorScroll {
     val vertical = rememberScrollState()
     val horizontal = rememberScrollState()
     val coroutines = rememberCoroutineScope()
-    val topPadding = with(LocalDensity.current) { EDITOR_VERTICAL_PADDING.toPx() }
-    return remember(vertical, horizontal, coroutines, topPadding) {
-        EditorScroll(vertical, horizontal, coroutines, topPadding)
+    val density = LocalDensity.current
+    return remember(vertical, horizontal, coroutines, density) {
+        with(density) {
+            EditorScroll(
+                vertical,
+                horizontal,
+                coroutines,
+                topPaddingPx = EDITOR_VERTICAL_PADDING.toPx(),
+                startPaddingPx = EDITOR_HORIZONTAL_PADDING.toPx(),
+                marginPx = REVEAL_MARGIN.roundToPx(),
+            )
+        }
     }
 }
 
@@ -404,13 +461,8 @@ private fun Gutter(lines: Int, errorLine: Int?, style: TextStyle, modifier: Modi
             .background(colors.surfaceContainer)
             .widthIn(min = GUTTER_MIN_WIDTH)
             .padding(start = 6.dp, end = 6.dp, top = EDITOR_VERTICAL_PADDING, bottom = EDITOR_VERTICAL_PADDING)
-            .then(
-                if (errorLine != null) {
-                    Modifier.semantics { contentDescription = "Error on line $errorLine" }
-                } else {
-                    Modifier.clearAndSetSemantics {}
-                },
-            ),
+            // Line numbers are noise for screen readers; the field states the error line instead.
+            .clearAndSetSemantics {},
     )
 }
 
@@ -479,8 +531,14 @@ private fun FindBar(
                 .onPreviewKeyEvent {
                     if (it.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     when (it.key) {
-                        Key.Enter -> { if (it.isShiftPressed) onPrevious() else onNext(); true }
-                        Key.Escape -> { onClose(); true }
+                        Key.Enter -> {
+                            if (it.isShiftPressed) onPrevious() else onNext()
+                            true
+                        }
+                        Key.Escape -> {
+                            onClose()
+                            true
+                        }
                         else -> false
                     }
                 },

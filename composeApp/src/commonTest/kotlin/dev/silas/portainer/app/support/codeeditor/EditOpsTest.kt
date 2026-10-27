@@ -71,6 +71,39 @@ class EditOpsTest {
     }
 
     @Test
+    fun indentLeavesEmptyLinesOfAMultiLineSelectionEmpty() {
+        val text = "a:\n\n  b: 1\n"
+        val r = indent(EditorText(text, 0 until text.length))
+        assertEquals("  a:\n\n    b: 1\n", r.text)
+        assertEquals("a:\n\n    b: 1\n", r.selected())
+        // A caret on an empty line still indents it.
+        assertEquals("a\n  \nb", indent(EditorText("a\n\nb", 2 until 2)).text)
+    }
+
+    @Test
+    fun resetStartsANewDocumentWithNothingToUndo() {
+        val h = EditHistory()
+        h.push(EditorText("stack A", 0 until 0))
+        h.push(EditorText("stack A edited", 14 until 14))
+        h.reset(EditorText("stack B", 0 until 0))
+        assertNull(h.undo())
+        assertNull(h.redo())
+        h.push(EditorText("stack B edited", 14 until 14))
+        assertEquals(EditorText("stack B", 0 until 0), h.undo())
+        assertNull(h.undo())
+    }
+
+    @Test
+    fun typingARepeatedLetterIsPlacedAtTheCaret() {
+        val h = EditHistory()
+        h.push(EditorText("ab", 1 until 1))
+        h.push(EditorText("abb", 2 until 2)) // "b" typed at 1 (the common prefix would say 2)
+        h.push(EditorText("abxb", 3 until 3)) // continues the same word at 2
+        assertEquals("ab", h.undo()?.text)
+        assertNull(h.undo())
+    }
+
+    @Test
     fun undoRedoRoundTrip() {
         val h = EditHistory()
         val a = EditorText("a: 1", 4 until 4)

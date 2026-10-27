@@ -113,6 +113,57 @@ class YamlTokenizerTest {
     }
 
     @Test
+    fun blockScalarInsideASequenceItemEndsAtTheNextSiblingKey() {
+        val text = "services:\n  - command: |\n      echo hi\n\n      echo two\n    image: nginx\n  - name: b"
+        assertEquals(TokenKind.StringLit, kindOf(text, "echo hi"))
+        assertEquals(TokenKind.StringLit, kindOf(text, "echo two"))
+        assertEquals(TokenKind.Key, kindOf(text, "image"))
+        assertEquals(TokenKind.Scalar, kindOf(text, "nginx"))
+        assertEquals(TokenKind.Key, kindOf(text, "name"))
+        // An empty block: the sibling right after it is still a key.
+        assertEquals(TokenKind.Key, kindOf("  - command: |\n    image: x", "image"))
+    }
+
+    @Test
+    fun blockContentIndentComesFromItsFirstLine() {
+        val text = "a: >\n    deep\n  shallow: 1"
+        assertEquals(TokenKind.StringLit, kindOf(text, "deep"))
+        assertEquals(TokenKind.Key, kindOf(text, "shallow"))
+    }
+
+    @Test
+    fun interpolationInsideAFlowCollectionStaysOneToken() {
+        val text = "environment: [FOO=\${BAR}, X=1]"
+        assertEquals(TokenKind.Scalar, kindOf(text, "FOO="))
+        assertEquals(TokenKind.Interpolation, kindOf(text, "\${BAR}"))
+        assertEquals(TokenKind.Scalar, kindOf(text, "X=1"))
+        assertEquals(TokenKind.Punct, kindOf(text, "]"))
+    }
+
+    @Test
+    fun moreScalarAndKeyShapes() {
+        assertEquals(TokenKind.Scalar, kindOf("url: http://example.com/#frag", "http://example.com/#frag"))
+        assertEquals(
+            listOf("-" to TokenKind.Punct, "key" to TokenKind.Key, ":" to TokenKind.Punct, "v" to TokenKind.Scalar),
+            spans("  - key: v"),
+        )
+        assertEquals(TokenKind.Key, kindOf("\"a:b\": 1", "\"a:b\""))
+        assertEquals(TokenKind.Key, kindOf("'8080:80': x", "'8080:80'"))
+    }
+
+    @Test
+    fun manyUnclosedInterpolationsStayFast() {
+        val text = (1..3_000).joinToString("\n") { "  key$it: \"\${UNCLOSED $it" }
+        val best = (1..3).minOf {
+            val mark = TimeSource.Monotonic.markNow()
+            tokenizeYaml(text)
+            mark.elapsedNow().inWholeMilliseconds
+        }
+        assertTrue(best < 200, "tokenizing took $best ms")
+        assertTrue(tokenizeYaml(text).none { it.kind == TokenKind.Interpolation })
+    }
+
+    @Test
     fun documentMarkersAndTags() {
         assertEquals(listOf("---" to TokenKind.Punct), spans("---"))
         assertEquals(TokenKind.Plain, kindOf("a: !!str 1", "!!str"))
