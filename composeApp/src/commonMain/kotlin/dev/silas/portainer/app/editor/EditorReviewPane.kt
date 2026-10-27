@@ -18,11 +18,14 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import dev.silas.portainer.app.StackDetail
 import dev.silas.portainer.app.recreate.StepStatus
 import dev.silas.portainer.app.theme.StatusTone
 import dev.silas.portainer.app.theme.color
@@ -41,7 +44,7 @@ private fun reviewTitle(action: FinishAction) = when (action) {
 
 /** The finish step in place of the form: checking, review (conflicts, warnings), deploy progress. */
 @Composable
-fun EditorReviewPane(phase: FinishPhase, vm: EditorViewModel) {
+fun EditorReviewPane(phase: FinishPhase, vm: EditorViewModel, onOpenStack: (StackDetail) -> Unit) {
     Column(
         Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -55,14 +58,14 @@ fun EditorReviewPane(phase: FinishPhase, vm: EditorViewModel) {
                 Text(phase.message, color = MaterialTheme.colorScheme.error)
                 OutlinedButton(onClick = vm::backToForm, modifier = Modifier.fillMaxWidth()) { Text("Back to the form") }
             }
-            is FinishPhase.Review -> Review(phase, vm)
+            is FinishPhase.Review -> Review(phase, vm, onOpenStack)
             is FinishPhase.Deploying -> Deploying(phase.progress, vm)
         }
     }
 }
 
 @Composable
-private fun Review(r: FinishPhase.Review, vm: EditorViewModel) {
+private fun Review(r: FinishPhase.Review, vm: EditorViewModel, onOpenStack: (StackDetail) -> Unit) {
     Text(reviewTitle(r.action), style = MaterialTheme.typography.titleMedium)
     r.notice?.let { Banner(it, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer) }
     r.blocked?.let { Banner(it, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) }
@@ -105,9 +108,17 @@ private fun Review(r: FinishPhase.Review, vm: EditorViewModel) {
     }
 
     r.blocking.forEach { Banner(conflictText(it), MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) }
+    // The stack-member warning (Replace only) comes with a way to open that stack.
+    val stackLink = vm.state.collectAsState().value.stackLink
+        ?.takeIf { link -> r.action == FinishAction.Replace && r.warnings.any { it.startsWith("This container belongs to stack ${link.name}.") } }
     r.warnings.forEach { w ->
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), modifier = Modifier.fillMaxWidth()) {
-            Text(w, Modifier.padding(12.dp), color = StatusTone.Warn.color())
+            Column(Modifier.padding(12.dp)) {
+                Text(w, color = StatusTone.Warn.color())
+                if (stackLink != null && w.startsWith("This container belongs to stack ${stackLink.name}.")) {
+                    TextButton(onClick = { onOpenStack(stackLink) }, enabled = !r.starting) { Text("Open stack") }
+                }
+            }
         }
     }
     if (r.blocking.isNotEmpty()) {

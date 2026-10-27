@@ -3,6 +3,8 @@ package dev.silas.portainer.app.detail
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -37,7 +39,7 @@ import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OverviewTab(overview: ContainerOverview?, loading: Boolean, onRefresh: () -> Unit) {
+fun OverviewTab(overview: ContainerOverview?, loading: Boolean, onRefresh: () -> Unit, onOpenStack: (() -> Unit)? = null) {
     PullToRefreshBox(isRefreshing = loading, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
         if (overview == null) {
             Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), contentAlignment = Alignment.Center) {
@@ -50,7 +52,12 @@ fun OverviewTab(overview: ContainerOverview?, loading: Boolean, onRefresh: () ->
                 Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                overview.stack?.let { StackBadge(it) }
+                overview.stack?.let {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        StackBadge(it)
+                        if (onOpenStack != null) TextButton(onClick = onOpenStack) { Text("Open stack") }
+                    }
+                }
                 // Why there is no "Edit & recreate" for this container.
                 if (overview.protectedImage) {
                     Card(

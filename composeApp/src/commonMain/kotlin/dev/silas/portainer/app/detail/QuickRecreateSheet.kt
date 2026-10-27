@@ -1,5 +1,7 @@
 package dev.silas.portainer.app.detail
 
+import dev.silas.portainer.app.StackDetail
+import dev.silas.portainer.core.recreate.RecreateWarning
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,7 +36,7 @@ import dev.silas.portainer.app.theme.color
 /** Bottom sheet for a one-tap recreate with the container's exact settings. [onStarted] navigates to the progress screen. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun QuickRecreateSheet(viewModel: QuickRecreateViewModel, onStarted: () -> Unit) {
+fun QuickRecreateSheet(viewModel: QuickRecreateViewModel, onStarted: () -> Unit, onOpenStack: (StackDetail) -> Unit) {
     val state = viewModel.state.collectAsState().value
     LaunchedEffect(state.phase) {
         if (state.phase == QuickPhase.Started) {
@@ -62,7 +64,16 @@ fun QuickRecreateSheet(viewModel: QuickRecreateViewModel, onStarted: () -> Unit)
                 if (state.pull) RegistryPicker(state.registries, state.registryId, viewModel::setRegistry)
                 state.warnings.forEach { w ->
                     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), modifier = Modifier.fillMaxWidth()) {
-                        Text(warningText(w), Modifier.padding(12.dp), color = StatusTone.Warn.color())
+                        Column(Modifier.padding(12.dp)) {
+                            Text(warningText(w), color = StatusTone.Warn.color())
+                            val link = state.stackLink
+                            if (w is RecreateWarning.StackMember && link != null) {
+                                TextButton(
+                                    onClick = { viewModel.dismiss(); onOpenStack(link) },
+                                    enabled = !state.starting,
+                                ) { Text("Open stack") }
+                            }
+                        }
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {

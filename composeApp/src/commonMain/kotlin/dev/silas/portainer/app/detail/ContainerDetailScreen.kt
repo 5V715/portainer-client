@@ -1,5 +1,6 @@
 package dev.silas.portainer.app.detail
 
+import dev.silas.portainer.app.StackDetail
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -38,6 +39,7 @@ fun ContainerDetailScreen(
     quickRecreate: QuickRecreateViewModel,
     onQuickRecreated: () -> Unit,
     onEdit: () -> Unit,
+    onOpenStack: (StackDetail) -> Unit,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
@@ -59,7 +61,7 @@ fun ContainerDetailScreen(
             quickRecreate.clearError()
         }
     }
-    QuickRecreateSheet(quickRecreate, onQuickRecreated)
+    QuickRecreateSheet(quickRecreate, onQuickRecreated, onOpenStack)
 
     Scaffold(
         topBar = {
@@ -82,7 +84,7 @@ fun ContainerDetailScreen(
                 }
             }
             when {
-                tab == 0 -> OverviewTab(overview, state.loading, viewModel::refresh)
+                tab == 0 -> OverviewTab(overview, state.loading, viewModel::refresh, state.stackLink?.let { link -> { onOpenStack(link) } })
                 overview == null -> Text(if (state.loading) "Loading…" else "Logs are unavailable", Modifier.padding(16.dp))
                 else -> LogsTab(logsViewModel(overview.tty))
             }

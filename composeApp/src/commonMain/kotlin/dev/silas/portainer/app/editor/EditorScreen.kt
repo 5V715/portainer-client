@@ -1,5 +1,6 @@
 package dev.silas.portainer.app.editor
 
+import dev.silas.portainer.app.StackDetail
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,6 +64,7 @@ fun EditorScreen(
     viewModel: EditorViewModel,
     onReplaceStarted: () -> Unit,
     onOpenContainer: (id: String) -> Unit,
+    onOpenStack: (StackDetail) -> Unit,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
@@ -114,13 +116,13 @@ fun EditorScreen(
         Box(Modifier.fillMaxSize().padding(padding)) {
             // A deploy from this source found when the editor opened is shown even before the form has loaded.
             if (finishPhase is FinishPhase.Deploying) {
-                EditorReviewPane(finishPhase, viewModel)
+                EditorReviewPane(finishPhase, viewModel, onOpenStack)
                 return@Box
             }
             when (val phase = state.phase) {
                 EditorPhase.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                 is EditorPhase.Error -> Text(phase.message, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
-                EditorPhase.Ready -> if (finishPhase != null) EditorReviewPane(finishPhase, viewModel) else Column(
+                EditorPhase.Ready -> if (finishPhase != null) EditorReviewPane(finishPhase, viewModel, onOpenStack) else Column(
                     Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {

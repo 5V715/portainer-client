@@ -3,6 +3,8 @@ package dev.silas.portainer.app.detail
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.StackDetail
+import dev.silas.portainer.app.stacks.loadStackLink
 import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.inspectContainer
 import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
@@ -45,6 +47,8 @@ data class ContainerDetailState(
     val overview: ContainerOverview? = null,
     val loading: Boolean = true,
     val error: String? = null,
+    /** The container's stack when it exists on the endpoint; stays null if the stacks can't be loaded. */
+    val stackLink: StackDetail? = null,
 )
 
 class ContainerDetailViewModel(
@@ -73,8 +77,12 @@ class ContainerDetailViewModel(
 
     private suspend fun load() {
         val message = try {
-            val overview = parseOverview(container.client(serverId).inspectContainer(endpointId, containerId))
-            _state.update { it.copy(overview = overview) }
+            val client = container.client(serverId)
+            val overview = parseOverview(client.inspectContainer(endpointId, containerId))
+            _state.update { it.copy(overview = overview, stackLink = if (overview.stack == it.overview?.stack) it.stackLink else null) }
+            // Once the overview shows, look the stack up; a failure only hides the button.
+            val link = loadStackLink(client, serverId, endpointId, overview.stack)
+            _state.update { it.copy(stackLink = link) }
             null
         } catch (e: Exception) {
             failureMessage(e)

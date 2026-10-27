@@ -310,6 +310,8 @@ private fun AppNavHost(container: AppContainer) {
                 },
                 onQuickRecreated = { nav.navigate(Recreate(route.serverId, route.endpointId, route.containerId, quick = true)) },
                 onEdit = { nav.navigate(Editor(route.serverId, route.endpointId, route.containerId)) },
+                // A plain push: Back from the stack returns to this container.
+                onOpenStack = { nav.navigate(it) },
                 onBack = { nav.popBackStack() },
             )
         }
@@ -346,6 +348,8 @@ private fun AppNavHost(container: AppContainer) {
                 onOpenContainer = { id ->
                     nav.navigate(ContainerDetail(route.serverId, route.endpointId, id)) { popUpTo(route) { inclusive = true } }
                 },
+                // A plain push: Back from the stack returns to the review with the edits.
+                onOpenStack = { nav.navigate(it) },
                 onBack = { nav.popBackStack() },
             )
         }

@@ -3,6 +3,8 @@ package dev.silas.portainer.app.detail
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.StackDetail
+import dev.silas.portainer.app.stacks.loadStackLink
 import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.app.recreate.CLEANUP_IN_PROGRESS_MESSAGE
 import dev.silas.portainer.app.recreate.SessionKey
@@ -44,6 +46,8 @@ data class QuickRecreateState(
     val registries: List<Registry> = emptyList(),
     val registryId: Int? = null,
     val warnings: List<RecreateWarning> = emptyList(),
+    /** The stack named by a stack-member warning, when it can be opened; null if it can't be looked up. */
+    val stackLink: StackDetail? = null,
     /** Shown instead of the sheet (protected container, failed request); cleared with [QuickRecreateViewModel.clearError]. */
     val error: String? = null,
     val starting: Boolean = false,
@@ -79,9 +83,11 @@ class QuickRecreateViewModel(
                 }
                 val match = matchFor(image, registries)
                 val plan = plan(client, fresh, pull = true, registryId = match)
+                val project = plan.warnings.filterIsInstance<RecreateWarning.StackMember>().firstOrNull()?.project
+                val stackLink = loadStackLink(client, serverId, endpointId, project)
                 _state.update {
                     if (it.phase != QuickPhase.Loading) it
-                    else it.copy(phase = QuickPhase.Ready, registries = registries, registryId = match, warnings = plan.warnings)
+                    else it.copy(phase = QuickPhase.Ready, registries = registries, registryId = match, warnings = plan.warnings, stackLink = stackLink)
                 }
             } catch (e: Exception) {
                 fail(failureMessage(e))
