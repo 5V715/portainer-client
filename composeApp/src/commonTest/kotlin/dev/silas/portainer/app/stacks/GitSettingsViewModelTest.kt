@@ -7,7 +7,9 @@ import dev.silas.portainer.app.settle
 import dev.silas.portainer.app.support.CONNECTION_DEPENDENCY_REMINDER
 import dev.silas.portainer.core.model.EnvVar
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
+import dev.silas.portainer.core.api.SOURCE_SAVED_STACK_NOT_MESSAGE
 import dev.silas.portainer.core.stacks.envDiff
+import dev.silas.portainer.core.stacks.stackFeatures
 import dev.silas.portainer.core.storage.ServerConfig
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
@@ -66,7 +68,9 @@ class GitSettingsViewModelTest {
     @AfterTest
     fun tearDown() = Dispatchers.resetMain()
 
-    private val sourced: Boolean get() = version >= "2.43"
+    /** The stack has a GitOps Source (only where the server has them). */
+    @Volatile private var hasSource = true
+    private val sourced: Boolean get() = hasSource && stackFeatures(version).savedGitCredentials
 
     private fun stackJson(id: Int = 5, sourceId: Int = 7): String {
         val authJson = if (auth) ""","Authentication":{"Username":"deploy","Password":""}""" else ""
@@ -177,8 +181,7 @@ class GitSettingsViewModelTest {
         val s = vm.state.value
         assertTrue(s.available)
         val f = assertNotNull(s.form)
-        assertEquals("https://git.example/app.git", f.url)
-        assertFalse(s.urlEditable, "read-only without a GitOps Source")
+        assertEquals("https://git.example/app.git", f.url, "shown read-only on every version")
         assertEquals("refs/heads/main", f.referenceName)
         assertEquals("compose.yml", f.configFilePath)
         assertEquals("override.yml", f.additionalFiles)
@@ -350,7 +353,6 @@ class GitSettingsViewModelTest {
     fun onSourcedServersCredentialsGoToTheSourceWithASharedWarning() = gitTest {
         version = "2.45.3"
         val (_, vm) = loaded()
-        assertTrue(vm.state.value.urlEditable)
         assertEquals(2, vm.state.value.otherStacksOnSource, "stacks 6 and 8 use source 7; 9 uses another")
         // An unchanged save touches no source and sends no inline credentials.
         vm.setEnvRow(0, EnvVar("A", "2"))
@@ -423,6 +425,7 @@ class GitSettingsViewModelTest {
             review.envChanges,
         )
         assertEquals(CONNECTION_DEPENDENCY_REMINDER, review.reminder)
+        assertEquals("Force redeployment: always (Portainer recreates the containers)", review.forceRedeployment)
         assertTrue(requests.none { it.startsWith("PUT") }, "the review alone sends nothing")
         vm.setRedeployPullImage(true)
         vm.confirmRedeploy()
@@ -567,6 +570,106 @@ class GitSettingsViewModelTest {
         vm.dismissDiscard()
         vm.edit { copy(referenceName = "refs/heads/main") }
         assertTrue(vm.requestBack())
+    }
+
+    @Test
+    fun protectedStackMayNotStartPolling() = gitTest {
+        image = "portainer/portainer-ce:2.42.0"
+        autoUpdate = """{"Interval":"","Webhook":"05de31a2-79fa-4644-9c12-faa67e5c49f0","ForceUpdate":false,"ForcePullImage":false}"""
+        val (_, vm) = loaded()
+        assertEquals(AutoUpdateMechanism.Webhook, vm.state.value.form!!.mechanism)
+        // Webhook -> polling while on: Portainer would start redeploying by itself.
+        vm.setMechanism(AutoUpdateMechanism.Polling)
+        vm.requestSave()
+        assertNull(vm.state.value.saveConfirm)
+        assertEquals(PROTECTED_IMAGE_MESSAGE, vm.state.value.error)
+        vm.clearError()
+        // Changing only the force flags of the existing webhook starts nothing new.
+        vm.setMechanism(AutoUpdateMechanism.Webhook)
+        vm.edit { copy(forceUpdate = true) }
+        vm.requestSave()
+        assertNotNull(vm.state.value.saveConfirm)
+    }
+
+    @Test
+    fun protectionUnknownMayNotStartPollingEither() = gitTest {
+        fileFails = true
+        autoUpdate = "null"
+        val (_, vm) = loaded()
+        vm.setAutoUpdateEnabled(true)
+        vm.requestSave()
+        assertEquals(PROTECTION_UNKNOWN_MESSAGE, vm.state.value.error)
+        assertNull(vm.state.value.saveConfirm)
+    }
+
+    @Test
+    fun theUrlNeverReachesTheSource() = gitTest {
+        version = "2.45.3"
+        val (_, vm) = loaded()
+        vm.edit { copy(tlsSkipVerify = false) }
+        save(vm)
+        assertEquals(Json.parseToJsonElement("""{"tlsSkipVerify":false}"""), sent("PUT /api/gitops/sources/7"))
+    }
+
+    @Test
+    fun aStackFailureAfterTheSourceWasSavedSaysSo() = gitTest {
+        version = "2.45.3"
+        settingsFailEcho = true
+        val (_, vm) = loaded()
+        vm.edit { copy(authEnabled = false) }
+        save(vm)
+        val (_, message) = assertNotNull(vm.state.value.failure)
+        assertTrue(message.startsWith(SOURCE_SAVED_STACK_NOT_MESSAGE), message)
+        assertTrue(requests.contains("PUT /api/gitops/sources/7"))
+    }
+
+    @Test
+    fun onSourcedServersAnUntouchedAuthSendsOnlyTheSourceId() = gitTest {
+        for (v in listOf("2.43.0", "2.44.0")) {
+            version = v
+            requestLog.value = emptyList()
+            val (_, vm) = loaded()
+            vm.edit { copy(referenceName = "refs/heads/dev") }
+            save(vm)
+            val body = sent("POST /api/stacks/5/git")
+            assertEquals("7", body["SourceID"].toString(), v)
+            assertFalse("RepositoryAuthentication" in body, v)
+            assertFalse("RepositoryPassword" in body, v)
+            assertFalse("TLSSkipVerify" in body, v)
+            assertTrue(requests.none { it.startsWith("PUT /api/gitops") }, v)
+        }
+    }
+
+    @Test
+    fun aStackWithoutASourceOnASourcedServerSavesInline() = gitTest {
+        version = "2.45.3"
+        hasSource = false
+        val (_, vm) = loaded()
+        assertNull(vm.state.value.sourceId)
+        vm.edit { copy(tlsSkipVerify = false) }
+        vm.requestSave()
+        assertNull(vm.state.value.saveConfirm!!.sharedWarning)
+        vm.confirmSave()
+        finished(vm)
+        val body = sent("POST /api/stacks/5/git")
+        assertFalse("SourceID" in body)
+        assertEquals("true", body["RepositoryAuthentication"].toString())
+        assertEquals("\"\"", body["RepositoryPassword"].toString())
+        assertEquals("false", body["TLSSkipVerify"].toString())
+        assertTrue(requests.none { it.startsWith("PUT /api/gitops") })
+    }
+
+    @Test
+    fun from244PollingOffClearsTheSourceIntervalAndSendsNoAutoUpdate() = gitTest {
+        version = "2.44.0"
+        val (_, vm) = loaded()
+        vm.setAutoUpdateEnabled(false)
+        vm.requestSave()
+        assertEquals("This also changes 2 other stacks using this source.", vm.state.value.saveConfirm!!.sharedWarning)
+        vm.confirmSave()
+        finished(vm)
+        assertEquals(Json.parseToJsonElement("""{"interval":""}"""), sent("PUT /api/gitops/sources/7"))
+        assertEquals(JsonNull, sent("POST /api/stacks/5/git")["AutoUpdate"])
     }
 
     @Test

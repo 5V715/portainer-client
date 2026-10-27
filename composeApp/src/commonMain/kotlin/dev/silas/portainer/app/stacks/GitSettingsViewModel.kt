@@ -8,7 +8,6 @@ import dev.silas.portainer.app.support.failureMessage
 import dev.silas.portainer.core.api.GitAuth
 import dev.silas.portainer.core.api.GitRedeployRequest
 import dev.silas.portainer.core.api.GitSettingsRequest
-import dev.silas.portainer.core.api.GitSourceAuth
 import dev.silas.portainer.core.api.GitSourceUpdate
 import dev.silas.portainer.core.api.stacksUsingGitSource
 import dev.silas.portainer.core.model.AutoUpdate
@@ -29,96 +28,12 @@ import kotlinx.coroutines.launch
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
-const val INTERVAL_ERROR = "Use a duration of at least 1 minute, e.g. 5m, 1h or 1h30m"
-const val PASSWORD_REQUIRED_ERROR = "Enter the password or token"
+const val FORCE_REDEPLOY_ALWAYS = "Force redeployment: always (Portainer recreates the containers)"
 const val SAVE_SETTINGS_FIRST_MESSAGE =
     "Save or undo the other git settings first: Pull and redeploy only applies the reference and the environment variables."
 
-/** CE runs automatic updates by polling the repository or by a webhook, not both. */
-enum class AutoUpdateMechanism { Polling, Webhook }
-
-/** A Go duration of hours, minutes and seconds (`5m`, `1h30m`, `90s`) of at least one minute, as Portainer requires. */
-fun isValidInterval(text: String): Boolean {
-    val m = Regex("""^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$""").matchEntire(text) ?: return false
-    if (text.isEmpty()) return false
-    val (h, min, s) = m.destructured
-    val seconds = (h.toLongOrNull() ?: 0) * 3600 + (min.toLongOrNull() ?: 0) * 60 + (s.toLongOrNull() ?: 0)
-    return seconds >= 60
-}
-
 @OptIn(ExperimentalUuidApi::class)
 private fun randomWebhookId(): String = Uuid.random().toString()
-
-/** The git settings form. [password] is only what was typed (empty = keep the stored one); it is never shown back. */
-data class GitSettingsForm(
-    val url: String,
-    val referenceName: String,
-    val configFilePath: String,
-    /** One path per line. */
-    val additionalFiles: String,
-    val authEnabled: Boolean,
-    val username: String,
-    val password: String,
-    val tlsSkipVerify: Boolean,
-    val autoUpdateEnabled: Boolean,
-    val mechanism: AutoUpdateMechanism,
-    val interval: String,
-    val webhookId: String?,
-    val forceUpdate: Boolean,
-    val forcePullImage: Boolean,
-    val env: List<EnvVar>,
-    val envMode: EnvMode = EnvMode.Rows,
-    val envBlock: String = "",
-) {
-    private val parsedBlock: Pair<List<EnvVar>, List<String>>? by lazy { if (envMode == EnvMode.Block) parseDotEnv(envBlock) else null }
-
-    /** The env that is sent: the rows without blank ones, or the parsed block. */
-    val effectiveEnv: List<EnvVar> by lazy { parsedBlock?.first ?: env.filterNot { it.name.isEmpty() && it.value.isEmpty() } }
-    val envErrors: List<String> by lazy { parsedBlock?.second.orEmpty() + envErrors(effectiveEnv) }
-
-    val additionalPaths: List<String> get() = additionalFiles.lines().map { it.trim() }.filter { it.isNotEmpty() }
-
-    /** The source polling interval this form means (`""` = off). */
-    val pollingInterval: String get() = if (autoUpdateEnabled && mechanism == AutoUpdateMechanism.Polling) interval.trim() else ""
-
-    /** Only what is saved, so switching views or leaving a hidden field as it was is no change. */
-    internal val autoUpdateKey: List<Any?>
-        get() = if (!autoUpdateEnabled) {
-            listOf(false)
-        } else {
-            listOf(true, mechanism, if (mechanism == AutoUpdateMechanism.Polling) interval.trim() else webhookId, forceUpdate, forcePullImage)
-        }
-
-    internal val authKey: List<Any?> get() = if (authEnabled) listOf(true, username) else listOf(false)
-
-    /** Env values and the password can be secrets. */
-    override fun toString(): String =
-        "GitSettingsForm(ref=$referenceName, path=$configFilePath, auth=$authEnabled, password=${if (password.isEmpty()) "unchanged" else "***"}, " +
-            "tls=$tlsSkipVerify, autoUpdate=$autoUpdateKey, env=${effectiveEnv.size})"
-}
-
-internal fun formFrom(stack: Stack): GitSettingsForm? {
-    val git = stack.git ?: return null
-    val a = stack.autoUpdate
-    return GitSettingsForm(
-        url = git.url,
-        referenceName = git.referenceName,
-        configFilePath = git.configFilePath,
-        additionalFiles = git.additionalFiles.joinToString("\n"),
-        authEnabled = git.authenticated,
-        username = git.username.orEmpty(),
-        password = "",
-        tlsSkipVerify = git.tlsSkipVerify,
-        autoUpdateEnabled = a != null,
-        mechanism = if (a?.webhookId != null) AutoUpdateMechanism.Webhook else AutoUpdateMechanism.Polling,
-        interval = a?.interval ?: "5m",
-        webhookId = a?.webhookId,
-        forceUpdate = a?.forceUpdate ?: false,
-        forcePullImage = a?.forcePullImage ?: false,
-        env = stack.env,
-        envBlock = formatDotEnv(stack.env),
-    )
-}
 
 /** Save confirmation: what is saved, the shared-source warning, and the connection reminder. */
 data class GitSaveConfirm(val changes: List<String>, val sharedWarning: String?) {
@@ -137,6 +52,9 @@ data class GitRedeployReview(
     val startsStack: Boolean,
 ) {
     val reminder: String get() = CONNECTION_DEPENDENCY_REMINDER
+
+    /** CE's manual redeploy has no force switch: compose always recreates the containers. */
+    val forceRedeployment: String get() = FORCE_REDEPLOY_ALWAYS
 
     override fun toString(): String = "GitRedeployReview(ref=$referenceName, paths=$composePaths, env=${env.size}, pullImage=$pullImage)"
 }
@@ -180,7 +98,6 @@ data class GitSettingsState(
     val confirmDiscard: Boolean = false,
 ) {
     val passwordStored: Boolean get() = original?.authEnabled == true
-    val urlEditable: Boolean get() = sourceId != null
     val pathsEditable: Boolean get() = features.gitPathsEditable
     val canDetach: Boolean get() = available && features.detachFromGit
 
@@ -199,14 +116,7 @@ data class GitSettingsState(
         get() {
             val f = form ?: return emptyList()
             val o = original ?: return emptyList()
-            return buildList {
-                if (urlEditable && f.url.isBlank()) add("Enter the repository URL")
-                if (f.referenceName.isBlank() && o.referenceName.isNotBlank()) add("Enter a reference, e.g. refs/heads/main")
-                if (pathsEditable && f.configFilePath.isBlank()) add("Enter the compose file path")
-                if (f.authEnabled && !o.authEnabled && f.password.isEmpty()) add(PASSWORD_REQUIRED_ERROR)
-                if (f.autoUpdateEnabled && f.mechanism == AutoUpdateMechanism.Polling && !isValidInterval(f.interval.trim())) add(INTERVAL_ERROR)
-                addAll(f.envErrors)
-            }
+            return f.validationErrors(o, pathsEditable)
         }
 
     internal val sourceFieldsChanged: Boolean get() = sourceUpdate() != null
@@ -215,9 +125,7 @@ data class GitSettingsState(
         get() {
             val f = form ?: return false
             val o = original ?: return false
-            return f.url != o.url || f.referenceName != o.referenceName || f.configFilePath != o.configFilePath ||
-                f.additionalPaths != o.additionalPaths || f.authKey != o.authKey || f.password.isNotEmpty() ||
-                f.tlsSkipVerify != o.tlsSkipVerify || f.autoUpdateKey != o.autoUpdateKey
+            return f.settingsDifferFrom(o)
         }
 
     val envChanged: Boolean get() = form != null && original != null && form.effectiveEnv != original.effectiveEnv
@@ -230,18 +138,7 @@ data class GitSettingsState(
         if (sourceId == null) return null
         val f = form ?: return null
         val o = original ?: return null
-        val auth = when {
-            f.authKey == o.authKey && f.password.isEmpty() -> null
-            !f.authEnabled -> GitSourceAuth.None
-            else -> GitSourceAuth.Basic(GitAuth(f.username, f.password.ifEmpty { null }))
-        }
-        val update = GitSourceUpdate(
-            url = f.url.trim().takeIf { it != o.url },
-            tlsSkipVerify = f.tlsSkipVerify.takeIf { it != o.tlsSkipVerify },
-            auth = auth,
-            interval = f.pollingInterval.takeIf { features.pollingOnSource && it != o.pollingInterval },
-        )
-        return update.takeIf { it != GitSourceUpdate() }
+        return f.sourceUpdateFrom(o, features.pollingOnSource)
     }
 
     /** The warning for a change that reaches other stacks through the shared Source. */
@@ -417,17 +314,21 @@ class GitSettingsViewModel(
             ?: OTHER_STACK_OPERATION_MESSAGE.takeIf { sessions.progress(key).value?.running == true }
     }
 
-    /** Protection blocks what deploys: a redeploy, a detach, and turning automatic updates on. */
+    /** Protection blocks what deploys: a redeploy, a detach, and a save that starts automatic redeploys. */
     private fun protectionRefusal(d: StackDetailState): String? = when {
         d.protected -> PROTECTED_IMAGE_MESSAGE
         d.protectionUnknown -> PROTECTION_UNKNOWN_MESSAGE
         else -> null
     }
 
-    private fun turnsAutoUpdateOn(s: GitSettingsState) = s.form?.autoUpdateEnabled == true && s.original?.autoUpdateEnabled == false
+    private fun startsAutoRedeploys(s: GitSettingsState): Boolean {
+        val f = s.form ?: return false
+        val o = s.original ?: return false
+        return f.startsAutoRedeploysFrom(o)
+    }
 
     private fun saveRefusal(s: GitSettingsState, d: StackDetailState): String? =
-        commonRefusal(d) ?: protectionRefusal(d).takeIf { turnsAutoUpdateOn(s) }
+        commonRefusal(d) ?: protectionRefusal(d).takeIf { startsAutoRedeploys(s) }
 
     fun requestSave() {
         val s = _state.value
@@ -442,15 +343,7 @@ class GitSettingsViewModel(
     private fun changeList(s: GitSettingsState): List<String> {
         val f = s.form ?: return emptyList()
         val o = s.original ?: return emptyList()
-        return buildList {
-            if (f.url != o.url) add("Repository URL")
-            if (f.referenceName != o.referenceName) add("Reference: ${f.referenceName.ifEmpty { "default branch" }}")
-            if (f.configFilePath != o.configFilePath || f.additionalPaths != o.additionalPaths) add("Compose paths")
-            if (f.authKey != o.authKey || f.password.isNotEmpty()) add(if (f.authEnabled) "Authentication" else "Authentication off")
-            if (f.tlsSkipVerify != o.tlsSkipVerify) add(if (f.tlsSkipVerify) "Skip TLS verification" else "Verify TLS")
-            if (f.autoUpdateKey != o.autoUpdateKey) add(if (f.autoUpdateEnabled) "Automatic updates" else "Automatic updates off")
-            addAll(envDiff(o.effectiveEnv, f.effectiveEnv))
-        }
+        return f.changesFrom(o)
     }
 
     fun dismissSave() = _state.update { it.copy(saveConfirm = null) }

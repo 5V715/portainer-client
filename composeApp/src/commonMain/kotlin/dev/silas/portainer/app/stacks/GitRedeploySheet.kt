@@ -25,8 +25,8 @@ import androidx.compose.ui.unit.dp
 
 /**
  * The pull and redeploy review: the reference (and what it was, when it changes), the compose paths, the env
- * changes, the Re-pull image switch and the connection reminder. CE's manual redeploy always recreates, so there is
- * no force switch.
+ * changes, the Re-pull image switch, the (fixed) force redeployment and the connection reminder. CE's manual redeploy
+ * always recreates, so force is shown as "always" rather than offered as a switch.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -47,6 +47,8 @@ fun GitRedeploySheet(review: GitRedeployReview, onPullImage: (Boolean) -> Unit, 
             ReviewLabel("Environment variables")
             if (review.envChanges.isEmpty()) Text("No changes.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             review.envChanges.forEach { Text(it, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall) }
+            ReviewLabel("Redeployment")
+            Text(review.forceRedeployment)
             if (review.startsStack) Text("The stack is stopped. Redeploying starts its containers.")
         }
         Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 24.dp)) {

@@ -348,8 +348,9 @@ class StackSessionsTest {
         assertFalse(sessions.isRunning("s1", 2))
         sessions.clear(key) // never forgets a running one
         assertEquals(StackOp.Stop, sessions.progress(key).value?.op)
-        opGate!!.complete(Unit)
+        // Set before the stop is released, so the read-back can't see the old status.
         statuses = mutableListOf(2)
+        opGate!!.complete(Unit)
         assertNull(finished(sessions).error)
         assertEquals(1, requests.count { !it.startsWith("GET") }, requests.toString())
         sessions.clear(key)

@@ -144,16 +144,33 @@ class StacksGitApiTest {
 
     @Test
     fun sourceChangesGoToTheGitOpsSourceFirst() = runTest {
-        val source = GitSourceUpdate(url = "https://git.example/new.git", tlsSkipVerify = false, auth = GitSourceAuth.Basic(GitAuth("bob", null)), interval = "10m")
+        val source = GitSourceUpdate(tlsSkipVerify = false, auth = GitSourceAuth.Basic(GitAuth("bob", null)), interval = "10m")
         client("2.45.3").updateGitSettings(4, 3, settings(sourceId = 7, source = source))
         val paths = requests.value.filter { it.method != HttpMethod.Get }.map { "${it.method.value} ${it.url.encodedPath}" }
         assertEquals(listOf("PUT /api/gitops/sources/7", "POST /api/stacks/4/git"), paths)
         val (_, body) = sent(HttpMethod.Put, "/api/gitops/sources/7")
         assertEquals(
-            Json.parseToJsonElement("""{"url":"https://git.example/new.git","tlsSkipVerify":false,"authentication":{"username":"bob"},"interval":"10m"}"""),
+            Json.parseToJsonElement("""{"tlsSkipVerify":false,"authentication":{"username":"bob"},"interval":"10m"}"""),
             body,
             "no password key: the source keeps its stored password",
         )
+    }
+
+    @Test
+    fun aStackFailureAfterTheSourceWasSavedSaysSo() = runTest {
+        val failing = { req: HttpRequestData ->
+            if (req.url.encodedPath == "/api/stacks/4/git") HttpStatusCode.InternalServerError to """{"message":"repository not found $key"}""" else null
+        }
+        val e = assertFailsWith<IllegalStateException> {
+            client("2.45.3", failing).updateGitSettings(4, 3, settings(sourceId = 7, source = GitSourceUpdate(tlsSkipVerify = false)))
+        }
+        assertTrue(e.message!!.startsWith(SOURCE_SAVED_STACK_NOT_MESSAGE), e.message)
+        assertTrue(e.message!!.contains("repository not found"), e.message)
+        assertFalse(e.message!!.contains(key))
+        // Without a source change the stack's own error is passed on as it is.
+        requests.value = emptyList()
+        assertFailsWith<PortainerException.Api> { client("2.45.3", failing).updateGitSettings(4, 3, settings(sourceId = 7)) }
+        assertTrue(requests.value.none { it.url.encodedPath.startsWith("/api/gitops") })
     }
 
     @Test

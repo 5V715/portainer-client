@@ -53,6 +53,13 @@ Single source of truth for stack-related field names in v1.2 Tasks 1, 7, 8, 9 an
 - AutoUpdate "on" test (CE UI `parseAutoUpdateResponse`, `app/react/portainer/gitops/AutoUpdateFieldset/utils.ts`):
   on iff the object is non-null **and** `Interval` or `Webhook` is non-empty. The app maps everything else to `autoUpdate == null`.
 - 2.44+: `AutoUpdate.Interval` in responses is back-filled from the linked GitOps Source (`fillAutoUpdateInterval`).
+  **App behaviour (Task 8):** when this stack turns polling off on 2.44+ (auto-updates off, or switched to the
+  webhook), the app clears the Source interval (`""`, shared — warned) and sends `AutoUpdate: null` when no webhook
+  remains. **Known stale display:** if *another* stack (or CE's UI) clears the Source interval, this stack still has its
+  stored `AutoUpdate` object; the back-filled `Interval` is then `""`, so with no webhook the app shows automatic
+  updates as off (CE's own "on" rule) although the stack's stored object was never cleared. Because the app's model
+  then holds `autoUpdate == null`, any later save from the app sends `AutoUpdate: null` and clears the stored object
+  too (matching what is displayed).
 
 ## Listing — `GET /api/stacks`
 

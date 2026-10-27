@@ -97,7 +97,7 @@ private fun GitSettingsFields(state: GitSettingsState, form: GitSettingsForm, en
         if (state.sourceId != null) {
             val others = state.otherStacksOnSource
             Hint(
-                "URL, credentials and TLS" + (if (state.features.pollingOnSource) " and the polling interval" else "") +
+                "Credentials and TLS" + (if (state.features.pollingOnSource) " and the polling interval" else "") +
                     " belong to a shared git source" + when (others) {
                         null -> "."
                         0 -> " no other stack uses."
@@ -106,15 +106,10 @@ private fun GitSettingsFields(state: GitSettingsState, form: GitSettingsForm, en
                     },
             )
         }
-        if (state.urlEditable) {
-            TextInput("Repository URL", form.url, enabled, keyboard = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Uri)) {
-                viewModel.edit { copy(url = it) }
-            }
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Hint("Repository URL")
-                Text(form.url, fontFamily = FontFamily.Monospace)
-            }
+        // Read-only after creation, as in Portainer.
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Hint("Repository URL")
+            Text(form.url, fontFamily = FontFamily.Monospace)
         }
         // CE has no ref listing (Business Edition only): a text field.
         TextInput("Reference", form.referenceName, enabled, supporting = "e.g. refs/heads/main or refs/tags/v1.0") {
@@ -208,7 +203,6 @@ private fun TextInput(
     enabled: Boolean,
     singleLine: Boolean = true,
     supporting: String? = null,
-    keyboard: KeyboardOptions = plainKeyboard,
     onChange: (String) -> Unit,
 ) {
     OutlinedTextField(
@@ -218,7 +212,7 @@ private fun TextInput(
         supportingText = supporting?.let { { Text(it) } },
         singleLine = singleLine,
         enabled = enabled,
-        keyboardOptions = keyboard,
+        keyboardOptions = plainKeyboard,
         textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
         modifier = Modifier.fillMaxWidth().let { if (singleLine) it else it.heightIn(min = 96.dp) },
     )

@@ -244,9 +244,9 @@ sealed interface GitSourceAuth {
 /**
  * Changes to the GitOps Source a stack uses (CE 2.43+, `PUT /api/gitops/sources/{id}`); null fields stay as they are.
  * The Source is shared: every stack using it gets the change. [interval] is the polling interval (2.44+, `""` = off).
+ * The repository URL is never changed: it is read-only after creation, as in Portainer's UI.
  */
 data class GitSourceUpdate(
-    val url: String? = null,
     val tlsSkipVerify: Boolean? = null,
     val auth: GitSourceAuth? = null,
     val interval: String? = null,
@@ -256,7 +256,7 @@ data class GitSourceUpdate(
  * The full git settings of a stack (`POST /api/stacks/{id}/git`). Portainer replaces the ref, env, AutoUpdate and
  * (without a source) credentials and TLS with what is sent, so every field holds the stack's current value unless
  * the user changed it. [auth] null turns authentication off; a null password keeps the stored one. [sourceId]: the
- * stack's GitOps Source (2.43+); with it, URL, credentials and TLS are the Source's and change through [source].
+ * stack's GitOps Source (2.43+); with it, credentials and TLS are the Source's and change through [source].
  */
 data class GitSettingsRequest(
     val referenceName: String,
@@ -320,10 +320,10 @@ private fun JsonObjectBuilder.putInlineAuth(auth: GitAuth?) {
 suspend fun PortainerClient.updateGitSettings(id: Int, endpointId: Int, r: GitSettingsRequest) {
     val features = stackFeatures(status().version)
     val sourceId = r.sourceId?.takeIf { features.savedGitCredentials }
-    r.source?.let { change ->
+    val sourceSaved = r.source?.let { change ->
         if (sourceId == null) throw IllegalStateException("This Portainer version has no shared git sources")
         updateGitSource(sourceId, change, intervalOnSource = features.pollingOnSource)
-    }
+    } ?: false
     val body = buildJsonObject {
         put("RepositoryReferenceName", r.referenceName)
         if (features.gitPathsEditable) {
@@ -341,17 +341,26 @@ suspend fun PortainerClient.updateGitSettings(id: Int, endpointId: Int, r: GitSe
             put("TLSSkipVerify", r.tlsSkipVerify)
         }
     }
-    execute("/api/stacks/$id/git") {
-        method = HttpMethod.Post
-        parameter("endpointId", endpointId)
-        contentType(ContentType.Application.Json)
-        setBody(body)
+    try {
+        execute("/api/stacks/$id/git") {
+            method = HttpMethod.Post
+            parameter("endpointId", endpointId)
+            contentType(ContentType.Application.Json)
+            setBody(body)
+        }
+    } catch (e: PortainerException) {
+        // The two requests aren't atomic: say what did change (the message is already redacted).
+        if (sourceSaved) throw IllegalStateException("$SOURCE_SAVED_STACK_NOT_MESSAGE ${e.message}")
+        throw e
     }
 }
 
-private suspend fun PortainerClient.updateGitSource(sourceId: Int, change: GitSourceUpdate, intervalOnSource: Boolean) {
+/** Prefix of the error when the shared source was updated but the stack's own settings then failed. */
+const val SOURCE_SAVED_STACK_NOT_MESSAGE = "Source settings were saved, stack settings were not:"
+
+/** True when a request was sent (something was left to change). */
+private suspend fun PortainerClient.updateGitSource(sourceId: Int, change: GitSourceUpdate, intervalOnSource: Boolean): Boolean {
     val body = buildJsonObject {
-        change.url?.let { put("url", it) }
         change.tlsSkipVerify?.let { put("tlsSkipVerify", it) }
         when (val auth = change.auth) {
             null -> Unit
@@ -367,12 +376,13 @@ private suspend fun PortainerClient.updateGitSource(sourceId: Int, change: GitSo
         }
         if (intervalOnSource) change.interval?.let { put("interval", it) }
     }
-    if (body.isEmpty()) return
+    if (body.isEmpty()) return false
     execute("/api/gitops/sources/$sourceId") {
         method = HttpMethod.Put
         contentType(ContentType.Application.Json)
         setBody(body)
     }
+    return true
 }
 
 /** Pulls the repository and redeploys the stack with [r]. From 2.41 the deploy continues after the response. */
