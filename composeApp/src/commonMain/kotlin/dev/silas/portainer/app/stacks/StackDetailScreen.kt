@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,6 +17,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -181,6 +183,17 @@ fun StackDetailScreen(
     state.confirm?.let { confirm ->
         StackConfirmSheet(confirm, viewModel::setTypedName, viewModel::confirm, viewModel::dismissConfirm)
     }
+    state.transfer?.let { form ->
+        TransferSheet(
+            form,
+            viewModel::setTransferTarget,
+            viewModel::setTransferName,
+            viewModel::setTransferTypedName,
+            viewModel::setTransferPassword,
+            viewModel::submitTransfer,
+            viewModel::dismissTransfer,
+        )
+    }
     state.failure?.let { (op, message) ->
         AlertDialog(
             onDismissRequest = viewModel::clearFailure,
@@ -282,6 +295,16 @@ fun StackDetailScreen(
                     Field("Reference", git.referenceName.ifEmpty { "Default branch" }, mono = true)
                     Field("Compose path", git.configFilePath, mono = true)
                     if (git.additionalFiles.isNotEmpty()) Field("Additional paths", git.additionalFiles.joinToString("\n"), mono = true)
+                }
+
+                if (stack.control == StackControl.Full && stack.id != null) {
+                    HorizontalDivider()
+                    Text("Copy or move", style = MaterialTheme.typography.titleMedium)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        val idle = state.running == null && !state.starting && !state.loading
+                        OutlinedButton({ viewModel.openTransfer(TransferMode.Duplicate) }, Modifier.weight(1f), enabled = idle) { Text("Duplicate") }
+                        OutlinedButton({ viewModel.openTransfer(TransferMode.Migrate) }, Modifier.weight(1f), enabled = idle) { Text("Migrate") }
+                    }
                 }
 
                 HorizontalDivider()

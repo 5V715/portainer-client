@@ -487,6 +487,24 @@ private suspend fun PortainerClient.createStack(path: String, endpointId: Int, b
     return decodeBody(response) { response.body<StackDto>() }.toModel()
 }
 
+/**
+ * Moves a stack to another Docker environment (`POST /api/stacks/{id}/migrate?endpointId=<source>`): Portainer deploys it
+ * on [toEndpointId], then removes it from [fromEndpointId], all inside the request. [newName] (blank or null: keep the
+ * name) is not normalised by Portainer, so callers validate it first. 409 when the name is used on the target.
+ */
+suspend fun PortainerClient.migrateStack(id: Int, fromEndpointId: Int, toEndpointId: Int, newName: String?) {
+    val body = buildJsonObject {
+        put("EndpointID", toEndpointId)
+        put("SwarmID", "")
+        newName?.trim()?.takeIf { it.isNotEmpty() }?.let { put("Name", it) }
+    }
+    stackOperation("/api/stacks/$id/migrate", fromEndpointId) {
+        method = HttpMethod.Post
+        contentType(ContentType.Application.Json)
+        setBody(body)
+    }
+}
+
 /** A custom template's variable: `{{ name }}` in its file. */
 data class TemplateVariable(val name: String, val label: String, val defaultValue: String)
 

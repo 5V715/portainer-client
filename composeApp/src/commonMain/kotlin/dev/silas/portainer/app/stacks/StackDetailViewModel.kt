@@ -4,7 +4,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.silas.portainer.app.AppContainer
 import dev.silas.portainer.app.support.failureMessage
+import dev.silas.portainer.core.api.GitAuth
+import dev.silas.portainer.core.api.GitSettingsRequest
 import dev.silas.portainer.core.api.containers
+import dev.silas.portainer.core.api.endpoints
 import dev.silas.portainer.core.api.stack
 import dev.silas.portainer.core.api.stackFile
 import dev.silas.portainer.core.api.stacks
@@ -24,6 +27,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -56,8 +60,10 @@ data class StackDetailState(
     val failure: Pair<StackOp, String>? = null,
     /** A finished start/stop, confirmed by Portainer. */
     val notice: String? = null,
-    /** The stack was deleted: the screen goes back to the list. */
+    /** The stack was deleted or migrated away: the screen goes back to the list. */
     val deleted: Boolean = false,
+    /** The duplicate / migrate sheet. */
+    val transfer: TransferForm? = null,
 ) {
     val ops: List<StackOp> get() = availableStackOps(this)
 }
@@ -87,7 +93,9 @@ class StackDetailViewModel(
                     p == null -> _state.update { it.copy(running = null) }
                     // A result for another stack that had this name (deleted, then re-created): stale.
                     stackId != null && p.stackId != stackId -> if (!p.running) sessions.clear(key)
-                    p.running -> _state.update { it.copy(running = p.op) }
+                    p.running -> _state.update {
+                        it.copy(running = p.op, transfer = if (p.op is StackOp.Migrate) it.transfer?.copy(running = true) else it.transfer)
+                    }
                     stackId == null -> Unit // external: Portainer can't act on it, so nothing ran on it
                     else -> finished(p)
                 }
@@ -109,6 +117,21 @@ class StackDetailViewModel(
             p.op is StackOp.Create && error == null -> {
                 _state.update { it.copy(running = null) }
                 sessions.clear(key)
+                refresh()
+            }
+            // The stack is gone from this environment once Portainer has it on the target.
+            p.op is StackOp.Migrate && error == null -> _state.update { it.copy(running = null, transfer = null, deleted = true) }
+            // A failed migrate shows in its sheet, which keeps the form; without the sheet (left and came back) a dialog.
+            p.op is StackOp.Migrate -> {
+                val sheetOpen = _state.value.transfer != null
+                _state.update {
+                    it.copy(
+                        running = null,
+                        transfer = it.transfer?.copy(running = false, error = error),
+                        failure = if (it.transfer == null) p.op to error!! else null,
+                    )
+                }
+                if (sheetOpen) sessions.clear(key)
                 refresh()
             }
             p.op.shownElsewhere -> {
@@ -181,6 +204,180 @@ class StackDetailViewModel(
                 _state.update { it.copy(starting = false, loading = false) }
             }
         }
+    }
+
+    // ---- duplicate / migrate ----
+
+    private var transferJob: Job? = null
+    private var namesJob: Job? = null
+    private var duplicateJob: Job? = null
+
+    /**
+     * Opens the sheet to [TransferMode.Duplicate] or [TransferMode.Migrate] the stack as loaded; a refused one only says
+     * why. Targets are the online Docker standalone environments (a migrate leaves the source out).
+     */
+    fun openTransfer(mode: TransferMode) {
+        val s = _state.value
+        if (s.running != null || s.starting || s.confirm != null || s.transfer != null) return
+        val stack = s.stack ?: return
+        (transferRefusal(s, mode) ?: sessions.refusal(serverId, endpointId).takeIf { mode == TransferMode.Migrate })?.let { reason ->
+            _state.update { it.copy(error = reason) }
+            return
+        }
+        val git = stack.git
+        val usesSource = mode == TransferMode.Duplicate && git?.sourceId != null && s.features.savedGitCredentials
+        val form = TransferForm(
+            mode = mode,
+            sourceName = stack.name,
+            sourceEndpointId = endpointId,
+            name = if (mode == TransferMode.Migrate) stack.name else "${stack.name}-copy",
+            passwordNeeded = mode == TransferMode.Duplicate && git != null && git.authenticated && !usesSource,
+            usesGitSource = usesSource && git?.authenticated == true,
+            autoUpdateDropped = mode == TransferMode.Duplicate && stack.autoUpdate != null,
+            protectedWarning = mode == TransferMode.Duplicate && s.protected,
+        )
+        _state.update { it.copy(transfer = form) }
+        transferJob = viewModelScope.launch {
+            try {
+                val all = container.client(serverId).endpoints().filter { it.type.supported && it.online }
+                val targets = if (mode == TransferMode.Migrate) all.filter { it.id != endpointId } else all
+                val first = (targets.firstOrNull { it.id == endpointId } ?: targets.firstOrNull())?.id
+                _state.update { it.copy(transfer = it.transfer?.copy(targets = targets, loadingTargets = false, targetId = first)) }
+                if (first != null) loadTargetNames(first)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val message = failureMessage(e)
+                _state.update { it.copy(transfer = it.transfer?.copy(loadingTargets = false, error = message)) }
+            }
+        }
+    }
+
+    private suspend fun loadTargetNames(targetId: Int) {
+        try {
+            val names = container.client(serverId).stacks(targetId).map { it.name }.toSet()
+            _state.update { s -> if (s.transfer?.targetId == targetId) s.copy(transfer = s.transfer.copy(existingNames = names)) else s }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val message = failureMessage(e)
+            _state.update { s -> if (s.transfer?.targetId == targetId) s.copy(transfer = s.transfer.copy(error = message)) else s }
+        }
+    }
+
+    fun setTransferTarget(id: Int) {
+        val form = _state.value.transfer ?: return
+        if (form.running || form.targets.none { it.id == id }) return
+        _state.update { it.copy(transfer = it.transfer?.copy(targetId = id, existingNames = null, error = null)) }
+        namesJob?.cancel()
+        namesJob = viewModelScope.launch { loadTargetNames(id) }
+    }
+
+    private fun editTransfer(change: TransferForm.() -> TransferForm) =
+        _state.update { s -> s.copy(transfer = s.transfer?.takeIf { !it.running }?.change() ?: s.transfer) }
+
+    fun setTransferName(name: String) = editTransfer { copy(name = name) }
+
+    fun setTransferTypedName(text: String) = editTransfer { copy(typedName = text) }
+
+    fun setTransferPassword(text: String) = editTransfer { copy(password = text) }
+
+    fun dismissTransfer() {
+        if (_state.value.transfer?.running == true) return
+        transferJob?.cancel()
+        namesJob?.cancel()
+        _state.update { it.copy(transfer = null) }
+    }
+
+    /**
+     * Starts the migrate or duplicate from the sheet: the stack is read again and checked (protection, the name on the
+     * target) first, then the request runs in the app's stack sessions. A failure keeps the sheet and its values; the
+     * git password is sent once and dropped from the form here.
+     */
+    fun submitTransfer() {
+        val form = _state.value.transfer ?: return
+        if (!form.canSubmit || _state.value.starting) return
+        val targetId = form.targetId ?: return
+        val password = form.password
+        _state.update { it.copy(starting = true, transfer = it.transfer?.copy(running = true, error = null, password = "")) }
+        viewModelScope.launch {
+            try {
+                loadJob?.cancelAndJoin()
+                load()
+                val s = _state.value
+                val id = s.stack?.id
+                val names = container.client(serverId).stacks(targetId).map { it.name }.toSet()
+                val refusal = transferRefusal(s, form.mode)
+                    ?: form.copy(existingNames = names).nameError
+                    ?: sessions.refusal(serverId, targetId)
+                    ?: sessions.refusal(serverId, endpointId).takeIf { form.mode == TransferMode.Migrate }
+                when {
+                    refusal != null -> transferFailed(refusal)
+                    id == null -> transferFailed("The stack couldn't be loaded — try again.")
+                    form.mode == TransferMode.Migrate ->
+                        if (!sessions.start(key, id, StackOp.Migrate(targetId, form.newName))) transferFailed(STACK_OPERATION_IN_PROGRESS_MESSAGE)
+                    else -> {
+                        val copyKey = StackKey(serverId, targetId, form.effectiveName)
+                        if (sessions.create(copyKey, duplicateOp(s, password))) {
+                            val targetName = form.targets.firstOrNull { it.id == targetId }?.name.orEmpty()
+                            duplicateJob?.cancel()
+                            duplicateJob = viewModelScope.launch { awaitDuplicate(copyKey, targetName) }
+                        } else {
+                            transferFailed(STACK_OPERATION_IN_PROGRESS_MESSAGE)
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                transferFailed(failureMessage(e))
+            } finally {
+                _state.update { it.copy(starting = false, loading = false) }
+            }
+        }
+    }
+
+    private fun transferFailed(message: String) =
+        _state.update { it.copy(transfer = it.transfer?.copy(running = false, error = message)) }
+
+    /** The create of the copy: its sheet closes when Portainer has the copy running, else shows why not. */
+    private suspend fun awaitDuplicate(copyKey: StackKey, targetName: String) {
+        val p = sessions.progress(copyKey).first { it != null && !it.running } ?: return
+        sessions.clear(copyKey)
+        val error = p.error
+        if (error == null) {
+            _state.update { it.copy(transfer = null, notice = "Created ${copyKey.stackName} on $targetName") }
+        } else {
+            // A copy whose deploy failed exists on the target: the name is taken there now.
+            val hint = if (p.stackId != STACK_NOT_CREATED) " The copy exists on $targetName; fix or delete it there, or pick another name." else ""
+            transferFailed(error + hint)
+        }
+    }
+
+    /**
+     * The create that copies the loaded stack: a web-editor stack's file and env, or a git stack's repository settings
+     * (its GitOps Source on 2.43+, else the typed [password]). Automatic updates are not copied: a webhook id must be
+     * unique and polling lives on the Source. Only the loaded state is read; the source is never written.
+     */
+    private fun duplicateOp(s: StackDetailState, password: String): StackOp.Create {
+        val stack = checkNotNull(s.stack)
+        val git = stack.git ?: return StackOp.Create.Text(checkNotNull(s.file), stack.env)
+        val sourceId = git.sourceId?.takeIf { s.features.savedGitCredentials }
+        val auth = if (sourceId == null && git.authenticated) GitAuth(git.username.orEmpty(), password) else null
+        return StackOp.Create.Repository(
+            git.url,
+            GitSettingsRequest(
+                referenceName = git.referenceName,
+                configFilePath = git.configFilePath,
+                additionalFiles = git.additionalFiles,
+                auth = auth,
+                tlsSkipVerify = git.tlsSkipVerify,
+                autoUpdate = null,
+                env = stack.env,
+                prune = false,
+                sourceId = sourceId,
+            ),
+        )
     }
 
     fun clearFailure() {

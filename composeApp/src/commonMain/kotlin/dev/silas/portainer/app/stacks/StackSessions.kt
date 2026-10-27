@@ -11,6 +11,8 @@ import dev.silas.portainer.core.api.createStackFromText
 import dev.silas.portainer.core.api.deleteStack
 import dev.silas.portainer.core.api.detachFromGit
 import dev.silas.portainer.core.api.gitRedeploy
+import dev.silas.portainer.core.api.migrateStack
+import dev.silas.portainer.core.api.stacks
 import dev.silas.portainer.core.api.updateGitSettings
 import dev.silas.portainer.core.api.stack
 import dev.silas.portainer.core.api.startStack
@@ -18,6 +20,7 @@ import dev.silas.portainer.core.api.stopStack
 import dev.silas.portainer.core.api.updateStack
 import dev.silas.portainer.core.model.EnvVar
 import dev.silas.portainer.core.model.Stack
+import dev.silas.portainer.core.model.StackControl
 import dev.silas.portainer.core.model.StackStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -60,6 +63,12 @@ sealed interface StackOp {
 
     /** Turns a git stack into a web-editor stack with its current file (redeploys it); one-way. */
     data object Detach : StackOp
+
+    /**
+     * Moves the stack to the Docker environment [targetEndpointId] (under [newName] when not null) and takes it down on
+     * the source. Done only once the target lists it, settled and not failed.
+     */
+    data class Migrate(val targetEndpointId: Int, val newName: String?) : StackOp
 
     /**
      * Creates the stack named by its [StackKey] (its id is known once Portainer answers) and waits for its deploy.
@@ -135,8 +144,13 @@ class StackSessions(
      * Runs [op] on the stack [stackId] ([key]'s stack). Refused (false) while an operation for [key] is still
      * running or [refusal] gives a reason; a finished result is replaced. A [StackOp.Create] goes through [create].
      */
-    fun start(key: StackKey, stackId: Int, op: StackOp): Boolean =
-        if (op is StackOp.Create) create(key, op) else launch(key, stackId, op)
+    fun start(key: StackKey, stackId: Int, op: StackOp): Boolean = when (op) {
+        is StackOp.Create -> create(key, op)
+        // A migrate also deploys on the target: it must be free of other work too.
+        is StackOp.Migrate ->
+            refusal(key.serverId, op.targetEndpointId) == null && !isRunning(key.serverId, op.targetEndpointId) && launch(key, stackId, op)
+        else -> launch(key, stackId, op)
+    }
 
     /**
      * Creates [key]'s stack with [op]. Refused (false) while any stack operation runs on [key]'s endpoint or
@@ -236,6 +250,10 @@ class StackSessions(
                 val stack = awaitStatus(client, id, StackStatus.Active, "Portainer reports the stack as stopped after detaching it.")
                 if (stack?.git != null) throw IllegalStateException("Portainer still reports the stack as deployed from git.")
             }
+            is StackOp.Migrate -> {
+                client.migrateStack(id, endpointId, op.targetEndpointId, op.newName)
+                awaitMigrated(client, op.targetEndpointId, op.newName?.trim()?.takeIf { it.isNotEmpty() } ?: key.stackName)
+            }
             is StackOp.Create -> {
                 val created = when (op) {
                     is StackOp.Create.Text -> client.createStackFromText(endpointId, key.stackName, op.file, op.env)
@@ -285,4 +303,39 @@ class StackSessions(
             }
         }
     }
+
+    /**
+     * Reads [endpointId]'s stacks until the Portainer-managed one named [name] is there and no longer deploying.
+     * Missing for [MIGRATE_LISTING_GRACE_MS] (or the poll timeout, if shorter) fails: a migrate that can't be seen
+     * on the target is not reported as done.
+     */
+    private suspend fun awaitMigrated(client: PortainerClient, endpointId: Int, name: String) {
+        val started = TimeSource.Monotonic.markNow()
+        val grace = minOf(pollTimeoutMs, MIGRATE_LISTING_GRACE_MS).milliseconds
+        while (true) {
+            val listed = try {
+                client.stacks(endpointId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                throw IllegalStateException("Couldn't check the result: ${safeMessage(e)}")
+            }
+            val stack = listed.firstOrNull { it.control == StackControl.Full && it.name == name }
+            when {
+                stack == null -> if (started.elapsedNow() >= grace) {
+                    throw IllegalStateException("Portainer doesn't list the stack on the target environment after migrating it.")
+                }
+                stack.status == StackStatus.Deploying -> if (started.elapsedNow() >= pollTimeoutMs.milliseconds) {
+                    throw IllegalStateException(STACK_STILL_WORKING_MESSAGE)
+                }
+                stack.status == StackStatus.Error ->
+                    throw IllegalStateException(stack.statusMessage ?: "Portainer reports that the deployment failed on the target environment.")
+                else -> return
+            }
+            delay(pollIntervalMs)
+        }
+    }
 }
+
+/** How long a migrated stack may be missing from the target's list before the migrate counts as lost. */
+private const val MIGRATE_LISTING_GRACE_MS = 30_000L

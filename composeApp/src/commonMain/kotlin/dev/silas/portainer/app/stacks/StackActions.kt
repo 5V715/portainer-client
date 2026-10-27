@@ -61,6 +61,21 @@ fun stackOpRefusal(state: StackDetailState, op: StackOp): String? {
     }
 }
 
+/**
+ * Why the stack as loaded can't be migrated or duplicated, or null. A migrate takes the stack down on its source, so it
+ * follows the protected rule of every operation; a duplicate only reads the stack, but a web-editor one needs its file.
+ * External stacks get neither.
+ */
+fun transferRefusal(state: StackDetailState, mode: TransferMode): String? {
+    val stack = state.stack ?: return null
+    if (stack.control != StackControl.Full || stack.id == null) return EXTERNAL_STACK_MESSAGE
+    if (stack.status == StackStatus.Deploying) return STACK_DEPLOYING_MESSAGE
+    return when (mode) {
+        TransferMode.Migrate -> stackOpRefusal(state, StackOp.Migrate(targetEndpointId = 0, newName = null))
+        TransferMode.Duplicate -> if (stack.git == null && state.file == null) state.fileError ?: PROTECTION_UNKNOWN_MESSAGE else null
+    }
+}
+
 /** The confirmation of [op] (stop or delete; start asks nothing) on [stackName]; delete needs the name typed exactly. */
 data class StackConfirm(
     val op: StackOp,
@@ -100,6 +115,7 @@ internal fun opLabel(op: StackOp): String = when (op) {
     is StackOp.GitSettings -> "Save"
     is StackOp.GitRedeploy -> "Pull and redeploy"
     StackOp.Detach -> "Detach"
+    is StackOp.Migrate -> "Migrate"
     is StackOp.Create -> "Deploy"
 }
 
@@ -111,6 +127,7 @@ internal fun runningLabel(op: StackOp): String = when (op) {
     is StackOp.GitSettings -> "Saving the git settings…"
     is StackOp.GitRedeploy -> "Pulling and redeploying…"
     StackOp.Detach -> "Detaching from git…"
+    is StackOp.Migrate -> "Migrating the stack…"
     is StackOp.Create -> "Creating the stack…"
 }
 
@@ -122,6 +139,7 @@ internal fun failureTitle(op: StackOp): String = when (op) {
     is StackOp.GitSettings -> "Couldn't save the git settings"
     is StackOp.GitRedeploy -> "Couldn't redeploy the stack"
     StackOp.Detach -> "Couldn't detach the stack from git"
+    is StackOp.Migrate -> "Couldn't migrate the stack"
     is StackOp.Create -> "Couldn't create the stack"
 }
 

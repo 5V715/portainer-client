@@ -344,4 +344,39 @@ class StacksApiTest {
         assertEquals(500, e.status)
         assertFalse(e.message!!.contains(key))
     }
+
+    private fun migrateClient(status: HttpStatusCode = HttpStatusCode.OK, body: String = "{}") = client(status, body)
+
+    @Test
+    fun migrateSendsTheTargetAndNewNameFromTheSourceEndpoint() = runTest {
+        migrateClient().migrateStack(5, fromEndpointId = 3, toEndpointId = 8, newName = "web-2")
+        val r = requests.value.single()
+        assertEquals(HttpMethod.Post, r.method)
+        assertEquals("/api/stacks/5/migrate", r.url.encodedPath)
+        assertEquals("3", r.url.parameters["endpointId"])
+        val body = Json.parseToJsonElement((r.body as TextContent).text).jsonObject
+        assertEquals("8", body["EndpointID"].toString())
+        assertEquals("\"\"", body["SwarmID"].toString())
+        assertEquals("\"web-2\"", body["Name"].toString())
+    }
+
+    @Test
+    fun migrateWithoutANewNameKeepsTheNameAndSendsNone() = runTest {
+        migrateClient().migrateStack(5, 3, 8, newName = null)
+        migrateClient().migrateStack(5, 3, 8, newName = "  ")
+        for (r in requests.value) {
+            val body = Json.parseToJsonElement((r.body as TextContent).text).jsonObject
+            assertFalse("Name" in body)
+            assertEquals("8", body["EndpointID"].toString())
+        }
+    }
+
+    @Test
+    fun migrateConflictIsReportedWithoutTheApiKey() = runTest {
+        val e = assertFailsWith<PortainerException.Api> {
+            migrateClient(HttpStatusCode.Conflict, """{"message":"name used $key"}""").migrateStack(5, 3, 8, "web")
+        }
+        assertEquals(409, e.status)
+        assertFalse(e.message!!.contains(key))
+    }
 }
