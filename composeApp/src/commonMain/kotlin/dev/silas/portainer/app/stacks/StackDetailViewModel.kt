@@ -95,12 +95,16 @@ class StackDetailViewModel(
         }
     }
 
+    private val StackOp.shownElsewhere: Boolean
+        get() = this is StackOp.Update || this is StackOp.GitSettings || this is StackOp.GitRedeploy || this == StackOp.Detach
+
     /** Shows a finished result; the session forgets it once the user has seen it ([clearFailure], [clearNotice], [navigated]). */
     private fun finished(p: StackProgress) {
         val error = p.error
         when {
-            // The editor shows an update's result (and keeps the edits); here the stack is only read again.
-            p.op is StackOp.Update -> {
+            // The editor (update) and the git tab (settings, redeploy, detach) show these results and keep the edits;
+            // here the stack is only read again.
+            p.op.shownElsewhere -> {
                 _state.update { it.copy(running = null) }
                 refresh()
             }

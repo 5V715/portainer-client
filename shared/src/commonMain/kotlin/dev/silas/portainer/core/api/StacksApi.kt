@@ -21,6 +21,9 @@ import io.ktor.http.HttpStatusCode
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -225,4 +228,188 @@ suspend fun PortainerClient.updateStack(id: Int, endpointId: Int, file: String, 
         contentType(ContentType.Application.Json)
         setBody(body)
     }
+}
+
+/** Git credentials sent to Portainer. [password] null keeps the password Portainer has stored; it is never logged. */
+data class GitAuth(val username: String, val password: String?) {
+    override fun toString(): String = "GitAuth(username=$username, password=${if (password == null) "unchanged" else "***"})"
+}
+
+/** A change of a CE 2.43+ GitOps Source's credentials: removed, or set (password null keeps the stored one). */
+sealed interface GitSourceAuth {
+    data object None : GitSourceAuth
+    data class Basic(val auth: GitAuth) : GitSourceAuth
+}
+
+/**
+ * Changes to the GitOps Source a stack uses (CE 2.43+, `PUT /api/gitops/sources/{id}`); null fields stay as they are.
+ * The Source is shared: every stack using it gets the change. [interval] is the polling interval (2.44+, `""` = off).
+ */
+data class GitSourceUpdate(
+    val url: String? = null,
+    val tlsSkipVerify: Boolean? = null,
+    val auth: GitSourceAuth? = null,
+    val interval: String? = null,
+)
+
+/**
+ * The full git settings of a stack (`POST /api/stacks/{id}/git`). Portainer replaces the ref, env, AutoUpdate and
+ * (without a source) credentials and TLS with what is sent, so every field holds the stack's current value unless
+ * the user changed it. [auth] null turns authentication off; a null password keeps the stored one. [sourceId]: the
+ * stack's GitOps Source (2.43+); with it, URL, credentials and TLS are the Source's and change through [source].
+ */
+data class GitSettingsRequest(
+    val referenceName: String,
+    val configFilePath: String,
+    val additionalFiles: List<String>,
+    val auth: GitAuth?,
+    val tlsSkipVerify: Boolean,
+    val autoUpdate: AutoUpdate?,
+    val env: List<EnvVar>,
+    /** The stack's saved `Option.Prune` (CE applies it to Swarm only here; sent unchanged). */
+    val prune: Boolean,
+    val sourceId: Int? = null,
+    val source: GitSourceUpdate? = null,
+) {
+    // Env values and the password can be secrets.
+    override fun toString(): String =
+        "GitSettingsRequest(ref=$referenceName, path=$configFilePath, additional=${additionalFiles.size}, auth=$auth, " +
+            "tls=$tlsSkipVerify, autoUpdate=$autoUpdate, env=${env.size}, prune=$prune, sourceId=$sourceId, source=$source)"
+}
+
+/**
+ * Pull and redeploy (`PUT /api/stacks/{id}/git/redeploy`). Older servers replace the ref and env with what is sent,
+ * so both always hold the current (or reviewed) values; [prune] is the stack's saved value. CE has no "force" for a
+ * manual redeploy (compose redeploys always recreate).
+ */
+data class GitRedeployRequest(
+    val referenceName: String,
+    val auth: GitAuth?,
+    val env: List<EnvVar>,
+    val pullImage: Boolean,
+    val prune: Boolean,
+) {
+    override fun toString(): String = "GitRedeployRequest(ref=$referenceName, auth=$auth, env=${env.size}, pullImage=$pullImage, prune=$prune)"
+}
+
+private fun envJson(env: List<EnvVar>) = JsonArray(env.map { buildJsonObject { put("name", it.name); put("value", it.value) } })
+
+private fun autoUpdateJson(a: AutoUpdate?) = if (a == null) {
+    JsonNull
+} else {
+    buildJsonObject {
+        put("Interval", a.interval.orEmpty())
+        put("Webhook", a.webhookId.orEmpty())
+        put("ForceUpdate", a.forceUpdate)
+        put("ForcePullImage", a.forcePullImage)
+    }
+}
+
+/** Inline credentials: auth on with an empty password keeps the stored one; auth off removes them. */
+private fun JsonObjectBuilder.putInlineAuth(auth: GitAuth?) {
+    put("RepositoryAuthentication", auth != null)
+    put("RepositoryUsername", auth?.username.orEmpty())
+    put("RepositoryPassword", auth?.password.orEmpty())
+}
+
+/**
+ * Saves [r] as the stack's git settings. Source changes go first to the GitOps Source (2.43+; refused on older
+ * servers). Fields an older server lacks are not sent: compose paths before 2.40, `SourceID` before 2.43, the
+ * Source's polling interval before 2.44. Saving does not redeploy.
+ */
+suspend fun PortainerClient.updateGitSettings(id: Int, endpointId: Int, r: GitSettingsRequest) {
+    val features = stackFeatures(status().version)
+    val sourceId = r.sourceId?.takeIf { features.savedGitCredentials }
+    r.source?.let { change ->
+        if (sourceId == null) throw IllegalStateException("This Portainer version has no shared git sources")
+        updateGitSource(sourceId, change, intervalOnSource = features.pollingOnSource)
+    }
+    val body = buildJsonObject {
+        put("RepositoryReferenceName", r.referenceName)
+        if (features.gitPathsEditable) {
+            put("ConfigFilePath", r.configFilePath)
+            put("AdditionalFiles", JsonArray(r.additionalFiles.map(::JsonPrimitive)))
+        }
+        put("AutoUpdate", autoUpdateJson(r.autoUpdate))
+        put("Env", envJson(r.env))
+        put("Prune", r.prune)
+        if (sourceId != null) {
+            // URL, credentials and TLS are the Source's: the inline fields would be ignored.
+            put("SourceID", sourceId)
+        } else {
+            putInlineAuth(r.auth)
+            put("TLSSkipVerify", r.tlsSkipVerify)
+        }
+    }
+    execute("/api/stacks/$id/git") {
+        method = HttpMethod.Post
+        parameter("endpointId", endpointId)
+        contentType(ContentType.Application.Json)
+        setBody(body)
+    }
+}
+
+private suspend fun PortainerClient.updateGitSource(sourceId: Int, change: GitSourceUpdate, intervalOnSource: Boolean) {
+    val body = buildJsonObject {
+        change.url?.let { put("url", it) }
+        change.tlsSkipVerify?.let { put("tlsSkipVerify", it) }
+        when (val auth = change.auth) {
+            null -> Unit
+            GitSourceAuth.None -> put("authentication", buildJsonObject { })
+            is GitSourceAuth.Basic -> put(
+                "authentication",
+                buildJsonObject {
+                    put("username", auth.auth.username)
+                    // Absent keeps the stored password.
+                    auth.auth.password?.let { put("password", it) }
+                },
+            )
+        }
+        if (intervalOnSource) change.interval?.let { put("interval", it) }
+    }
+    if (body.isEmpty()) return
+    execute("/api/gitops/sources/$sourceId") {
+        method = HttpMethod.Put
+        contentType(ContentType.Application.Json)
+        setBody(body)
+    }
+}
+
+/** Pulls the repository and redeploys the stack with [r]. From 2.41 the deploy continues after the response. */
+suspend fun PortainerClient.gitRedeploy(id: Int, endpointId: Int, r: GitRedeployRequest) {
+    val body = buildJsonObject {
+        put("RepositoryReferenceName", r.referenceName)
+        putInlineAuth(r.auth)
+        put("Env", envJson(r.env))
+        put("Prune", r.prune)
+        put("RepullImageAndRedeploy", r.pullImage)
+        put("PullImage", r.pullImage)
+    }
+    stackOperation("/api/stacks/$id/git/redeploy", endpointId) {
+        method = HttpMethod.Put
+        contentType(ContentType.Application.Json)
+        setBody(body)
+    }
+}
+
+/**
+ * Detaches a git stack: as CE's UI does, its current file and env are saved as a web-editor stack (which redeploys
+ * it). Portainer drops the git settings and automatic updates; this is one-way.
+ */
+suspend fun PortainerClient.detachFromGit(id: Int, endpointId: Int) {
+    if (!stackFeatures(status().version).detachFromGit) throw IllegalStateException("This Portainer version can't detach stacks from git")
+    val stack = stack(id)
+    if (stack.git == null) throw IllegalStateException("The stack is not deployed from git.")
+    updateStack(id, endpointId, stackFile(id), stack.env, pullImage = false, prune = false)
+}
+
+/**
+ * How many stacks other than [exceptStackId], on any endpoint, use the GitOps Source [sourceId]. The list has no
+ * `GitSourceId`, so each git stack is read.
+ */
+suspend fun PortainerClient.stacksUsingGitSource(sourceId: Int, exceptStackId: Int): Int {
+    val response = execute("/api/stacks")
+    if (response.status == HttpStatusCode.NoContent) return 0
+    val others = decodeBody(response) { response.body<List<StackDto>>() }.filter { it.gitConfig != null && it.id != exceptStackId }
+    return others.count { stack(it.id).git?.sourceId == sourceId }
 }

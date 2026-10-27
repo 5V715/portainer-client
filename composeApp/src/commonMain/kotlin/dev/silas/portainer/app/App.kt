@@ -39,6 +39,7 @@ import dev.silas.portainer.app.networks.NetworkDetailScreen
 import dev.silas.portainer.app.networks.NetworkDetailViewModel
 import dev.silas.portainer.app.networks.NetworksScreen
 import dev.silas.portainer.app.networks.NetworksViewModel
+import dev.silas.portainer.app.stacks.GitSettingsViewModel
 import dev.silas.portainer.app.stacks.StackDetailScreen
 import dev.silas.portainer.app.stacks.StackDetailViewModel
 import dev.silas.portainer.app.stacks.StackEditorViewModel
@@ -265,9 +266,13 @@ private fun AppNavHost(container: AppContainer) {
             val editor = viewModel(key = "stack-editor-${route.serverId}-${route.endpointId}-${route.stackId}-${route.name}") {
                 StackEditorViewModel(container, vm, route.serverId, route.endpointId, route.stackId, route.name)
             }
+            val git = viewModel(key = "stack-git-${route.serverId}-${route.endpointId}-${route.stackId}-${route.name}") {
+                GitSettingsViewModel(container, vm, route.serverId, route.endpointId, route.stackId, route.name)
+            }
             StackDetailScreen(
                 viewModel = vm,
                 editor = editor,
+                git = git,
                 onOpenContainer = { nav.navigate(ContainerDetail(route.serverId, route.endpointId, it)) },
                 onBack = { nav.popBackStack() },
             )

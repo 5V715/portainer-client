@@ -476,7 +476,7 @@ class StackEditorViewModelTest {
         assertEquals(listOf(StackDetailTab.Overview, StackDetailTab.Editor), stackDetailTabs(detail.state.value))
         git = true
         val (gitDetail, _) = loaded()
-        assertEquals(listOf(StackDetailTab.Overview, StackDetailTab.File), stackDetailTabs(gitDetail.state.value))
+        assertEquals(listOf(StackDetailTab.Overview, StackDetailTab.File, StackDetailTab.Git), stackDetailTabs(gitDetail.state.value))
         val (external, _) = loaded(stackId = null)
         assertEquals(listOf(StackDetailTab.Overview), stackDetailTabs(external.state.value))
     }

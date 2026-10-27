@@ -46,14 +46,14 @@ import dev.silas.portainer.core.model.StackControl
 import dev.silas.portainer.core.model.StackStatus
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
 
-/** The detail screen's tabs: web-editor stacks add the Editor, git stacks a read-only File; external stacks neither. */
-enum class StackDetailTab { Overview, Editor, File }
+/** The detail screen's tabs: web-editor stacks add the Editor, git stacks a read-only File and Git; external stacks none. */
+enum class StackDetailTab { Overview, Editor, File, Git }
 
 fun stackDetailTabs(state: StackDetailState): List<StackDetailTab> {
     val stack = state.stack ?: return listOf(StackDetailTab.Overview)
     return when {
         stack.control != StackControl.Full || stack.id == null -> listOf(StackDetailTab.Overview)
-        stack.git != null -> listOf(StackDetailTab.Overview, StackDetailTab.File)
+        stack.git != null -> listOf(StackDetailTab.Overview, StackDetailTab.File, StackDetailTab.Git)
         else -> listOf(StackDetailTab.Overview, StackDetailTab.Editor)
     }
 }
@@ -64,18 +64,63 @@ fun stackDetailTabs(state: StackDetailState): List<StackDetailTab> {
 fun StackDetailScreen(
     viewModel: StackDetailViewModel,
     editor: StackEditorViewModel,
+    git: GitSettingsViewModel,
     onOpenContainer: (containerId: String) -> Unit,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
     val editorState by editor.state.collectAsState()
+    val gitState by git.state.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     val stack = state.stack
     val tabs = stackDetailTabs(state)
     var selected by rememberSaveable { mutableStateOf(StackDetailTab.Overview) }
     val tab = selected.takeIf { it in tabs } ?: StackDetailTab.Overview
-    val back = { if (editor.requestBack()) onBack() }
-    BackHandler(enabled = editorState.hasUnsavedChanges && !editorState.updating) { back() }
+    val back = { if (editor.requestBack() && git.requestBack()) onBack() }
+    BackHandler(
+        enabled = (editorState.hasUnsavedChanges && !editorState.updating) || (gitState.hasUnsavedChanges && gitState.running == null),
+    ) { back() }
+
+    LaunchedEffect(gitState.error) {
+        gitState.error?.let {
+            snackbar.showSnackbar(it)
+            git.clearError()
+        }
+    }
+    LaunchedEffect(gitState.notice) {
+        gitState.notice?.let {
+            snackbar.showSnackbar(it)
+            git.clearNotice()
+        }
+    }
+    gitState.saveConfirm?.let { GitSaveSheet(it, git::confirmSave, git::dismissSave) }
+    gitState.redeployReview?.let { GitRedeploySheet(it, git::setRedeployPullImage, git::confirmRedeploy, git::dismissRedeploy) }
+    gitState.detachConfirm?.let { GitDetachSheet(it, git::confirmDetach, git::dismissDetach) }
+    gitState.failure?.let { (op, message) ->
+        AlertDialog(
+            onDismissRequest = git::clearFailure,
+            title = { Text(failureTitle(op)) },
+            text = {
+                val keep = if (op is StackOp.GitSettings) "\n\nYour other changes are kept; type the password again if you changed it." else ""
+                Text(message + keep)
+            },
+            confirmButton = { TextButton(onClick = git::clearFailure) { Text("OK") } },
+        )
+    }
+    if (gitState.confirmDiscard) {
+        AlertDialog(
+            onDismissRequest = git::dismissDiscard,
+            title = { Text("Discard changes?") },
+            text = { Text("Your git settings and environment changes are not saved.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    git.dismissDiscard()
+                    onBack()
+                }) { Text("Discard", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = git::dismissDiscard) { Text("Keep editing") } },
+        )
+    }
 
     LaunchedEffect(editorState.error) {
         editorState.error?.let {
@@ -168,6 +213,7 @@ fun StackDetailScreen(
                 }
                 StackDetailTab.Editor -> StackEditorBar(editorState, editor::requestUpdate)
                 StackDetailTab.File -> Unit
+                StackDetailTab.Git -> GitSettingsBar(gitState, git::requestRedeploy, git::requestSave)
             }
         },
         snackbarHost = { SnackbarHost(snackbar) },
@@ -181,6 +227,10 @@ fun StackDetailScreen(
             }
             StackDetailTab.File -> {
                 StackFileView(state.file, state.fileError, bounded)
+                return@Scaffold
+            }
+            StackDetailTab.Git -> {
+                GitSettingsContent(gitState, git, bounded)
                 return@Scaffold
             }
             StackDetailTab.Overview -> Unit
@@ -263,6 +313,7 @@ private fun tabLabel(tab: StackDetailTab): String = when (tab) {
     StackDetailTab.Overview -> "Overview"
     StackDetailTab.Editor -> "Editor"
     StackDetailTab.File -> "Compose file"
+    StackDetailTab.Git -> "Git"
 }
 
 @Composable

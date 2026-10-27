@@ -97,6 +97,9 @@ internal fun opLabel(op: StackOp): String = when (op) {
     StackOp.Stop -> "Stop"
     StackOp.Delete -> "Delete"
     is StackOp.Update -> "Update"
+    is StackOp.GitSettings -> "Save"
+    is StackOp.GitRedeploy -> "Pull and redeploy"
+    StackOp.Detach -> "Detach"
 }
 
 internal fun runningLabel(op: StackOp): String = when (op) {
@@ -104,6 +107,9 @@ internal fun runningLabel(op: StackOp): String = when (op) {
     StackOp.Stop -> "Stopping the stack…"
     StackOp.Delete -> "Deleting the stack…"
     is StackOp.Update -> "Updating the stack…"
+    is StackOp.GitSettings -> "Saving the git settings…"
+    is StackOp.GitRedeploy -> "Pulling and redeploying…"
+    StackOp.Detach -> "Detaching from git…"
 }
 
 internal fun failureTitle(op: StackOp): String = when (op) {
@@ -111,6 +117,9 @@ internal fun failureTitle(op: StackOp): String = when (op) {
     StackOp.Stop -> "Couldn't stop the stack"
     StackOp.Delete -> "Couldn't delete the stack"
     is StackOp.Update -> "Couldn't update the stack"
+    is StackOp.GitSettings -> "Couldn't save the git settings"
+    is StackOp.GitRedeploy -> "Couldn't redeploy the stack"
+    StackOp.Detach -> "Couldn't detach the stack from git"
 }
 
 /** Bottom action bar: the stack's operations, or the one running. */

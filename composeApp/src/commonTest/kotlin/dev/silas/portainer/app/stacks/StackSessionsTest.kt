@@ -11,6 +11,9 @@ import dev.silas.portainer.app.editor.DeployRequest
 import dev.silas.portainer.app.recreate.CLEANUP_IN_PROGRESS_MESSAGE
 import dev.silas.portainer.app.recreate.SessionKey
 import dev.silas.portainer.app.settle
+import dev.silas.portainer.core.api.GitAuth
+import dev.silas.portainer.core.api.GitRedeployRequest
+import dev.silas.portainer.core.api.GitSettingsRequest
 import dev.silas.portainer.core.api.PortainerClient
 import dev.silas.portainer.core.api.stack
 import dev.silas.portainer.core.cleanup.CleanupItem
@@ -69,6 +72,11 @@ class StackSessionsTest {
     private var opGate: CompletableDeferred<Unit>? = null
     private var opFailsWithNetworkError = false
     private var pollFailsWithNetworkError = false
+    /** `GET /api/stacks/5` includes this GitConfig; a PUT of the stack clears it unless [detachKeepsGit]. */
+    @Volatile private var gitConfig = ""
+    @Volatile private var detachKeepsGit = false
+    /** The op request answers 500 with this body. */
+    @Volatile private var opErrorBody: String? = null
     /** A slow `GET /api/stacks/5` (real time). */
     @Volatile private var pollDelayMs = 0L
     /** Holds a cleanup's DELETE, a recreate's pull, or a deploy's create. */
@@ -102,13 +110,19 @@ class StackSessionsTest {
                     respond("""{"message":"Unable to find a stack with the specified identifier inside the database"}""", HttpStatusCode.NotFound, json)
                 } else {
                     val deployment = if (statusMessage.isEmpty()) "" else ""","DeploymentStatus":[{"Status":$code,"Message":"$statusMessage"}]"""
-                    respond("""{"Id":5,"Name":"shop","Type":2,"EndpointId":1,"Status":$code$deployment}""", HttpStatusCode.OK, json)
+                    respond("""{"Id":5,"Name":"shop","Type":2,"EndpointId":1,"Status":$code$deployment$gitConfig}""", HttpStatusCode.OK, json)
                 }
             }
             path.startsWith("/api/stacks/5") -> {
                 opGate?.await()
                 if (opFailsWithNetworkError) throw RuntimeException("connection reset secret-api-key")
-                if (req.method == HttpMethod.Delete) respond("", HttpStatusCode.NoContent) else respond("{}", HttpStatusCode.OK, json)
+                val errorBody = opErrorBody
+                if (path == "/api/stacks/5" && req.method == HttpMethod.Put && !detachKeepsGit && errorBody == null) gitConfig = ""
+                when {
+                    errorBody != null -> respond(errorBody, HttpStatusCode.InternalServerError, json)
+                    req.method == HttpMethod.Delete -> respond("", HttpStatusCode.NoContent)
+                    else -> respond("{}", HttpStatusCode.OK, json)
+                }
             }
             // Other sessions' first requests, held so they stay running.
             req.method == HttpMethod.Delete || path.endsWith("/images/create") || path.endsWith("/containers/create") -> {
@@ -132,6 +146,87 @@ class StackSessionsTest {
     private suspend fun kotlinx.coroutines.test.TestScope.finished(sessions: StackSessions): StackProgress {
         settle { sessions.progress(key).value?.running == false }
         return assertNotNull(sessions.progress(key).value)
+    }
+
+    private val gitJson = ""","GitConfig":{"URL":"https://g/x.git","ReferenceName":"refs/heads/main","ConfigFilePath":"compose.yml"}"""
+
+    private fun gitSettings(password: String?) = GitSettingsRequest(
+        referenceName = "refs/heads/main",
+        configFilePath = "compose.yml",
+        additionalFiles = emptyList(),
+        auth = GitAuth("deploy", password),
+        tlsSkipVerify = false,
+        autoUpdate = null,
+        env = listOf(EnvVar("A", "1")),
+        prune = false,
+    )
+
+    @Test
+    fun gitRedeployPutsThenPollsPastDeploying() = runTest {
+        statuses = mutableListOf(3, 3, 1)
+        val sessions = sessions()
+        val op = StackOp.GitRedeploy(GitRedeployRequest("refs/heads/main", null, listOf(EnvVar("A", "1")), pullImage = true, prune = false))
+        assertTrue(sessions.start(key, 5, op))
+        assertNull(finished(sessions).error)
+        assertEquals(listOf("PUT /api/stacks/5/git/redeploy?endpointId=1") + List(3) { "GET /api/stacks/5" }, requests)
+    }
+
+    @Test
+    fun gitRedeployThatLeavesTheStackStoppedOrFailedIsNotDone() = runTest {
+        statuses = mutableListOf(3, 4)
+        statusMessage = "repository not found"
+        val sessions = sessions()
+        sessions.start(key, 5, StackOp.GitRedeploy(GitRedeployRequest("refs/heads/main", null, emptyList(), pullImage = false, prune = false)))
+        assertEquals("repository not found", finished(sessions).error)
+    }
+
+    @Test
+    fun gitSettingsSaveSettlesWithoutExpectingAStatus() = runTest {
+        // Saving deploys nothing: a stopped (or failed) stack stays so, and that is a success.
+        for (code in listOf(2, 4)) {
+            requestLog.value = emptyList()
+            statuses = mutableListOf(3, code)
+            val sessions = sessions()
+            sessions.start(key, 5, StackOp.GitSettings(gitSettings(password = null)))
+            assertNull(finished(sessions).error, "status $code")
+            assertEquals(listOf("GET /api/status", "POST /api/stacks/5/git?endpointId=1", "GET /api/stacks/5", "GET /api/stacks/5"), requests)
+        }
+    }
+
+    @Test
+    fun progressNeverHoldsTheGitPasswordAndErrorsBlankItOut() = runTest {
+        opGate = CompletableDeferred()
+        opErrorBody = """{"message":"authentication failed for s3cret-token"}"""
+        val sessions = sessions()
+        assertTrue(sessions.start(key, 5, StackOp.GitSettings(gitSettings(password = "s3cret-token"))))
+        val running = assertIs<StackOp.GitSettings>(sessions.progress(key).value!!.op)
+        assertNull(running.request.auth!!.password, "the running progress already has no password")
+        assertEquals("deploy", running.request.auth!!.username)
+        opGate!!.complete(Unit)
+        val p = finished(sessions)
+        assertNull(assertIs<StackOp.GitSettings>(p.op).request.auth!!.password)
+        val error = assertNotNull(p.error)
+        assertFalse(error.contains("s3cret-token"), error)
+        assertTrue(error.contains("***"), error)
+        assertFalse(p.toString().contains("s3cret-token"))
+    }
+
+    @Test
+    fun detachIsDoneOnlyWhenTheStackIsNoLongerAGitStack() = runTest {
+        gitConfig = gitJson
+        statuses = mutableListOf(1, 3, 1)
+        val sessions = sessions()
+        assertTrue(sessions.start(key, 5, StackOp.Detach))
+        assertNull(finished(sessions).error)
+        assertTrue("PUT /api/stacks/5?endpointId=1" in requests)
+
+        requestLog.value = emptyList()
+        gitConfig = gitJson
+        detachKeepsGit = true
+        statuses = mutableListOf(1)
+        sessions.clear(key)
+        sessions.start(key, 5, StackOp.Detach)
+        assertEquals("Portainer still reports the stack as deployed from git.", finished(sessions).error)
     }
 
     @Test
