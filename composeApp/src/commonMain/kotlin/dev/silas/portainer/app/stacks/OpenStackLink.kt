@@ -16,15 +16,18 @@ fun stackLinkFor(project: String?, stacks: List<Stack>, serverId: String, endpoi
     return StackDetail(serverId, endpointId, stack.id, stack.name)
 }
 
-/** The endpoint's stacks for "Open stack"; a failed load (the button is a convenience) gives an empty list. */
-suspend fun loadStacks(client: PortainerClient, endpointId: Int): List<Stack> =
+/** The endpoint's stacks for "Open stack"; null when they can't be loaded (the button is a convenience, never an error). */
+suspend fun fetchStacks(client: PortainerClient, endpointId: Int): List<Stack>? =
     try {
         client.stacks(endpointId)
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
-        emptyList()
+        null
     }
+
+/** As [fetchStacks], with a failed load as an empty list. */
+suspend fun loadStacks(client: PortainerClient, endpointId: Int): List<Stack> = fetchStacks(client, endpointId).orEmpty()
 
 /** The route to the stack of [project], looked up once; null for a non-member or when the stacks can't be loaded. */
 suspend fun loadStackLink(client: PortainerClient, serverId: String, endpointId: Int, project: String?): StackDetail? =

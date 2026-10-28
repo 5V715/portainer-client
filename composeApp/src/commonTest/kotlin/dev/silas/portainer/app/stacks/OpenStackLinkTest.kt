@@ -1,6 +1,10 @@
 package dev.silas.portainer.app.stacks
 
+import dev.silas.portainer.app.ContainerDetail
+import dev.silas.portainer.app.Editor
+import dev.silas.portainer.app.Recreate
 import dev.silas.portainer.app.StackDetail
+import dev.silas.portainer.app.canPopTo
 import dev.silas.portainer.app.TestEnv
 import dev.silas.portainer.app.detail.ContainerDetailViewModel
 import dev.silas.portainer.app.settle
@@ -25,8 +29,10 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class OpenStackLinkTest {
@@ -75,7 +81,9 @@ class OpenStackLinkTest {
     @AfterTest
     fun tearDown() = Dispatchers.resetMain()
 
-    private suspend fun env(stacksOk: Boolean): TestEnv {
+    private var stacksOk = true
+
+    private suspend fun env(): TestEnv {
         val env = TestEnv { req ->
             val path = req.url.encodedPath
             requestLog.update { it + path }
@@ -94,14 +102,14 @@ class OpenStackLinkTest {
 
     @Test
     fun detailLoadsTheStackLink() = runTest {
-        val vm = ContainerDetailViewModel(env(stacksOk = true).container, "s1", 1, "abc")
+        val vm = ContainerDetailViewModel(env().container, "s1", 1, "abc")
         settle { vm.state.value.stackLink != null }
         assertEquals(StackDetail("s1", 1, 5, "shop"), assertNotNull(vm.state.value.stackLink))
     }
 
     @Test
     fun refreshingTheDetailDoesNotLookTheStackUpAgain() = runTest {
-        val vm = ContainerDetailViewModel(env(stacksOk = true).container, "s1", 1, "abc")
+        val vm = ContainerDetailViewModel(env().container, "s1", 1, "abc")
         settle { vm.state.value.stackLink != null }
         vm.refresh()
         settle { vm.state.value.loading }
@@ -110,13 +118,32 @@ class OpenStackLinkTest {
     }
 
     @Test
-    fun aStacksLoadFailureHidesTheLinkWithoutAnError() = runTest {
-        val vm = ContainerDetailViewModel(env(stacksOk = false).container, "s1", 1, "abc")
+    fun aStacksLoadFailureHidesTheLinkWithoutAnErrorAndIsRetriedOnRefresh() = runTest {
+        stacksOk = false
+        val vm = ContainerDetailViewModel(env().container, "s1", 1, "abc")
         settle { vm.state.value.overview != null && !vm.state.value.loading }
-        // The lookup runs apart from the overview: wait until its request has been answered (and failed).
-        settle { "/api/stacks" in requestLog.value }
+        settle { requestLog.value.count { it == "/api/stacks" } == 1 }
         assertNull(vm.state.value.stackLink)
         assertNull(vm.state.value.error)
         assertEquals("shop", vm.state.value.overview?.stack)
+        // The failed lookup is tried again by the next refresh, which would not happen if the first one had counted as done.
+        stacksOk = true
+        vm.refresh()
+        settle { vm.state.value.stackLink != null }
+        assertEquals(StackDetail("s1", 1, 5, "shop"), vm.state.value.stackLink)
+        assertEquals(2, requestLog.value.count { it == "/api/stacks" })
+        assertNull(vm.state.value.error)
+    }
+
+    @Test
+    fun popsBackToTheContainerOnlyWhenNoEditorOrRecreateIsInBetween() {
+        val target = ContainerDetail("s1", 1, "abc")
+        val stack = StackDetail("s1", 1, 5, "shop")
+        assertTrue(canPopTo(target, listOf(null, target, stack)))
+        assertFalse(canPopTo(target, listOf(target, Editor("s1", 1, "abc"), stack)))
+        assertFalse(canPopTo(target, listOf(target, Recreate("s1", 1, "abc"), stack)))
+        assertFalse(canPopTo(target, listOf(null, stack)))
+        // An Editor below the container does not matter.
+        assertTrue(canPopTo(target, listOf(Editor("s1", 1, "abc"), target, stack)))
     }
 }

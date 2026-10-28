@@ -12,6 +12,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.backhandler.BackHandler
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -66,6 +67,7 @@ import dev.silas.portainer.app.theme.PortainerTheme
 import dev.silas.portainer.core.cleanup.CleanupKind
 import dev.silas.portainer.core.storage.ServerRepository
 import dev.silas.portainer.core.storage.createSecretStore
+import kotlinx.serialization.KSerializer
 
 /** Process-wide dependencies; on Android, AndroidPlatform/AppContext must be initialised before first access. */
 object AppGraph {
@@ -288,10 +290,10 @@ private fun AppNavHost(container: AppContainer) {
                 viewModel = vm,
                 editor = editor,
                 git = git,
-                // Back to the container the user came from when it is below, so Container <-> Stack hops don't pile up.
                 onOpenContainer = {
                     val target = ContainerDetail(route.serverId, route.endpointId, it)
-                    if (!nav.popBackStack(target, inclusive = false)) nav.navigate(target) { launchSingleTop = true }
+                    if (canPopTo(target, nav.currentBackStack.value.map(::routeOf))) nav.popBackStack(target, inclusive = false)
+                    else nav.navigate(target) { launchSingleTop = true }
                 },
                 onBack = { nav.popBackStack() },
             )
@@ -399,4 +401,28 @@ private fun NavController.switchTab(serverId: String, endpointId: Int, tab: EnvT
         popUpTo(Containers(serverId, endpointId)) { inclusive = false }
         launchSingleTop = true
     }
+}
+
+/** The route object of a back-stack entry when it is one [canPopTo] cares about; null for every other destination. */
+private fun routeOf(entry: NavBackStackEntry): Any? {
+    val route = entry.destination.route ?: return null
+    fun <T> matches(serializer: KSerializer<T>) = route.startsWith(serializer.descriptor.serialName)
+    return when {
+        matches(ContainerDetail.serializer()) -> entry.toRoute<ContainerDetail>()
+        matches(Editor.serializer()) -> entry.toRoute<Editor>()
+        matches(Recreate.serializer()) -> entry.toRoute<Recreate>()
+        else -> null
+    }
+}
+
+/**
+ * Whether opening [target] from a stack may pop back to the [target] already on the back stack ([stack], bottom to top,
+ * the stack screen last). Popping discards everything above it, so it is only done when that is just stack screens:
+ * an Editor or Recreate entry in between holds unsaved edits or a running recreate's progress, and Back from the
+ * stack must still return to it. Then the container is pushed instead (single-top).
+ */
+internal fun canPopTo(target: ContainerDetail, stack: List<Any?>): Boolean {
+    val at = stack.indexOfLast { it == target }
+    if (at < 0) return false
+    return stack.drop(at + 1).none { it is Editor || it is Recreate }
 }
