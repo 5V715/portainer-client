@@ -613,6 +613,17 @@ class GitSettingsViewModelTest {
     }
 
     @Test
+    fun protectedStackMayTurnForcedWebhookRedeploysOff() = gitTest {
+        image = "portainer/portainer-ce:2.42.0"
+        autoUpdate = """{"Interval":"","Webhook":"05de31a2-79fa-4644-9c12-faa67e5c49f0","ForceUpdate":true,"ForcePullImage":false}"""
+        val (_, vm) = loaded()
+        assertTrue(vm.state.value.form!!.forceUpdate)
+        vm.edit { copy(forceUpdate = false) } // fewer redeploys, never more
+        vm.requestSave()
+        assertNotNull(vm.state.value.saveConfirm, vm.state.value.error)
+    }
+
+    @Test
     fun protectionUnknownMayNotForceWebhookRedeploysEither() = gitTest {
         fileFails = true
         autoUpdate = """{"Interval":"","Webhook":"05de31a2-79fa-4644-9c12-faa67e5c49f0","ForceUpdate":false,"ForcePullImage":false}"""

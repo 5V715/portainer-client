@@ -304,6 +304,7 @@ private fun AppNavHost(container: AppContainer) {
                             popUpTo(route) { inclusive = true }
                             launchSingleTop = true
                         }
+                        AfterStackGone.PopStackScreen -> nav.popBackStack()
                     }
                 },
                 onBack = { nav.popBackStack() },
@@ -453,28 +454,34 @@ internal enum class AfterStackGone {
     /** Opened from elsewhere in the environment (e.g. a container): the Stacks tab, on top of Containers. */
     SwitchToListTab,
 
-    /**
-     * Neither is on the back stack, or going there would drop work above it: the list replaces just the stack screen,
-     * so Back still reaches what lies below.
-     */
+    /** Neither is on the back stack and nothing below holds work: the list replaces the stack screen. */
     ReplaceWithList,
+
+    /**
+     * Going to the list would drop work (an Editor, a Recreate or another stack's screen): only the stack screen is
+     * popped, back to that work. The list announces the deleted or moved stack once the user returns there.
+     */
+    PopStackScreen,
 }
 
 /**
  * [list] is the stack list of the stack's environment; [stack] the back stack as [routeOf] gives it, bottom to top, the
  * gone stack screen last. Going back to the list or the Containers tab pops everything above it, so it is only done
  * when nothing there can hold work, as in [canPopTo]: no Editor or Recreate entry, and no other stack's screen (the
- * gone stack's own screens hold nothing worth keeping).
+ * gone stack's own screens hold nothing worth keeping). A list put in the stack screen's place would drop everything
+ * below on Back (a tab's Back goes to the environments), so with work anywhere below only the stack screen is popped.
  */
 internal fun afterStackGone(list: Stacks, stack: List<Any?>): AfterStackGone {
     val gone = stack.lastOrNull()
-    fun canPopTo(anchor: Any): Boolean {
+    fun holdsWork(entry: Any?) = entry is Editor || entry is Recreate || (entry is StackDetail && entry != gone)
+    fun mayPopTo(anchor: Any): Boolean {
         val at = stack.indexOfLast { it == anchor }
-        return at >= 0 && stack.drop(at + 1).none { it is Editor || it is Recreate || (it is StackDetail && it != gone) }
+        return at >= 0 && stack.drop(at + 1).none(::holdsWork)
     }
     return when {
-        canPopTo(list) -> AfterStackGone.PopToList
-        canPopTo(Containers(list.serverId, list.endpointId)) -> AfterStackGone.SwitchToListTab
-        else -> AfterStackGone.ReplaceWithList
+        mayPopTo(list) -> AfterStackGone.PopToList
+        mayPopTo(Containers(list.serverId, list.endpointId)) -> AfterStackGone.SwitchToListTab
+        stack.none(::holdsWork) -> AfterStackGone.ReplaceWithList
+        else -> AfterStackGone.PopStackScreen
     }
 }

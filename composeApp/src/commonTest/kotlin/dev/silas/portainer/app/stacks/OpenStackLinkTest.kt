@@ -114,10 +114,12 @@ class OpenStackLinkTest {
     @Test
     fun refreshingTheDetailDoesNotLookTheStackUpAgain() = runTest {
         val vm = ContainerDetailViewModel(env().container, "s1", 1, "abc")
-        settle { vm.state.value.stackLink != null }
+        settle { vm.state.value.stackLink != null && !vm.state.value.loading }
+        fun inspects() = requestLog.value.count { it.endsWith("/abc/json") }
+        val before = inspects()
         vm.refresh()
-        settle { vm.state.value.loading }
-        settle { !vm.state.value.loading }
+        // Waits for the refresh's own inspect, not for `loading`: a fast refresh can start and end between two polls.
+        settle { inspects() > before && !vm.state.value.loading }
         assertEquals(1, requestLog.value.count { it == "/api/stacks" })
     }
 
@@ -187,25 +189,72 @@ class OpenStackLinkTest {
         val stack = StackDetail("s1", 1, 5, "shop")
         val editor = Editor("s1", 1, "abc")
         val recreate = Recreate("s1", 1, "abc")
-        // Popping to the list would drop the Editor/Recreate: only the gone stack screen is replaced.
-        assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, containers, list, editor, stack)))
-        assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, containers, list, recreate, stack)))
+        // Popping to the list would drop the Editor/Recreate: only the gone stack screen is popped, back to it.
+        assertEquals(AfterStackGone.PopStackScreen, afterStackGone(list, listOf(null, containers, list, editor, stack)))
+        assertEquals(AfterStackGone.PopStackScreen, afterStackGone(list, listOf(null, containers, list, recreate, stack)))
         // The same for switching tabs on top of Containers.
-        assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, containers, editor, stack)))
-        assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, containers, recreate, stack)))
+        assertEquals(AfterStackGone.PopStackScreen, afterStackGone(list, listOf(null, containers, editor, stack)))
+        assertEquals(AfterStackGone.PopStackScreen, afterStackGone(list, listOf(null, containers, recreate, stack)))
+        // Neither anchor, but work below: a list in its place would drop it on Back.
+        assertEquals(AfterStackGone.PopStackScreen, afterStackGone(list, listOf(null, editor, stack)))
         // An Editor below the anchor is not dropped.
         assertEquals(AfterStackGone.PopToList, afterStackGone(list, listOf(null, containers, editor, list, stack)))
         assertEquals(AfterStackGone.SwitchToListTab, afterStackGone(list, listOf(editor, containers, stack)))
-        // The same, now-gone stack's screen in between holds nothing worth keeping.
+        // The realistic same-stack path: list -> the stack -> one of its containers -> "Open stack" -> the stack again.
+        // The now-gone stack's own screen in between holds nothing worth keeping.
         assertEquals(
             AfterStackGone.PopToList,
             afterStackGone(list, listOf(null, containers, list, stack, ContainerDetail("s1", 1, "abc"), stack)),
         )
         // Another stack's screen in between may hold editor or git edits.
         assertEquals(
-            AfterStackGone.ReplaceWithList,
+            AfterStackGone.PopStackScreen,
             afterStackGone(list, listOf(null, containers, list, StackDetail("s1", 1, 6, "other"), stack)),
         )
+    }
+
+    /** The back stack after [afterStackGone]'s outcome is applied, as App.kt's navigation does it. */
+    private fun applyGone(list: Stacks, stack: List<Any?>): List<Any?> = when (afterStackGone(list, stack)) {
+        AfterStackGone.PopToList -> stack.subList(0, stack.indexOfLast { it == list } + 1)
+        AfterStackGone.SwitchToListTab -> stack.subList(0, stack.indexOfLast { it == Containers(list.serverId, list.endpointId) } + 1) + list
+        AfterStackGone.ReplaceWithList -> stack.dropLast(1) + list
+        AfterStackGone.PopStackScreen -> stack.dropLast(1)
+    }
+
+    /** A tab list's Back goes straight to the environments: it may only sit on top when no work lies below it. */
+    private fun backFromTopMayDropWork(stack: List<Any?>): Boolean {
+        val top = stack.last()
+        val isTab = top is Stacks || top is Containers
+        return isTab && stack.dropLast(1).any { it is Editor || it is Recreate || it is StackDetail }
+    }
+
+    @Test
+    fun backAfterAGoneStackNeverGoesToTheEnvironmentsOverUnsavedWork() {
+        val list = Stacks("s1", 1)
+        val containers = Containers("s1", 1)
+        val stack = StackDetail("s1", 1, 5, "shop")
+        val other = StackDetail("s1", 1, 6, "other")
+        val editor = Editor("s1", 1, "abc")
+        val recreate = Recreate("s1", 1, "abc")
+        val stacks = listOf(
+            listOf(null, containers, list, editor, stack),
+            listOf(null, containers, list, recreate, stack),
+            listOf(null, containers, editor, stack),
+            listOf(null, containers, recreate, stack),
+            listOf(null, editor, stack),
+            listOf(null, recreate, stack),
+            listOf(null, containers, list, other, stack),
+            listOf(null, other, ContainerDetail("s1", 1, "abc"), stack),
+            listOf(null, containers, list, stack),
+            listOf(null, containers, ContainerDetail("s1", 1, "abc"), stack),
+            listOf(null, stack),
+        )
+        for (s in stacks) {
+            val after = applyGone(list, s)
+            assertFalse(backFromTopMayDropWork(after), "$s -> $after")
+            // Every Editor, Recreate and other stack screen is still there.
+            assertEquals(s.filter { it is Editor || it is Recreate || it == other }, after.filter { it is Editor || it is Recreate || it == other }, "$s")
+        }
     }
 }
 
