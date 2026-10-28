@@ -247,6 +247,19 @@ class StacksGitApiTest {
     }
 
     @Test
+    fun detachKeepsTheStacksPruneSettingWhereTheUpdateHasIt() = runTest {
+        val pruning = gitStack(4).replace("\"GitSourceId\"", "\"Option\":{\"Prune\":true},\"GitSourceId\"")
+        client("2.45.3") { if (it.url.encodedPath == "/api/stacks/4" && it.method == HttpMethod.Get) HttpStatusCode.OK to pruning else null }
+            .detachFromGit(4, 3)
+        assertEquals("true", sent(HttpMethod.Put, "/api/stacks/4").second["Prune"].toString())
+        // Before 2.40 the update has no Prune: nothing is sent.
+        requests.value = emptyList()
+        client("2.39.8") { if (it.url.encodedPath == "/api/stacks/4" && it.method == HttpMethod.Get) HttpStatusCode.OK to pruning else null }
+            .detachFromGit(4, 3)
+        assertFalse("Prune" in sent(HttpMethod.Put, "/api/stacks/4").second)
+    }
+
+    @Test
     fun detachIsGatedAndOnlyForGitStacks() = runTest {
         assertFailsWith<IllegalStateException> { client("2.32.0").detachFromGit(4, 3) }
         assertFailsWith<IllegalStateException> {

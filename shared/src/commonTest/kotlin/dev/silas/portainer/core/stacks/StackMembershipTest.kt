@@ -3,6 +3,7 @@ package dev.silas.portainer.core.stacks
 import dev.silas.portainer.core.model.COMPOSE_PROJECT_LABEL
 import dev.silas.portainer.core.model.ContainerState
 import dev.silas.portainer.core.model.ContainerSummary
+import dev.silas.portainer.core.model.EnvVar
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -55,4 +56,31 @@ class StackMembershipTest {
         assertTrue(stackProtection(listOf(member), emptyList(), mapOf("a" to "portainer/agent:latest")))
         assertFalse(stackProtection(listOf(member), emptyList(), mapOf("a" to "nginx")))
     }
+
+    @Test
+    fun composeImagesAreCheckedAsTheStackEnvResolvesThem() {
+        val env = listOf(EnvVar("IMAGE", "portainer/agent"), EnvVar("TAG", "2.45.3"), EnvVar("EMPTY", ""))
+        assertTrue(stackProtection(emptyList(), listOf("\${IMAGE}:\${TAG}"), env = env))
+        assertTrue(stackProtection(emptyList(), listOf("\$IMAGE"), env = env))
+        assertTrue(stackProtection(emptyList(), listOf("\${UNSET:-portainer/portainer-ce}:latest"), env = env))
+        assertTrue(stackProtection(emptyList(), listOf("\${EMPTY:-docker.io/portainer/agent}"), env = env))
+        assertFalse(stackProtection(emptyList(), listOf("\${EMPTY-portainer/agent}nginx"), env = env))
+        assertFalse(stackProtection(emptyList(), listOf("\${IMAGE:-x}"), env = listOf(EnvVar("IMAGE", "nginx"))))
+        assertFalse(stackProtection(emptyList(), listOf("\${IMAGE}"), env = emptyList()))
+    }
+
+    @Test
+    fun interpolationFollowsComposeRules() {
+        val env = listOf(EnvVar("A", "x"), EnvVar("E", ""))
+        assertEquals("x:1", interpolateImage("\${A}:1", env))
+        assertEquals("d", interpolateImage("\${E:-d}", env))
+        assertEquals("", interpolateImage("\${E-d}", env))
+        assertEquals("d", interpolateImage("\${U-d}", env))
+        assertEquals("alt", interpolateImage("\${A:+alt}", env))
+        assertEquals("", interpolateImage("\${E:+alt}", env))
+        assertEquals("x", interpolateImage("\${A:?needed}", env))
+        assertEquals("\$A", interpolateImage("\$\$A", env))
+        assertEquals("nginx", interpolateImage("nginx", env))
+    }
 }
+

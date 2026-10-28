@@ -82,6 +82,9 @@ CE's UI discovers them itself (`app/portainer/services/api/stackService.js` `ext
 - `GET /api/stacks/{id}/file` → `{"StackFileContent": "..."}`. No query parameters. `stack_file.go`.
   **2.45**: returns **409** "Stack git settings have changed. Redeploy the stack…" when a git stack's URL or
   compose path was saved but not yet redeployed (`gitStackPendingRedeploy`).
+- The file endpoint returns the main compose file only. The app's protection check reads its images with `${VAR}` /
+  `${VAR:-default}` substituted from the stack's `Env` (`interpolateImage`); images in a git stack's `AdditionalFiles`
+  are **not** checked (the stack's containers, running or stopped, cover what it runs).
 
 ## Start / stop — `POST /api/stacks/{id}/start|stop?endpointId=N`
 
@@ -198,7 +201,7 @@ Synchronous (compose down).
  "RepositoryPassword": "", "Env": [...], "Prune": false, "RepullImageAndRedeploy": true, "PullImage": true}
 ```
 
-- Keep rules exist **only from 2.41.1**: `RepositoryReferenceName: ""` keeps the stored ref (`cmp.Or`), and `Env`
+- Keep rules exist **only from 2.41.0**: `RepositoryReferenceName: ""` keeps the stored ref (`cmp.Or`), and `Env`
   omitted/`null` keeps env (`if payload.Env != nil`). On **≤2.40** (incl. 2.33.7, 2.36, 2.39 LTS) both are assigned
   unconditionally: an empty ref empties `GitConfig.ReferenceName`, an omitted Env clears all variables.
 - **Rule (Task 8): always send the stack's current `RepositoryReferenceName` and current `Env` on redeploy, on every

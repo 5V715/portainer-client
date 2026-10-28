@@ -405,13 +405,14 @@ suspend fun PortainerClient.gitRedeploy(id: Int, endpointId: Int, r: GitRedeploy
 
 /**
  * Detaches a git stack: as CE's UI does, its current file and env are saved as a web-editor stack (which redeploys
- * it). Portainer drops the git settings and automatic updates; this is one-way.
+ * it). Portainer drops the git settings and automatic updates; this is one-way. The stack's own "prune services" setting
+ * goes with it (sent only where the update has `Prune`, CE 2.40+), so the redeploy prunes as the stack would.
  */
 suspend fun PortainerClient.detachFromGit(id: Int, endpointId: Int) {
     if (!stackFeatures(status().version).detachFromGit) throw IllegalStateException("This Portainer version can't detach stacks from git")
     val stack = stack(id)
     if (stack.git == null) throw IllegalStateException("The stack is not deployed from git.")
-    updateStack(id, endpointId, stackFile(id), stack.env, pullImage = false, prune = false)
+    updateStack(id, endpointId, stackFile(id), stack.env, pullImage = false, prune = stack.prune)
 }
 
 /**

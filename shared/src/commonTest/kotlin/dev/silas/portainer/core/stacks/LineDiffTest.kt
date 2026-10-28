@@ -304,4 +304,14 @@ class LineDiffTest {
         assertEquals(listOf("Added db_password"), envDiff(emptyList(), listOf(EnvVar("db_password", "x"))))
         assertEquals(listOf("Changed api_token"), envDiff(listOf(EnvVar("api_token", "a")), listOf(EnvVar("api_token", "b"))))
     }
+
+    @Test
+    fun fragmentAndMatrixParametersThatMayHoldCredentialsAreHiddenToo() {
+        for (v in listOf("https://h/cb#access_token=abc123", "https://h/x;password=hunter2", "https://h/x;a=1;Token=t")) {
+            assertEquals(listOf("Added URL"), envDiff(emptyList(), listOf(EnvVar("URL", v))), v)
+            assertEquals(listOf("Changed URL"), envDiff(listOf(EnvVar("URL", "plain")), listOf(EnvVar("URL", v))), v)
+        }
+        // Harmless fragment and matrix parameters still show.
+        assertEquals(listOf("Added URL=https://h/x;v=2#page=3"), envDiff(emptyList(), listOf(EnvVar("URL", "https://h/x;v=2#page=3"))))
+    }
 }

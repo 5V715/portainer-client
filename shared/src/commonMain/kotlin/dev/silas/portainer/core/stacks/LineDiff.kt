@@ -177,7 +177,8 @@ private fun backtrack(trace: List<IntArray>, last: IntArray, dEnd: Int, n: Int, 
 }
 
 private val SECRET_NAME = Regex("pass|pwd|secret|token|key|auth|cred|private|dsn|jwt|salt|cookie", RegexOption.IGNORE_CASE)
-private val QUERY_PARAM = Regex("[?&]([^=&#\\s]*)=")
+/** A URL query (`?a=`, `&a=`), fragment (`#access_token=`) or matrix (`;password=`) parameter name. */
+private val QUERY_PARAM = Regex("[?&#;]([^=&#;\\s]*)=")
 
 private fun mayHoldCredentials(value: String): Boolean =
     '@' in value || QUERY_PARAM.findAll(value).any { SECRET_NAME.containsMatchIn(it.groupValues[1]) }
