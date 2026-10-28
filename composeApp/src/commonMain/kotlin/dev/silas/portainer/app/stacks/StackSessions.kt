@@ -129,9 +129,10 @@ private fun StackOp.secrets(): List<String> = when (this) {
 /**
  * [running] until the operation and its check end; then [error] is null only when Portainer confirmed the result.
  * [stackId] is the stack it ran on, so a later stack with the same name never shows it; for a create it is
- * [STACK_NOT_CREATED] until Portainer returns the new stack.
+ * [STACK_NOT_CREATED] until Portainer returns the new stack. [httpStatus] is Portainer's answer when it refused the
+ * request with one (e.g. 409), else null.
  */
-data class StackProgress(val op: StackOp, val running: Boolean, val error: String?, val stackId: Int)
+data class StackProgress(val op: StackOp, val running: Boolean, val error: String?, val stackId: Int, val httpStatus: Int? = null)
 
 /**
  * Stack operations in flight and their results, one per [StackKey], collected in [scope] (an application-level
@@ -209,7 +210,7 @@ class StackSessions(
                 throw e
             } catch (e: Exception) {
                 val message = op.secrets().fold(safeMessage(e, "Unexpected error")) { m, secret -> m.replace(secret, "***") }
-                state.value = StackProgress(shown, running = false, error = message, stackId = id)
+                state.value = StackProgress(shown, running = false, error = message, stackId = id, httpStatus = (e as? PortainerException.Api)?.status)
             } finally {
                 client?.close()
             }
@@ -217,8 +218,18 @@ class StackSessions(
         return true
     }
 
-    /** Why no stack operation may start on [serverId]'s endpoint [endpointId] now, or null. */
-    fun refusal(serverId: String, endpointId: Int): String? = otherWork(serverId, endpointId)
+    /**
+     * Why no stack operation may start on [serverId]'s endpoint [endpointId] now, or null: other work there, or a
+     * running migrate of another stack that deploys onto it (as a create there is refused).
+     */
+    fun refusal(serverId: String, endpointId: Int): String? =
+        otherWork(serverId, endpointId) ?: STACK_OPERATION_IN_PROGRESS_MESSAGE.takeIf { isMigrateTarget(serverId, endpointId) }
+
+    /** A running migrate deploys onto [serverId]'s endpoint [endpointId]. */
+    private fun isMigrateTarget(serverId: String, endpointId: Int): Boolean = sessions.any { (key, state) ->
+        val progress = state.value
+        key.serverId == serverId && progress?.running == true && (progress.op as? StackOp.Migrate)?.targetEndpointId == endpointId
+    }
 
     /** True while a stack operation on [serverId]'s endpoint [endpointId] has not finished yet (a migrate also occupies its target). */
     fun isRunning(serverId: String, endpointId: Int): Boolean = sessions.any { (key, state) ->
@@ -382,6 +393,10 @@ class StackSessions(
         )
         val now = readStack(client, id)
         if (now != null && now.endpointId == op.targetEndpointId && now.name == name) return
+        // Connection lost, a gateway that gave up waiting (the server may still be working) or the stack unreadable:
+        // nothing can be ruled out, whatever the target lists right now.
+        val gaveUp = cause is PortainerException.Unreachable || (cause as? PortainerException.Api)?.status in GATEWAY_GAVE_UP
+        if (gaveUp || now == null) throw unknown
         val external = try {
             client.stacks(op.targetEndpointId).any { it.control == StackControl.Limited && it.name == name }
         } catch (e: CancellationException) {
@@ -394,12 +409,13 @@ class StackSessions(
                 "The stack is now running on $target but isn't managed by Portainer there, and its containers on $source may " +
                     "be partly removed. Check both environments before retrying.",
             )
-            // Connection lost or the stack unreadable: the server may still be working, so nothing can be ruled out.
-            cause is PortainerException.Unreachable || now == null -> throw unknown
             else -> throw IllegalStateException("${safeMessage(cause)} $target may have leftover containers named $name.")
         }
     }
 }
+
+/** Answers from a proxy in front of Portainer that stopped waiting: the migrate may still be running. */
+private val GATEWAY_GAVE_UP = 502..504
 
 /** Migrate answers that mean Portainer refused before it deployed anything. */
 private val REFUSED_BEFORE_DEPLOY = setOf(400, 401, 403, 404, 409)

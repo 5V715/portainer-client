@@ -75,11 +75,17 @@ class MigrateStackTest {
     @Volatile private var migrated = false
     /** The name the migrated stack has on endpoint 2. */
     private var migratedName = "shop"
-    private enum class MigrateMode { Ok, Conflict, ServerError, Drop, DeployedThenError, OddAnswer }
+    private enum class MigrateMode { Ok, Conflict, ServerError, Drop, DeployedThenError, OddAnswer, BadGateway, GatewayTimeout }
     private var migrateMode = MigrateMode.Ok
     /** The migrate request waits for this. */
     private var migrateGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
     private var createFails = false
+    /** Creates on these endpoints fail. */
+    private var createFailsOn = emptySet<String>()
+    /** Creates on endpoint 2 wait for this. */
+    @Volatile private var createGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    /** A dropped migrate leaves the stack's containers running on the target. */
+    private var shopOnTargetMeanwhile = false
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -88,6 +94,8 @@ class MigrateStackTest {
 
     @AfterTest
     fun tearDown() {
+        createGate?.complete(Unit)
+        migrateGate?.complete(Unit)
         scope.cancel()
         Dispatchers.resetMain()
     }
@@ -133,15 +141,26 @@ class MigrateStackTest {
                         containersJson = """[{"Id":"c9","Names":["/shop-web-1"],"Image":"nginx","State":"running","Status":"Up","Labels":{"com.docker.compose.project":"shop"}}]"""
                         respond("""{"message":"remove failed"}""", HttpStatusCode.InternalServerError, json)
                     }
-                    MigrateMode.Drop -> throw RuntimeException("connection reset secret-key")
+                    MigrateMode.Drop -> {
+                        if (shopOnTargetMeanwhile) containersJson = SHOP_CONTAINER
+                        throw RuntimeException("connection reset secret-key")
+                    }
+                    MigrateMode.BadGateway, MigrateMode.GatewayTimeout -> {
+                        // The proxy gave up while Portainer still works: the target shows the stack's containers already.
+                        containersJson = SHOP_CONTAINER
+                        val code = if (migrateMode == MigrateMode.BadGateway) HttpStatusCode.BadGateway else HttpStatusCode.GatewayTimeout
+                        respond("<html>gateway</html>", code, headersOf(HttpHeaders.ContentType, "text/html"))
+                    }
                 }
             }
-            path.startsWith("/api/stacks/create/standalone/") ->
-                if (createFails) {
+            path.startsWith("/api/stacks/create/standalone/") -> {
+                if (req.url.parameters["endpointId"] == "2") createGate?.await()
+                if (createFails || req.url.parameters["endpointId"] in createFailsOn) {
                     respond("""{"message":"clone failed for hunter2"}""", HttpStatusCode.InternalServerError, json)
                 } else {
                     respond("""{"Id":9,"Name":"x","Type":2,"EndpointId":2,"Status":1}""", HttpStatusCode.OK, json)
                 }
+            }
             path == "/api/stacks/9" -> respond("""{"Id":9,"Name":"x","Type":2,"EndpointId":2,"Status":1}""", HttpStatusCode.OK, json)
             path.endsWith("/containers/json") -> respond(containersJson, HttpStatusCode.OK, json)
             else -> respond("{}", HttpStatusCode.NotFound, json)
@@ -611,4 +630,59 @@ class MigrateStackTest {
         assertFalse(sessions.start(key, 5, StackOp.Migrate(2, null)))
         assertTrue(writes.isEmpty())
     }
+
+    // ---- recovery: what can't be ruled out ----
+
+    @Test
+    fun migrateWhoseGatewayGaveUpIsUnknownEvenWhenTheTargetShowsTheStack() = runTest {
+        for (mode in listOf(MigrateMode.BadGateway, MigrateMode.GatewayTimeout)) {
+            migrateMode = mode
+            containersJson = "[]"
+            val sessions = sessions()
+            assertTrue(sessions.start(key, 5, migrateOp))
+            val error = assertNotNull(finished(sessions).error)
+            // Not "running on agent but isn't managed": Portainer may still be finishing the move.
+            assertTrue("outcome is unknown" in error && "local" in error && "agent" in error, "$mode: $error")
+        }
+    }
+
+    @Test
+    fun migrateCutOffByTheNetworkIsUnknownEvenWhenTheTargetShowsTheStack() = runTest {
+        migrateMode = MigrateMode.Drop
+        shopOnTargetMeanwhile = true
+        val sessions = sessions()
+        assertTrue(sessions.start(key, 5, migrateOp))
+        val error = assertNotNull(finished(sessions).error)
+        assertTrue("outcome is unknown" in error, error)
+        assertFalse("isn't managed" in error, error)
+        assertFalse(error.contains("secret-key"), error)
+    }
+
+    // ---- a migrate occupies its target ----
+
+    @Test
+    fun noOtherStackOperationStartsOnTheTargetWhileAMigrateDeploysThere() = runTest {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        migrateGate = gate
+        val sessions = sessions()
+        assertTrue(sessions.start(key, 5, migrateOp))
+        assertEquals(STACK_OPERATION_IN_PROGRESS_MESSAGE, sessions.refusal("s1", 2))
+        val onTarget = StackKey("s1", 2, "taken")
+        for (op in listOf(StackOp.Start, StackOp.Stop, StackOp.Delete, StackOp.Update("a: b\n", emptyList(), false, false))) {
+            assertFalse(sessions.start(onTarget, 7, op), op.toString())
+        }
+        assertNull(sessions.progress(onTarget).value)
+        // Other environments are free.
+        assertNull(sessions.refusal("s1", 3))
+        gate.complete(Unit)
+        assertNull(finished(sessions).error)
+        assertNull(sessions.refusal("s1", 2))
+        assertTrue(writes.none { it.contains("/api/stacks/7") }, writes.toString())
+    }
+
+    // ---- the sheet ----
 }
+
+private const val SHOP_CONTAINER =
+    """[{"Id":"c9","Names":["/shop-web-1"],"Image":"nginx","State":"running","Status":"Up","Labels":{"com.docker.compose.project":"shop"}}]"""
+
