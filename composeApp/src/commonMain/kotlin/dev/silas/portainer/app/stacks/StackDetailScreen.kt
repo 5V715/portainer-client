@@ -67,7 +67,10 @@ fun StackDetailScreen(
     viewModel: StackDetailViewModel,
     editor: StackEditorViewModel,
     git: GitSettingsViewModel,
-    onOpenContainer: (containerId: String) -> Unit,
+    /** [unsavedEdits]: the editor or git settings hold edits, so the screen must stay on the back stack. */
+    onOpenContainer: (containerId: String, unsavedEdits: Boolean) -> Unit,
+    /** The stack was deleted or migrated away: leave for the stack list (Back must not return to it). */
+    onGone: () -> Unit,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
@@ -79,6 +82,7 @@ fun StackDetailScreen(
     var selected by rememberSaveable { mutableStateOf(StackDetailTab.Overview) }
     val tab = selected.takeIf { it in tabs } ?: StackDetailTab.Overview
     val back = { if (editor.requestBack() && git.requestBack()) onBack() }
+    val unsavedEdits = stackScreenHasUnsavedEdits(editorState, gitState)
     BackHandler(
         enabled = (editorState.hasUnsavedChanges && !editorState.updating) || (gitState.hasUnsavedChanges && gitState.running == null),
     ) { back() }
@@ -177,7 +181,7 @@ fun StackDetailScreen(
     LaunchedEffect(state.deleted) {
         if (state.deleted) {
             viewModel.navigated()
-            onBack() // the list reloads when it shows again
+            onGone() // the list reloads (and shows what happened) when it shows again
         }
     }
     state.confirm?.let { confirm ->
@@ -222,7 +226,7 @@ fun StackDetailScreen(
         bottomBar = {
             when (tab) {
                 StackDetailTab.Overview -> StackActionBar(state.ops, state.running, state.starting || state.loading) { op ->
-                    viewModel.request(op, unsavedEdits = editorState.hasUnsavedChanges)
+                    viewModel.request(op, unsavedEdits = unsavedEdits)
                 }
                 StackDetailTab.Editor -> StackEditorBar(editorState, editor::requestUpdate)
                 StackDetailTab.File -> Unit
@@ -303,7 +307,7 @@ fun StackDetailScreen(
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         val idle = state.running == null && !state.starting && !state.loading
                         OutlinedButton({ viewModel.openTransfer(TransferMode.Duplicate) }, Modifier.weight(1f), enabled = idle) { Text("Duplicate") }
-                        OutlinedButton({ viewModel.openTransfer(TransferMode.Migrate) }, Modifier.weight(1f), enabled = idle) { Text("Migrate") }
+                        OutlinedButton({ viewModel.openTransfer(TransferMode.Migrate, unsavedEdits) }, Modifier.weight(1f), enabled = idle) { Text("Migrate") }
                     }
                 }
 
@@ -312,7 +316,7 @@ fun StackDetailScreen(
                 if (state.containers.isEmpty()) Text("None. The stack has no containers (it is not running).")
                 state.containers.forEach { c ->
                     Column(
-                        Modifier.fillMaxWidth().clickable { onOpenContainer(c.id) }.padding(vertical = 4.dp),
+                        Modifier.fillMaxWidth().clickable { onOpenContainer(c.id, unsavedEdits) }.padding(vertical = 4.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         Text(c.name, style = MaterialTheme.typography.titleSmall)

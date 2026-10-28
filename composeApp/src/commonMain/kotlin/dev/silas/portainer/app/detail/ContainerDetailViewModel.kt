@@ -67,6 +67,9 @@ class ContainerDetailViewModel(
     private var linkProject: String? = null
     private var pendingProject: String? = null
 
+    /** A stack lookup is in flight (tests wait for it to end before refreshing). */
+    internal val stackLookupRunning: Boolean get() = linkJob?.isActive == true
+
     init {
         refresh()
     }

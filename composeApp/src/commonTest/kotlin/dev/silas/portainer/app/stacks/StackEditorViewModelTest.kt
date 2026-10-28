@@ -1,6 +1,9 @@
 package dev.silas.portainer.app.stacks
 
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.ContainerDetail
+import dev.silas.portainer.app.StackDetail
+import dev.silas.portainer.app.canPopTo
 import dev.silas.portainer.app.TestEnv
 import dev.silas.portainer.app.drain
 import dev.silas.portainer.app.settle
@@ -593,6 +596,21 @@ class StackEditorViewModelTest {
         assertFalse(s.hasUnsavedChanges, "no stuck \"Unsaved changes\" after a success")
         editor.clearNotice()
     }
+
+    @Test
+    fun unsavedEditorEditsKeepTheStackScreenOnTheBackStackWhenOpeningAContainer() = editorTest {
+        val (_, editor) = loaded()
+        val target = ContainerDetail("s1", 1, "c1")
+        val backStack = listOf(target, StackDetail("s1", 1, 5, "shop"))
+        assertFalse(stackScreenHasUnsavedEdits(editor.state.value, GitSettingsState()))
+        assertTrue(canPopTo(target, backStack, stackScreenHasUnsavedEdits(editor.state.value, GitSettingsState())))
+        editor.setText(newFile)
+        validated(editor)
+        assertTrue(stackScreenHasUnsavedEdits(editor.state.value, GitSettingsState()))
+        // Popping would drop the stack screen and its edits: the container is pushed instead.
+        assertFalse(canPopTo(target, backStack, stackScreenHasUnsavedEdits(editor.state.value, GitSettingsState())))
+    }
+
     @Test
     fun aFileChangedOnTheServerSinceTheReviewRefusesTheUpdate() = editorTest {
         val (_, editor) = loaded()

@@ -1,6 +1,9 @@
 package dev.silas.portainer.app.stacks
 
 import dev.silas.portainer.app.AppContainer
+import dev.silas.portainer.app.ContainerDetail
+import dev.silas.portainer.app.StackDetail
+import dev.silas.portainer.app.canPopTo
 import dev.silas.portainer.app.TestEnv
 import dev.silas.portainer.app.drain
 import dev.silas.portainer.app.settle
@@ -832,6 +835,16 @@ class GitSettingsViewModelTest {
         assertNull(vm.state.value.notice)
         assertEquals(EnvVar("A", "2"), vm.state.value.form!!.env[0], "the edits are kept")
         vm.clearFailure()
+    }
+
+    @Test
+    fun unsavedGitSettingsKeepTheStackScreenOnTheBackStackWhenOpeningAContainer() = gitTest {
+        val (_, vm) = loaded()
+        val target = ContainerDetail("s1", 1, "c1")
+        val backStack = listOf(target, StackDetail("s1", 1, 5, "shop"))
+        assertTrue(canPopTo(target, backStack, stackScreenHasUnsavedEdits(StackEditorState(), vm.state.value)))
+        vm.edit { copy(referenceName = "refs/heads/dev") }
+        assertFalse(canPopTo(target, backStack, stackScreenHasUnsavedEdits(StackEditorState(), vm.state.value)))
     }
 }
 

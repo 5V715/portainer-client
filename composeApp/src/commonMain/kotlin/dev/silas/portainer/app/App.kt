@@ -290,10 +290,21 @@ private fun AppNavHost(container: AppContainer) {
                 viewModel = vm,
                 editor = editor,
                 git = git,
-                onOpenContainer = {
-                    val target = ContainerDetail(route.serverId, route.endpointId, it)
-                    if (canPopTo(target, nav.currentBackStack.value.map(::routeOf))) nav.popBackStack(target, inclusive = false)
+                onOpenContainer = { id, unsavedEdits ->
+                    val target = ContainerDetail(route.serverId, route.endpointId, id)
+                    if (canPopTo(target, nav.currentBackStack.value.map(::routeOf), unsavedEdits)) nav.popBackStack(target, inclusive = false)
                     else nav.navigate(target) { launchSingleTop = true }
+                },
+                onGone = {
+                    val list = Stacks(route.serverId, route.endpointId)
+                    when (afterStackGone(list, nav.currentBackStack.value.map(::routeOf))) {
+                        AfterStackGone.PopToList -> nav.popBackStack(list, inclusive = false)
+                        AfterStackGone.SwitchToListTab -> nav.switchTab(route.serverId, route.endpointId, EnvTab.Stacks)
+                        AfterStackGone.ReplaceWithList -> nav.navigate(list) {
+                            popUpTo(route) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    }
                 },
                 onBack = { nav.popBackStack() },
             )
@@ -403,7 +414,7 @@ private fun NavController.switchTab(serverId: String, endpointId: Int, tab: EnvT
     }
 }
 
-/** The route object of a back-stack entry when it is one [canPopTo] cares about; null for every other destination. */
+/** The route object of a back-stack entry when [canPopTo] or [afterStackGone] care about it; null for every other destination. */
 private fun routeOf(entry: NavBackStackEntry): Any? {
     val route = entry.destination.route ?: return null
     fun <T> matches(serializer: KSerializer<T>) = route.startsWith(serializer.descriptor.serialName)
@@ -411,18 +422,44 @@ private fun routeOf(entry: NavBackStackEntry): Any? {
         matches(ContainerDetail.serializer()) -> entry.toRoute<ContainerDetail>()
         matches(Editor.serializer()) -> entry.toRoute<Editor>()
         matches(Recreate.serializer()) -> entry.toRoute<Recreate>()
+        matches(StackDetail.serializer()) -> entry.toRoute<StackDetail>()
+        // By exact name: a prefix match would also take routes whose names start the same.
+        route.substringBefore('/').substringBefore('?') == Stacks.serializer().descriptor.serialName -> entry.toRoute<Stacks>()
+        route.substringBefore('/').substringBefore('?') == Containers.serializer().descriptor.serialName -> entry.toRoute<Containers>()
         else -> null
     }
 }
 
 /**
  * Whether opening [target] from a stack may pop back to the [target] already on the back stack ([stack], bottom to top,
- * the stack screen last). Popping discards everything above it, so it is only done when that is just stack screens:
- * an Editor or Recreate entry in between holds unsaved edits or a running recreate's progress, and Back from the
- * stack must still return to it. Then the container is pushed instead (single-top).
+ * the stack screen last). Popping discards everything above it, so it is only done when nothing there can hold work:
+ * an Editor or Recreate entry in between holds unsaved edits or a running recreate's progress, another stack screen in
+ * between may hold editor or git settings edits, and [unsavedEdits] says the current stack screen does. Back must still
+ * return to them, so the container is pushed instead (single-top).
  */
-internal fun canPopTo(target: ContainerDetail, stack: List<Any?>): Boolean {
+internal fun canPopTo(target: ContainerDetail, stack: List<Any?>, unsavedEdits: Boolean = false): Boolean {
+    if (unsavedEdits) return false
     val at = stack.indexOfLast { it == target }
     if (at < 0) return false
-    return stack.drop(at + 1).none { it is Editor || it is Recreate }
+    val above = stack.drop(at + 1)
+    return above.none { it is Editor || it is Recreate } && above.dropLast(1).none { it is StackDetail }
+}
+
+/** Where a stack screen goes once its stack was deleted or migrated away. */
+internal enum class AfterStackGone {
+    /** Back to the stack list below. */
+    PopToList,
+
+    /** Opened from elsewhere in the environment (e.g. a container): the Stacks tab, on top of Containers. */
+    SwitchToListTab,
+
+    /** Neither is on the back stack: the list replaces the stack screen. */
+    ReplaceWithList,
+}
+
+/** [list] is the stack list of the stack's environment; [stack] the back stack as [routeOf] gives it, bottom to top. */
+internal fun afterStackGone(list: Stacks, stack: List<Any?>): AfterStackGone = when {
+    list in stack -> AfterStackGone.PopToList
+    Containers(list.serverId, list.endpointId) in stack -> AfterStackGone.SwitchToListTab
+    else -> AfterStackGone.ReplaceWithList
 }

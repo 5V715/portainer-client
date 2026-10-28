@@ -1,6 +1,10 @@
 package dev.silas.portainer.app.stacks
 
+import dev.silas.portainer.app.AfterStackGone
 import dev.silas.portainer.app.ContainerDetail
+import dev.silas.portainer.app.Containers
+import dev.silas.portainer.app.Stacks
+import dev.silas.portainer.app.afterStackGone
 import dev.silas.portainer.app.Editor
 import dev.silas.portainer.app.Recreate
 import dev.silas.portainer.app.StackDetail
@@ -122,7 +126,8 @@ class OpenStackLinkTest {
         stacksOk = false
         val vm = ContainerDetailViewModel(env().container, "s1", 1, "abc")
         settle { vm.state.value.overview != null && !vm.state.value.loading }
-        settle { requestLog.value.count { it == "/api/stacks" } == 1 }
+        // The failed lookup has finished (not only been sent): a refresh while it still runs would join it instead.
+        settle { requestLog.value.count { it == "/api/stacks" } == 1 && !vm.stackLookupRunning }
         assertNull(vm.state.value.stackLink)
         assertNull(vm.state.value.error)
         assertEquals("shop", vm.state.value.overview?.stack)
@@ -146,4 +151,33 @@ class OpenStackLinkTest {
         // An Editor below the container does not matter.
         assertTrue(canPopTo(target, listOf(Editor("s1", 1, "abc"), target, stack)))
     }
+
+    @Test
+    fun anotherStackScreenInBetweenOrUnsavedEditsKeepTheBackStack() {
+        val target = ContainerDetail("s1", 1, "abc")
+        val stack = StackDetail("s1", 1, 5, "shop")
+        val other = StackDetail("s1", 1, 6, "other")
+        // The other stack screen may hold editor or git edits: popping would drop them.
+        assertFalse(canPopTo(target, listOf(target, other, ContainerDetail("s1", 1, "def"), stack)))
+        // The current stack screen is the top entry: only its own unsaved edits count for it.
+        assertTrue(canPopTo(target, listOf(target, stack)))
+        assertFalse(canPopTo(target, listOf(target, stack), unsavedEdits = true))
+        // A stack screen below the container is not dropped.
+        assertTrue(canPopTo(target, listOf(other, target, stack)))
+    }
+
+    @Test
+    fun aGoneStackLeavesForItsEnvironmentsStackList() {
+        val list = Stacks("s1", 1)
+        val stack = StackDetail("s1", 1, 5, "shop")
+        assertEquals(AfterStackGone.PopToList, afterStackGone(list, listOf(null, Containers("s1", 1), list, stack)))
+        // Opened from a container: the container may be gone too; the Stacks tab replaces both.
+        assertEquals(
+            AfterStackGone.SwitchToListTab,
+            afterStackGone(list, listOf(null, Containers("s1", 1), ContainerDetail("s1", 1, "abc"), stack)),
+        )
+        // Another environment's list doesn't count.
+        assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, Stacks("s1", 2), stack)))
+    }
 }
+
