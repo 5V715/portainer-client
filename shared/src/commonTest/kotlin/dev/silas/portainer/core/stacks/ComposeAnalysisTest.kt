@@ -201,7 +201,7 @@ class ComposeAnalysisTest {
         val rnd = Random(42)
         val alphabet = "ab:- \n\t[]{}&*!|>'\"#%@`,?\${}.\u0000\u00e9"
         repeat(500) {
-            val s = String(CharArray(rnd.nextInt(0, 80)) { alphabet[rnd.nextInt(alphabet.length)] })
+            val s = CharArray(rnd.nextInt(0, 80)) { alphabet[rnd.nextInt(alphabet.length)] }.concatToString()
             val a = analyzeCompose(s, webEditor = rnd.nextBoolean())
             a.error?.let { e -> assertTrue(e.line >= 1) }
         }
