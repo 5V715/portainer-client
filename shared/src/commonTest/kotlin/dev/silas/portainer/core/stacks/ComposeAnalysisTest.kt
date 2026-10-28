@@ -208,4 +208,61 @@ class ComposeAnalysisTest {
         listOf("[".repeat(100000), "{".repeat(50000), "- ".repeat(50000), "\uFEFF", "---\n---\n", "a: b\n---\nc: d", "services: [1, 2]", "services:\n  - web", "services:\n  web: 5", "services:\n  web:\n    image: [1]\n", "services:\n  ? [a]\n  : image: x\n")
             .forEach { analyzeCompose(it, webEditor = true) }
     }
+
+    private fun nestedBlockMappings(levels: Int): String = buildString {
+        for (i in 0 until levels) append("  ".repeat(i)).append("k").append(i).append(":\n")
+        append("  ".repeat(levels)).append("leaf: x\n")
+    }
+
+    @Test
+    fun flowNestingBeyondTheLimitIsAnErrorAtTheLineWhereItCrosses() {
+        val e = assertNotNull(analyzeCompose("services:\n  web:\n    image: " + "[".repeat(500) + "\n", true).error)
+        assertEquals(TOO_DEEP_MESSAGE, e.message)
+        assertEquals(3, e.line)
+    }
+
+    @Test
+    fun blockNestingBeyondTheLimitIsAnErrorAtTheLineWhereItCrosses() {
+        // The mapping at depth d starts on line d, so depth MAX_YAML_DEPTH + 1 is crossed on that line.
+        val e = assertNotNull(analyzeCompose(nestedBlockMappings(MAX_YAML_DEPTH + 20), true).error)
+        assertEquals(TOO_DEEP_MESSAGE, e.message)
+        assertEquals(MAX_YAML_DEPTH + 1, e.line)
+        val dashes = assertNotNull(analyzeCompose("# comment\n" + "- ".repeat(500) + "x\n", true).error)
+        assertEquals(TOO_DEEP_MESSAGE, dashes.message)
+        assertEquals(2, dashes.line)
+    }
+
+    @Test
+    fun nestingUpToTheLimitStillParses() {
+        // nestedBlockMappings(n) holds n + 1 mappings, one inside the other.
+        assertNull(analyzeCompose(nestedBlockMappings(MAX_YAML_DEPTH - 1), true).error)
+        assertNull(analyzeCompose("a: " + "[".repeat(MAX_YAML_DEPTH - 1) + "]".repeat(MAX_YAML_DEPTH - 1), true).error)
+    }
+
+    @Test
+    fun twentyLevelDeepComposeFileParses() {
+        val deep = nestedBlockMappings(20).lines().joinToString("\n") { if (it.isEmpty()) it else "  $it" }
+        val text = "x-deep:\n$deep\nservices:\n  web:\n    image: nginx\n    labels: {a: {b: {c: [1, [2, [3]]]}}}\n"
+        val a = analyzeCompose(text, true)
+        assertNull(a.error)
+        assertEquals(listOf("web"), a.services)
+        assertEquals(listOf("nginx"), a.images)
+    }
+
+    @Test
+    fun mergeKeyFanOutStaysCheap() {
+        val sb = StringBuilder("x0: &m0 {restart: always}\n")
+        // 49 aliases, under the library's limit of 50 for collections; 6^8 paths if walked naively.
+        for (i in 1..8) {
+            val prev = "*m${i - 1}"
+            sb.append("x$i: &m$i {<<: [$prev, $prev, $prev, $prev, $prev, $prev]}\n")
+        }
+        sb.append("services:\n  web:\n    <<: *m8\n")
+        val t = measureTime {
+            val a = analyzeCompose(sb.toString(), webEditor = true)
+            assertNull(a.error, a.error?.toString())
+            assertEquals(listOf<ComposeWarning>(ComposeWarning.ServiceWithoutImage("web")), a.warnings)
+        }
+        assertTrue(t.inWholeMilliseconds < 2000, "took $t")
+    }
 }

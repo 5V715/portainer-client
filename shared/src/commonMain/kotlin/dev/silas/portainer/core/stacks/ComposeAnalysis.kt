@@ -2,6 +2,9 @@ package dev.silas.portainer.core.stacks
 
 import it.krzeminski.snakeyaml.engine.kmp.api.LoadSettings
 import it.krzeminski.snakeyaml.engine.kmp.api.lowlevel.Compose
+import it.krzeminski.snakeyaml.engine.kmp.api.lowlevel.Parse
+import it.krzeminski.snakeyaml.engine.kmp.events.CollectionEndEvent
+import it.krzeminski.snakeyaml.engine.kmp.events.CollectionStartEvent
 import it.krzeminski.snakeyaml.engine.kmp.exceptions.Mark
 import it.krzeminski.snakeyaml.engine.kmp.exceptions.MarkedYamlEngineException
 import it.krzeminski.snakeyaml.engine.kmp.nodes.MappingNode
@@ -34,14 +37,24 @@ data class ComposeAnalysis(
     val services: List<String>,
 )
 
-private const val MAX_MERGE_DEPTH = 8
+/**
+ * Deepest collection nesting [analyzeCompose] accepts. The library composes nodes recursively, and on
+ * Kotlin/Native and wasm a stack overflow kills the process instead of throwing, so deeper input is
+ * rejected before composing. Real compose files nest about ten levels.
+ */
+internal const val MAX_YAML_DEPTH = 64
+internal const val TOO_DEEP_MESSAGE = "The file nests too deeply to check (more than $MAX_YAML_DEPTH levels)."
 
 /**
  * Parses [text] as YAML and runs the structural checks. Pure and total: it never throws, and it
  * never expands aliases, so alias-heavy files stay cheap. `extends`, `include:`, anchors, merge
- * keys and `${VAR}` interpolation are accepted without complaint.
+ * keys and `${VAR}` interpolation are accepted without complaint. Input nested more than
+ * [MAX_YAML_DEPTH] levels is reported as an error without being composed.
  */
 fun analyzeCompose(text: String, webEditor: Boolean): ComposeAnalysis {
+    tooDeepError(text)?.let {
+        return ComposeAnalysis(error = it, warnings = emptyList(), images = emptyList(), services = emptyList())
+    }
     val root = try {
         Compose(LoadSettings()).compose(text)?.also { findDuplicateKey(it)?.let { dup -> return dup } }
     } catch (e: Throwable) {
@@ -53,6 +66,30 @@ fun analyzeCompose(text: String, webEditor: Boolean): ComposeAnalysis {
         // Structure checks are best effort; a surprise here must not block the user.
         ComposeAnalysis(error = null, warnings = emptyList(), images = emptyList(), services = emptyList())
     }
+}
+
+/**
+ * Walks the event stream (the library's parser keeps its own state stack, so this never recurses)
+ * and stops at the first collection nested more than [MAX_YAML_DEPTH] deep. Parse errors are left
+ * for the composer to report.
+ */
+private fun tooDeepError(text: String): YamlError? {
+    var depth = 0
+    try {
+        for (event in Parse(LoadSettings()).parse(text)) {
+            when (event) {
+                is CollectionStartEvent -> if (++depth > MAX_YAML_DEPTH) {
+                    val mark = event.startMark
+                    return YamlError(line = (mark?.line ?: 0) + 1, column = mark?.let { it.column + 1 }, message = TOO_DEEP_MESSAGE)
+                }
+                is CollectionEndEvent -> depth--
+                else -> Unit
+            }
+        }
+    } catch (e: Exception) {
+        return null
+    }
+    return null
 }
 
 private const val MULTIPLE_DOCUMENTS = "Multiple YAML documents ('---'). A compose file must contain exactly one."
@@ -129,19 +166,28 @@ private fun analyzeStructure(root: Node?, webEditor: Boolean): ComposeAnalysis {
 private fun MappingNode.get(key: String): Node? =
     value.firstOrNull { (it.keyNode as? ScalarNode)?.value == key }?.valueNode
 
-/** Looks up [key] in this mapping, falling back to YAML merge keys (`<<: *anchor`). */
-private fun MappingNode.lookup(key: String, depth: Int = 0): Node? {
-    get(key)?.let { return it }
-    if (depth >= MAX_MERGE_DEPTH) return null
-    for (tuple in value) {
-        if ((tuple.keyNode as? ScalarNode)?.value != "<<") continue
-        when (val merged = tuple.valueNode) {
-            is MappingNode -> merged.lookup(key, depth + 1)?.let { return it }
-            is SequenceNode -> for (item in merged.value) {
-                (item as? MappingNode)?.lookup(key, depth + 1)?.let { return it }
+/**
+ * Looks up [key] in this mapping, falling back to YAML merge keys (`<<: *anchor`) depth first, in
+ * order. Each mapping is visited once, so shared or cyclic merges stay linear.
+ */
+private fun MappingNode.lookup(key: String): Node? {
+    val seen = HashSet<Node>() // identity
+    val stack = ArrayList<MappingNode>()
+    stack += this
+    while (stack.isNotEmpty()) {
+        val node = stack.removeAt(stack.size - 1)
+        if (!seen.add(node)) continue
+        node.get(key)?.let { return it }
+        val merged = ArrayList<MappingNode>()
+        for (tuple in node.value) {
+            if ((tuple.keyNode as? ScalarNode)?.value != "<<") continue
+            when (val v = tuple.valueNode) {
+                is MappingNode -> merged += v
+                is SequenceNode -> v.value.forEach { item -> (item as? MappingNode)?.let { merged += it } }
+                else -> Unit
             }
-            else -> Unit
         }
+        for (i in merged.indices.reversed()) stack += merged[i]
     }
     return null
 }
