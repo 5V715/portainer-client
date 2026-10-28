@@ -595,11 +595,41 @@ class GitSettingsViewModelTest {
         assertNull(vm.state.value.saveConfirm)
         assertEquals(PROTECTED_IMAGE_MESSAGE, vm.state.value.error)
         vm.clearError()
-        // Changing only the force flags of the existing webhook starts nothing new.
+        // Changing only the image pull flag of the existing webhook starts nothing new.
         vm.setMechanism(AutoUpdateMechanism.Webhook)
-        vm.edit { copy(forceUpdate = true) }
+        vm.edit { copy(forcePullImage = true) }
         vm.requestSave()
         assertNotNull(vm.state.value.saveConfirm)
+    }
+
+    @Test
+    fun protectedStackMayNotForceWebhookRedeploys() = gitTest {
+        image = "portainer/portainer-ce:2.42.0"
+        autoUpdate = """{"Interval":"","Webhook":"05de31a2-79fa-4644-9c12-faa67e5c49f0","ForceUpdate":false,"ForcePullImage":false}"""
+        val (_, vm) = loaded()
+        // Force redeployment recreates the containers on every webhook call, as it does on every poll.
+        vm.edit { copy(forceUpdate = true) }
+        vm.saveIsRefusedAsProtected()
+    }
+
+    @Test
+    fun protectionUnknownMayNotForceWebhookRedeploysEither() = gitTest {
+        fileFails = true
+        autoUpdate = """{"Interval":"","Webhook":"05de31a2-79fa-4644-9c12-faa67e5c49f0","ForceUpdate":false,"ForcePullImage":false}"""
+        val (_, vm) = loaded()
+        vm.edit { copy(forceUpdate = true) }
+        vm.requestSave()
+        assertEquals(PROTECTION_UNKNOWN_MESSAGE, vm.state.value.error)
+        assertNull(vm.state.value.saveConfirm)
+    }
+
+    @Test
+    fun anUnprotectedStackMayForceWebhookRedeploys() = gitTest {
+        autoUpdate = """{"Interval":"","Webhook":"05de31a2-79fa-4644-9c12-faa67e5c49f0","ForceUpdate":false,"ForcePullImage":false}"""
+        val (_, vm) = loaded()
+        vm.edit { copy(forceUpdate = true) }
+        vm.requestSave()
+        assertNotNull(vm.state.value.saveConfirm, vm.state.value.error)
     }
 
     @Test

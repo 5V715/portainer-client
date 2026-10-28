@@ -113,7 +113,7 @@ internal fun GitSettingsForm.settingsDifferFrom(o: GitSettingsForm): Boolean =
  * Saving [this] over the stored [o] can make Portainer redeploy the stack by itself: automatic updates turned on, or
  * polling started (also webhook → polling while on); with automatic updates staying on, a changed reference or compose
  * path (the next poll or webhook deploys it), a changed env with Force redeployment on (it is deployed even when the
- * repository didn't change), or Force redeployment turned on for polling (the next poll redeploys).
+ * repository didn't change), or Force redeployment turned on (the next poll or webhook call recreates the containers).
  */
 internal fun GitSettingsForm.mayAutoRedeployFrom(o: GitSettingsForm): Boolean {
     if (!autoUpdateEnabled) return false
@@ -121,8 +121,8 @@ internal fun GitSettingsForm.mayAutoRedeployFrom(o: GitSettingsForm): Boolean {
     val deployedFilesChanged = referenceName.trim() != o.referenceName.trim() || configFilePath.trim() != o.configFilePath.trim() ||
         additionalPaths != o.additionalPaths
     val forcedEnv = forceUpdate && effectiveEnv != o.effectiveEnv
-    val forcedPolling = forceUpdate && !o.forceUpdate && pollingInterval.isNotEmpty()
-    return turnedOn || deployedFilesChanged || forcedEnv || forcedPolling
+    val forcedOn = forceUpdate && !o.forceUpdate
+    return turnedOn || deployedFilesChanged || forcedEnv || forcedOn
 }
 
 /** What the shared GitOps Source gets for [this] over [o], or null when none of its fields changed. */
