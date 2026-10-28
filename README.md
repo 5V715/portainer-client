@@ -17,8 +17,29 @@ A Kotlin Multiplatform + Compose Multiplatform client for managing Docker contai
 - Quick Recreate (**Recreate** on the container detail): recreates a container with its current settings, with "Pull latest image" on by default.
 - Registries management (list, add, edit, remove registries configured in Portainer).
 - Portainer's own containers are protected from stop, remove and recreate, since that would cut off the connection.
+- Docker Compose stacks: see [Stacks](#stacks).
 
 Tested against Portainer CE 2.x (the API shapes used). The registry API field names have not yet been verified against a live server.
+
+## Stacks
+
+The app targets the newest Portainer CE. Stack features that depend on the server version are only offered where that version supports them, and Business Edition features are not offered.
+
+- **Stacks tab** in each Docker environment: all stacks with their status (running, stopped, and on newer servers Deploying and Error). Stacks created outside Portainer are listed as External and are view-only.
+- **Stack detail**: the stack's containers, start, stop and delete (delete asks you to type the stack's name), and **Copy or move** to duplicate the stack or migrate it to another environment. **Open stack** on the detail of a container that belongs to a stack opens that stack.
+- **Web-editor stacks** are edited in a YAML code editor with line numbers, colouring, validation (errors point to the line), find and undo, and environment variables as rows or as a `.env` block. Before an update a review shows the diff, with **Re-pull images** and **Prune services no longer in the file**.
+- **Git stacks** have a Git tab:
+  - settings: reference, compose file paths, credentials (Portainer keeps the stored password and never gives it back; type it again only to change it) and TLS verification;
+  - GitOps automatic updates by polling or by webhook (with a copyable webhook URL), re-pull images and force redeployment;
+  - **pull and redeploy** on demand;
+  - **detach from git**, which removes the repository settings and automatic updates and redeploys the stack (this can't be undone).
+- **Create a stack** (the **+** button on the Stacks tab) from the web editor, an uploaded file, a git repository or a custom template.
+- Safety:
+  - stacks that contain Portainer itself are protected from what would redeploy or stop them (including settings that would make Portainer redeploy them by itself), and actions that could drop the connection show a reminder first;
+  - nothing is reported as done until Portainer confirms it;
+  - environment values that may be secrets are hidden in diffs and review screens.
+
+Check on a device: the compose editor's on-device behaviour (the Tab key, scrolling to find results) has only been tested in unit tests.
 
 ## Create a Portainer API key
 
