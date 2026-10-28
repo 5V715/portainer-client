@@ -453,13 +453,28 @@ internal enum class AfterStackGone {
     /** Opened from elsewhere in the environment (e.g. a container): the Stacks tab, on top of Containers. */
     SwitchToListTab,
 
-    /** Neither is on the back stack: the list replaces the stack screen. */
+    /**
+     * Neither is on the back stack, or going there would drop work above it: the list replaces just the stack screen,
+     * so Back still reaches what lies below.
+     */
     ReplaceWithList,
 }
 
-/** [list] is the stack list of the stack's environment; [stack] the back stack as [routeOf] gives it, bottom to top. */
-internal fun afterStackGone(list: Stacks, stack: List<Any?>): AfterStackGone = when {
-    list in stack -> AfterStackGone.PopToList
-    Containers(list.serverId, list.endpointId) in stack -> AfterStackGone.SwitchToListTab
-    else -> AfterStackGone.ReplaceWithList
+/**
+ * [list] is the stack list of the stack's environment; [stack] the back stack as [routeOf] gives it, bottom to top, the
+ * gone stack screen last. Going back to the list or the Containers tab pops everything above it, so it is only done
+ * when nothing there can hold work, as in [canPopTo]: no Editor or Recreate entry, and no other stack's screen (the
+ * gone stack's own screens hold nothing worth keeping).
+ */
+internal fun afterStackGone(list: Stacks, stack: List<Any?>): AfterStackGone {
+    val gone = stack.lastOrNull()
+    fun canPopTo(anchor: Any): Boolean {
+        val at = stack.indexOfLast { it == anchor }
+        return at >= 0 && stack.drop(at + 1).none { it is Editor || it is Recreate || (it is StackDetail && it != gone) }
+    }
+    return when {
+        canPopTo(list) -> AfterStackGone.PopToList
+        canPopTo(Containers(list.serverId, list.endpointId)) -> AfterStackGone.SwitchToListTab
+        else -> AfterStackGone.ReplaceWithList
+    }
 }

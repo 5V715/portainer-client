@@ -179,5 +179,33 @@ class OpenStackLinkTest {
         // Another environment's list doesn't count.
         assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, Stacks("s1", 2), stack)))
     }
+
+    @Test
+    fun aGoneStackNeverDropsAnEditorOrRecreateAboveItsAnchor() {
+        val list = Stacks("s1", 1)
+        val containers = Containers("s1", 1)
+        val stack = StackDetail("s1", 1, 5, "shop")
+        val editor = Editor("s1", 1, "abc")
+        val recreate = Recreate("s1", 1, "abc")
+        // Popping to the list would drop the Editor/Recreate: only the gone stack screen is replaced.
+        assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, containers, list, editor, stack)))
+        assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, containers, list, recreate, stack)))
+        // The same for switching tabs on top of Containers.
+        assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, containers, editor, stack)))
+        assertEquals(AfterStackGone.ReplaceWithList, afterStackGone(list, listOf(null, containers, recreate, stack)))
+        // An Editor below the anchor is not dropped.
+        assertEquals(AfterStackGone.PopToList, afterStackGone(list, listOf(null, containers, editor, list, stack)))
+        assertEquals(AfterStackGone.SwitchToListTab, afterStackGone(list, listOf(editor, containers, stack)))
+        // The same, now-gone stack's screen in between holds nothing worth keeping.
+        assertEquals(
+            AfterStackGone.PopToList,
+            afterStackGone(list, listOf(null, containers, list, stack, ContainerDetail("s1", 1, "abc"), stack)),
+        )
+        // Another stack's screen in between may hold editor or git edits.
+        assertEquals(
+            AfterStackGone.ReplaceWithList,
+            afterStackGone(list, listOf(null, containers, list, StackDetail("s1", 1, 6, "other"), stack)),
+        )
+    }
 }
 
