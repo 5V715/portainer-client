@@ -71,6 +71,8 @@ class StackEditorViewModelTest {
     @Volatile private var putNetworkLoss = false
     @Volatile private var putGate: CompletableDeferred<Unit>? = null
     @Volatile private var status = 1
+    @Volatile private var containersJson =
+        """[{"Id":"c1","Names":["/shop-web-1"],"Image":"nginx","State":"running","Status":"Up","Labels":{"com.docker.compose.project":"shop"}}]"""
     /** Portainer stores the file with this appended (as if it rewrote it). */
     @Volatile private var storedSuffix = ""
     /** Holds a stop (the session stays running) and a recreate's pull. */
@@ -144,11 +146,7 @@ class StackEditorViewModelTest {
                     } else {
                         respond("""{"StackFileContent":${Json.encodeToString(String.serializer(), fileContent)}}""", HttpStatusCode.OK, json)
                     }
-                path.endsWith("/containers/json") -> respond(
-                    """[{"Id":"c1","Names":["/shop-web-1"],"Image":"nginx","State":"running","Status":"Up","Labels":{"com.docker.compose.project":"shop"}}]""",
-                    HttpStatusCode.OK,
-                    json,
-                )
+                path.endsWith("/containers/json") -> respond(containersJson, HttpStatusCode.OK, json)
                 else -> respond("{}", HttpStatusCode.NotFound, json)
             }
         }
@@ -534,7 +532,7 @@ class StackEditorViewModelTest {
         detail.request(StackOp.Delete, unsavedEdits = editor.state.value.hasUnsavedChanges)
         val dirty = assertNotNull(detail.state.value.confirm)
         assertTrue(dirty.unsavedEdits)
-        assertTrue(dirty.body.contains("unsaved changes in the editor are discarded"), dirty.body)
+        assertTrue(dirty.body.contains("unsaved changes on this screen are discarded"), dirty.body)
         detail.dismissConfirm()
     }
 
@@ -595,4 +593,61 @@ class StackEditorViewModelTest {
         assertFalse(s.hasUnsavedChanges, "no stuck \"Unsaved changes\" after a success")
         editor.clearNotice()
     }
+    @Test
+    fun aFileChangedOnTheServerSinceTheReviewRefusesTheUpdate() = editorTest {
+        val (_, editor) = loaded()
+        editor.setText(newFile)
+        validated(editor)
+        editor.requestUpdate()
+        assertNotNull(editor.state.value.review)
+        fileContent = original + "# edited elsewhere\n" // the diff no longer shows what the update replaces
+        editor.confirmUpdate()
+        idle(editor)
+        assertEquals(STACK_CHANGED_MESSAGE, editor.state.value.error)
+        assertTrue(requests.none { it.startsWith("PUT") })
+        assertEquals(newFile, editor.state.value.text, "the edits are kept")
+    }
+
+    @Test
+    fun anEnvChangedOnTheServerSinceTheReviewRefusesTheUpdate() = editorTest {
+        val (_, editor) = loaded()
+        editor.setText(newFile)
+        validated(editor)
+        editor.requestUpdate()
+        assertNotNull(editor.state.value.review)
+        env = """[{"name":"A","value":"changed"}]"""
+        editor.confirmUpdate()
+        idle(editor)
+        assertEquals(STACK_CHANGED_MESSAGE, editor.state.value.error)
+        assertTrue(requests.none { it.startsWith("PUT") })
+    }
+
+    @Test
+    fun aStoppedStackWhoseStoppedContainerRunsPortainerCantBeUpdated() = editorTest {
+        status = 2
+        containersJson = """[{"Id":"c1","Names":["/shop-agent-1"],"Image":"portainer/agent:2.45.3","State":"exited","Status":"Exited (0)",
+            "Labels":{"com.docker.compose.project":"shop"}}]"""
+        val (detail, editor) = loaded()
+        assertTrue(detail.state.value.protected)
+        editor.setText(newFile)
+        validated(editor)
+        editor.requestUpdate()
+        assertNull(editor.state.value.review)
+        assertEquals(PROTECTED_IMAGE_MESSAGE, editor.state.value.error)
+        assertTrue(requests.none { it.startsWith("PUT") })
+    }
+
+    @Test
+    fun aNewImageGivenByAnEnvVariableIsCheckedAsResolved() = editorTest {
+        val (_, editor) = loaded()
+        editor.setText("services:\n  agent:\n    image: \${AGENT_IMAGE:-nginx}\n")
+        editor.addEnvRow()
+        editor.setEnvRow(2, EnvVar("AGENT_IMAGE", "portainer/agent:2.45.3"))
+        validated(editor)
+        editor.requestUpdate()
+        assertNull(editor.state.value.review)
+        assertEquals(PROTECTED_IMAGE_MESSAGE, editor.state.value.error)
+        assertTrue(requests.none { it.startsWith("PUT") })
+    }
 }
+

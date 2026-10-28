@@ -292,6 +292,9 @@ class StackActionsTest {
         val list = StacksViewModel(env().container, "s1", 1)
         settle { !list.state.value.loading }
         assertTrue(list.state.value.stacks.none { it.id == 5 })
+        // The list says what happened when it shows (also when the screen came from a container).
+        list.onScreenResumed()
+        assertEquals("Deleted shop", list.state.value.notice)
     }
 
     @Test

@@ -42,6 +42,8 @@ data class StackDetailState(
     /** The stack runs Portainer (members or compose file images): lifecycle actions are blocked. */
     val protected: Boolean = false,
     val features: StackFeatures = stackFeatures(""),
+    /** The server's version couldn't be read: [features] are all off, and what depends on them is refused. */
+    val versionUnknown: Boolean = false,
     val loading: Boolean = true,
     /** Load failures and refused actions (shown once). */
     val error: String? = null,
@@ -83,6 +85,10 @@ class StackDetailViewModel(
     private var loadJob: Job? = null
     private val sessions = container.stackSessions
     private val key = StackKey(serverId, endpointId, name)
+    // Declared before the init blocks: an initializer below them would reset the job they re-attach.
+    private var transferJob: Job? = null
+    private var namesJob: Job? = null
+    private var duplicateJob: Job? = null
 
     init {
         refresh()
@@ -156,7 +162,10 @@ class StackDetailViewModel(
                 _state.update { it.copy(running = null, failure = p.op to error) }
                 refresh()
             }
-            p.op == StackOp.Delete -> _state.update { it.copy(running = null, deleted = true) }
+            p.op == StackOp.Delete -> {
+                sessions.announce(serverId, endpointId, "Deleted ${key.stackName}")
+                _state.update { it.copy(running = null, deleted = true) }
+            }
             else -> {
                 val notice = if (p.op == StackOp.Start) "Stack started" else "Stack stopped"
                 _state.update { it.copy(running = null, notice = notice) }
@@ -201,7 +210,7 @@ class StackDetailViewModel(
                 load()
                 val s = _state.value
                 val refusal = stackOpRefusal(s, op)
-                    ?: "The stack changed — check it and try again.".takeIf { op !in s.ops }
+                    ?: STACK_CHANGED_MESSAGE.takeIf { op !in s.ops }
                     ?: sessions.refusal(serverId, endpointId)
                 val id = s.stack?.id
                 when {
@@ -222,15 +231,12 @@ class StackDetailViewModel(
 
     // ---- duplicate / migrate ----
 
-    private var transferJob: Job? = null
-    private var namesJob: Job? = null
-    private var duplicateJob: Job? = null
-
     /**
      * Opens the sheet to [TransferMode.Duplicate] or [TransferMode.Migrate] the stack as loaded; a refused one only says
-     * why. Targets are the online Docker standalone environments (a migrate leaves the source out).
+     * why. Targets are the online Docker standalone environments (a migrate leaves the source out). [unsavedEdits]: the
+     * screen holds editor or git settings edits that a migrate would throw away, so its sheet says so.
      */
-    fun openTransfer(mode: TransferMode) {
+    fun openTransfer(mode: TransferMode, unsavedEdits: Boolean = false) {
         val s = _state.value
         if (s.running != null || s.starting || s.confirm != null || s.transfer != null) return
         val stack = s.stack ?: return
@@ -250,6 +256,7 @@ class StackDetailViewModel(
             autoUpdateDropped = mode == TransferMode.Duplicate && stack.autoUpdate != null,
             protectedWarning = mode == TransferMode.Duplicate && (s.protected || s.protectionUnknown),
             pruneNotCopied = mode == TransferMode.Duplicate && stack.prune,
+            unsavedEdits = mode == TransferMode.Migrate && unsavedEdits,
         )
         _state.update { it.copy(transfer = form) }
         transferJob = viewModelScope.launch {
@@ -469,6 +476,8 @@ class StackDetailViewModel(
         if (id != null) {
             try {
                 file = client.stackFile(id)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 // e.g. 409 for a git stack whose settings changed without a redeploy; the rest still shows.
                 fileError = failureMessage(e, "Couldn't load the compose file")
@@ -479,22 +488,24 @@ class StackDetailViewModel(
         val images = file?.let { text ->
             withContext(Dispatchers.Default) { analyzeCompose(text, webEditor = stack.git == null).images }
         }.orEmpty()
-        val features = try {
-            stackFeatures(client.status().version)
+        val version = try {
+            client.status().version
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            stackFeatures("") // unknown version: every optional feature off
+            null // unknown version: every optional feature off
         }
+        val features = stackFeatures(version.orEmpty())
         _state.update {
             it.copy(
                 stack = stack,
                 containers = members,
                 file = file,
                 fileError = fileError,
-                protected = stackProtection(members, images, resolved),
+                protected = stackProtection(members, images, resolved, stack.env),
                 protectionUnknown = stack.control == StackControl.Full && file == null,
                 features = features,
+                versionUnknown = version == null,
                 error = null,
             )
         }

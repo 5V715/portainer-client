@@ -9,7 +9,7 @@ import dev.silas.portainer.core.model.EnvVar
 import dev.silas.portainer.core.model.StackControl
 import dev.silas.portainer.core.model.StackStatus
 import dev.silas.portainer.core.recreate.PROTECTED_IMAGE_MESSAGE
-import dev.silas.portainer.core.recreate.isProtectedImage
+import dev.silas.portainer.core.stacks.composeImagesProtected
 import dev.silas.portainer.core.stacks.ComposeAnalysis
 import dev.silas.portainer.core.stacks.ComposeWarning
 import dev.silas.portainer.core.stacks.DiffHunk
@@ -53,8 +53,14 @@ data class StackReview(
     val prune: Boolean,
     /** The server has `Prune` on update (CE 2.40+); otherwise the switch is hidden. */
     val pruneAvailable: Boolean,
+    /** The stored file (line ends normalised) and env the diff was made against: the update is refused when they changed. */
+    internal val baseFile: String? = null,
+    internal val baseEnv: List<EnvVar>? = null,
 ) {
     val reminder: String get() = CONNECTION_DEPENDENCY_REMINDER
+
+    // Env values can be secrets.
+    override fun toString(): String = "StackReview(lines=${file.lines().size}, env=${env.size}, pullImage=$pullImage, prune=$prune)"
 }
 
 data class StackEditorState(
@@ -103,15 +109,16 @@ data class StackEditorState(
 }
 
 /**
- * Why the update may not run: everything that blocks stack operations, the new file's images (a file that adds
- * Portainer or its agent is protected too), git and external stacks, and a deploy Portainer hasn't finished.
+ * Why the update may not run: everything that blocks stack operations, the new file's images as [newEnv] resolves
+ * them (a file that adds Portainer or its agent is protected too), git and external stacks, and a deploy Portainer
+ * hasn't finished.
  */
-fun stackUpdateRefusal(state: StackDetailState, newImages: List<String>): String? {
+fun stackUpdateRefusal(state: StackDetailState, newImages: List<String>, newEnv: List<EnvVar> = emptyList()): String? {
     val stack = state.stack ?: return "The stack couldn't be loaded — try again."
     if (stack.control != StackControl.Full || stack.id == null) return EXTERNAL_STACK_MESSAGE
     if (stack.git != null) return GIT_STACK_EDIT_MESSAGE
     return when {
-        state.protected || newImages.any(::isProtectedImage) -> PROTECTED_IMAGE_MESSAGE
+        state.protected || composeImagesProtected(newImages, newEnv) -> PROTECTED_IMAGE_MESSAGE
         state.protectionUnknown -> PROTECTION_UNKNOWN_MESSAGE
         stack.status == StackStatus.Deploying -> STACK_DEPLOYING_MESSAGE
         else -> null
@@ -278,7 +285,7 @@ class StackEditorViewModel(
         if (!s.canUpdate || s.review != null) return
         val analysis = s.analysis ?: return
         val d = detail.state.value
-        val refusal = stackUpdateRefusal(d, analysis.images)
+        val refusal = stackUpdateRefusal(d, analysis.images, s.effectiveEnv)
             ?: sessions.refusal(serverId, endpointId)
             ?: OTHER_STACK_OPERATION_MESSAGE.takeIf { sessions.progress(key).value?.running == true }
         refusal?.let { reason ->
@@ -298,6 +305,8 @@ class StackEditorViewModel(
             pullImage = false,
             prune = pruneAvailable && d.stack?.prune == true,
             pruneAvailable = pruneAvailable,
+            baseFile = s.original,
+            baseEnv = s.originalEnv,
         )
         _state.update { it.copy(review = review) }
     }
@@ -316,7 +325,12 @@ class StackEditorViewModel(
             try {
                 detail.reloadNow()
                 val d = detail.state.value
-                val refusal = stackUpdateRefusal(d, review.images) ?: sessions.refusal(serverId, endpointId)
+                // The diff was made against the stored file and env: if Portainer has others now, it would hide their changes.
+                val changed = d.stack != null && d.file != null &&
+                    (normalizeLineEndings(d.file) != review.baseFile || d.stack.env != review.baseEnv)
+                val refusal = stackUpdateRefusal(d, review.images, review.env)
+                    ?: STACK_CHANGED_MESSAGE.takeIf { changed }
+                    ?: sessions.refusal(serverId, endpointId)
                 val id = d.stack?.id
                 val op = StackOp.Update(review.file, review.env, review.pullImage, review.prune && review.pruneAvailable)
                 when {

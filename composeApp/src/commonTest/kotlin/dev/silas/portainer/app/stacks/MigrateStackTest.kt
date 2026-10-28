@@ -681,6 +681,52 @@ class MigrateStackTest {
     }
 
     // ---- the sheet ----
+
+    @Test
+    fun migrateSheetSaysUnsavedEditsAreDiscarded() = vmTest {
+        val vm = loaded()
+        assertNull(opened(vm, TransferMode.Migrate).unsavedEditsNote)
+        vm.dismissTransfer()
+        vm.openTransfer(TransferMode.Migrate, unsavedEdits = true)
+        val form = assertNotNull(vm.state.value.transfer)
+        assertEquals("Your unsaved changes on this screen are discarded.", form.unsavedEditsNote)
+        vm.dismissTransfer()
+        // A duplicate leaves this stack (and the edits) as they are.
+        vm.openTransfer(TransferMode.Duplicate, unsavedEdits = true)
+        assertNull(assertNotNull(vm.state.value.transfer).unsavedEditsNote)
+        settle { vm.state.value.transfer?.let { !it.loadingTargets && it.existingNames != null } == true }
+    }
+
+    @Test
+    fun aReattachedDuplicateIsReplacedByANewOneAndNeverShowsInItsSheet() = vmTest {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        createGate = gate
+        createFailsOn = setOf("2")
+        val env = newEnv()
+        val sessions = env.container.stackSessions
+        val first = StackKey("s1", 2, "shop-a")
+        assertTrue(sessions.create(first, StackOp.Create.Text("a: b\n", emptyList(), copiedFrom = 5)))
+        // The screen opens while that copy runs and re-attaches to it.
+        val vm = StackDetailViewModel(env.container, "s1", 1, 5, "shop").also { vms += it }
+        settle { !vm.state.value.loading && vm.state.value.stack != null }
+        settle { vm.state.value.running == null }
+        opened(vm, TransferMode.Duplicate)
+        target(vm, 8)
+        vm.setTransferName("shop-b")
+        vm.submitTransfer()
+        settle { vm.state.value.notice != null }
+        assertEquals("Created shop-b on standalone", vm.state.value.notice)
+        vm.clearNotice()
+        // The earlier copy fails now: its watcher was replaced, so nothing on this screen reports it as this one's.
+        gate.complete(Unit)
+        settle { sessions.progress(first).value?.running != true }
+        drain()
+        assertNull(vm.state.value.failure, "the earlier copy's failure was taken by this screen")
+        assertNull(vm.state.value.transfer)
+        assertNull(vm.state.value.notice)
+        // Its result is kept for the next screen.
+        assertNotNull(sessions.progress(first).value?.error)
+    }
 }
 
 private const val SHOP_CONTAINER =

@@ -52,6 +52,7 @@ class CreateStackViewModelTest {
     private val createBodies = MutableStateFlow(emptyList<JsonObject>())
 
     @Volatile private var version = "2.45.3"
+    @Volatile private var statusFails = false
     /** `Status` codes `GET /api/stacks/12` answers in turn (the last one repeats). */
     private val statuses = MutableStateFlow(listOf(3, 1))
     @Volatile private var statusMessage = ""
@@ -81,7 +82,9 @@ class CreateStackViewModelTest {
             val path = req.url.encodedPath
             requestLog.update { it + "${req.method.value} $path" }
             when {
-                path == "/api/status" -> respond("""{"Version":"$version"}""", HttpStatusCode.OK, json)
+                path == "/api/status" ->
+                    if (statusFails) respond("""{"message":"boom"}""", HttpStatusCode.InternalServerError, json)
+                    else respond("""{"Version":"$version"}""", HttpStatusCode.OK, json)
                 path == "/api/stacks" -> {
                     // After a create that "failed" on the wire, Portainer may still have made the stack.
                     val made = if (createdAnyway && createBodies.value.isNotEmpty()) """,{"Id":12,"Name":"web","Type":2,"EndpointId":1,"Status":4}""" else ""
@@ -344,6 +347,57 @@ class CreateStackViewModelTest {
         vm.create()
         settle { vm.state.value.failedStackId != null }
         assertEquals(12, vm.state.value.failedStackId)
+    }
+
+    @Test
+    fun aCreateRefusedAsANameConflictDoesNotLookForAStackMadeAnyway() = createTest {
+        createStatus = HttpStatusCode.Conflict
+        createdAnyway = true // a stack of that name is listed: another one, which the 409 is about
+        val vm = model()
+        typed(vm, "web", file)
+        val listsBefore = requests.count { it == "GET /api/stacks" }
+        vm.create()
+        settle { vm.state.value.failure != null }
+        drain()
+        assertNull(vm.state.value.failedStackId)
+        // Only the name check before the create read the list; nothing looked it up after the 409.
+        assertEquals(listsBefore + 1, requests.count { it == "GET /api/stacks" }, requests.toString())
+    }
+
+    @Test
+    fun anUnreadableVersionRefusesARepositoryCreateUntilItIsReadAgain() = createTest {
+        statusFails = true
+        val vm = model()
+        assertTrue(vm.state.value.versionUnknown)
+        vm.setMethod(CreateMethod.Repository)
+        vm.setName("app")
+        vm.editGit { copy(url = "https://git.example/app.git") }
+        assertTrue(vm.state.value.canCreate)
+        vm.create()
+        assertEquals(VERSION_UNKNOWN_MESSAGE, vm.state.value.error)
+        settle { requests.count { it == "GET /api/status" } == 2 }
+        drain()
+        assertTrue(createBodies.value.isEmpty())
+        assertTrue(vm.state.value.versionUnknown)
+        // Once the version can be read again, the next try goes ahead.
+        statusFails = false
+        vm.clearError()
+        vm.create() // still refused; the version is read again meanwhile
+        assertEquals(VERSION_UNKNOWN_MESSAGE, vm.state.value.error)
+        settle { !vm.state.value.versionUnknown }
+        vm.clearError()
+        vm.create()
+        settle { vm.state.value.created != null }
+        assertEquals(1, createBodies.value.size)
+    }
+
+    @Test
+    fun anUnreadableVersionStillAllowsAWebEditorCreate() = createTest {
+        statusFails = true
+        val vm = model()
+        typed(vm, "web", file)
+        vm.create()
+        settle { vm.state.value.created != null }
     }
 
     @Test

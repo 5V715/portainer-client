@@ -61,11 +61,17 @@ data class TransferForm(
     val protectedWarning: Boolean = false,
     /** The source has "prune services" on: CE's create requests have no such field, so the copy starts with it off. */
     val pruneNotCopied: Boolean = false,
+    /** Migrate: the screen holds unsaved editor or git settings edits, which the migrate throws away. */
+    val unsavedEdits: Boolean = false,
     val running: Boolean = false,
     val error: String? = null,
 ) {
     val reminder: String? get() = CONNECTION_DEPENDENCY_REMINDER.takeIf { mode == TransferMode.Migrate }
     val needsTypedName: Boolean get() = mode == TransferMode.Migrate
+
+    /** Said in the migrate sheet when the screen's edits would be lost, as the delete confirmation does. */
+    val unsavedEditsNote: String?
+        get() = "Your unsaved changes on this screen are discarded.".takeIf { mode == TransferMode.Migrate && unsavedEdits }
 
     /** The name the stack gets on the target; a migrate with an empty field keeps its name. */
     val effectiveName: String get() = name.trim().ifEmpty { if (mode == TransferMode.Migrate) sourceName else "" }
@@ -184,6 +190,7 @@ fun TransferSheet(
             if (!migrate && form.protectedWarning) {
                 Text(PROTECTED_IMAGE_CREATE_WARNING, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             }
+            form.unsavedEditsNote?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
             form.reminder?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
             if (form.needsTypedName) {
                 OutlinedTextField(

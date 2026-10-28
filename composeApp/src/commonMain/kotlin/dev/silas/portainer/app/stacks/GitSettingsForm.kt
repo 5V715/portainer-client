@@ -110,11 +110,20 @@ internal fun GitSettingsForm.settingsDifferFrom(o: GitSettingsForm): Boolean =
         authKey != o.authKey || password.isNotEmpty() || tlsSkipVerify != o.tlsSkipVerify || autoUpdateKey != o.autoUpdateKey
 
 /**
- * Saving [this] makes Portainer start redeploying by itself: automatic updates turned on, or polling started
- * (also webhook → polling while on).
+ * Saving [this] over the stored [o] can make Portainer redeploy the stack by itself: automatic updates turned on, or
+ * polling started (also webhook → polling while on); with automatic updates staying on, a changed reference or compose
+ * path (the next poll or webhook deploys it), a changed env with Force redeployment on (it is deployed even when the
+ * repository didn't change), or Force redeployment turned on for polling (the next poll redeploys).
  */
-internal fun GitSettingsForm.startsAutoRedeploysFrom(o: GitSettingsForm): Boolean =
-    (autoUpdateEnabled && !o.autoUpdateEnabled) || (pollingInterval.isNotEmpty() && o.pollingInterval.isEmpty())
+internal fun GitSettingsForm.mayAutoRedeployFrom(o: GitSettingsForm): Boolean {
+    if (!autoUpdateEnabled) return false
+    val turnedOn = !o.autoUpdateEnabled || (pollingInterval.isNotEmpty() && o.pollingInterval.isEmpty())
+    val deployedFilesChanged = referenceName.trim() != o.referenceName.trim() || configFilePath.trim() != o.configFilePath.trim() ||
+        additionalPaths != o.additionalPaths
+    val forcedEnv = forceUpdate && effectiveEnv != o.effectiveEnv
+    val forcedPolling = forceUpdate && !o.forceUpdate && pollingInterval.isNotEmpty()
+    return turnedOn || deployedFilesChanged || forcedEnv || forcedPolling
+}
 
 /** What the shared GitOps Source gets for [this] over [o], or null when none of its fields changed. */
 internal fun GitSettingsForm.sourceUpdateFrom(o: GitSettingsForm, pollingOnSource: Boolean): GitSourceUpdate? {

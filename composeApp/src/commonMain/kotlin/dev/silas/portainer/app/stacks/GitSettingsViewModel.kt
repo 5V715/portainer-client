@@ -35,9 +35,15 @@ const val SAVE_SETTINGS_FIRST_MESSAGE =
 @OptIn(ExperimentalUuidApi::class)
 internal fun randomWebhookId(): String = Uuid.random().toString()
 
-/** Save confirmation: what is saved, the shared-source warning, and the connection reminder. */
-data class GitSaveConfirm(val changes: List<String>, val sharedWarning: String?) {
+/**
+ * Save confirmation: what is saved, the shared-source warning, and the connection reminder. [baseline] is the stored
+ * settings the changes were listed against: the save is refused when the stack no longer has them.
+ */
+data class GitSaveConfirm(val changes: List<String>, val sharedWarning: String?, internal val baseline: GitSettingsForm? = null) {
     val reminder: String get() = CONNECTION_DEPENDENCY_REMINDER
+
+    // The baseline holds env values.
+    override fun toString(): String = "GitSaveConfirm(changes=${changes.size}, sharedWarning=$sharedWarning)"
 }
 
 /** What a pull and redeploy will use. [previousReferenceName] is set when the reference changes with it. */
@@ -50,6 +56,8 @@ data class GitRedeployReview(
     val pullImage: Boolean,
     /** The stack is stopped: the redeploy starts it. */
     val startsStack: Boolean,
+    /** The stored settings the review was made from: the redeploy is refused when the stack no longer has them. */
+    internal val baseline: GitSettingsForm? = null,
 ) {
     val reminder: String get() = CONNECTION_DEPENDENCY_REMINDER
 
@@ -321,14 +329,23 @@ class GitSettingsViewModel(
         else -> null
     }
 
-    private fun startsAutoRedeploys(s: GitSettingsState): Boolean {
+    private fun mayAutoRedeploy(s: GitSettingsState): Boolean {
         val f = s.form ?: return false
         val o = s.original ?: return false
-        return f.startsAutoRedeploysFrom(o)
+        return f.mayAutoRedeployFrom(o)
     }
 
+    /** What is sent depends on the version (paths, Sources, polling): without it nothing is saved or redeployed. */
+    private fun versionRefusal(d: StackDetailState): String? = VERSION_UNKNOWN_MESSAGE.takeIf { d.versionUnknown }
+
     private fun saveRefusal(s: GitSettingsState, d: StackDetailState): String? =
-        commonRefusal(d) ?: protectionRefusal(d).takeIf { startsAutoRedeploys(s) }
+        commonRefusal(d) ?: versionRefusal(d) ?: protectionRefusal(d).takeIf { mayAutoRedeploy(s) }
+
+    /** The stack as re-read no longer has the settings a confirmation was made from. */
+    private fun changedSince(baseline: GitSettingsForm?, d: StackDetailState): Boolean {
+        val stack = d.stack ?: return false // the caller says it couldn't be loaded
+        return baseline == null || formFrom(stack) != baseline
+    }
 
     fun requestSave() {
         val s = _state.value
@@ -337,7 +354,7 @@ class GitSettingsViewModel(
             _state.update { it.copy(error = reason) }
             return
         }
-        _state.update { it.copy(saveConfirm = GitSaveConfirm(changeList(s), s.sharedWarning)) }
+        _state.update { it.copy(saveConfirm = GitSaveConfirm(changeList(s), s.sharedWarning, baseline = s.original)) }
     }
 
     private fun changeList(s: GitSettingsState): List<String> {
@@ -348,19 +365,23 @@ class GitSettingsViewModel(
 
     fun dismissSave() = _state.update { it.copy(saveConfirm = null) }
 
-    /** Builds the request (the typed password goes into it and out of the state), checks again, then saves. */
+    /**
+     * Checks the stack again, then builds the request from what was just read (the typed password goes into it; the
+     * state dropped it already) and saves. A stack whose stored settings changed since the confirmation is refused.
+     */
     fun confirmSave() {
         val s = _state.value
-        if (s.saveConfirm == null) return
-        val stack = detail.state.value.stack
-        val request = stack?.let { buildSettings(s, it) }
+        val confirm = s.saveConfirm ?: return
         _state.update { it.copy(saveConfirm = null, checking = true, form = it.form?.copy(password = "")) }
         viewModelScope.launch {
             try {
                 detail.reloadNow()
                 val d = detail.state.value
-                val refusal = saveRefusal(_state.value.copy(form = s.form), d)
-                val id = d.stack?.id
+                val checked = s.copy(original = confirm.baseline)
+                val refusal = saveRefusal(checked, d) ?: STACK_CHANGED_MESSAGE.takeIf { changedSince(confirm.baseline, d) }
+                val stack = d.stack
+                val id = stack?.id
+                val request = stack?.let { buildSettings(checked.copy(sourceId = it.git?.sourceId?.takeIf { d.features.savedGitCredentials }), it) }
                 when {
                     refusal != null -> _state.update { it.copy(error = refusal) }
                     id == null || request == null -> _state.update { it.copy(error = "The stack couldn't be loaded — try again.") }
@@ -408,6 +429,8 @@ class GitSettingsViewModel(
 
     private fun redeployRefusal(d: StackDetailState): String? = commonRefusal(d) ?: protectionRefusal(d)
 
+    private fun gitRedeployRefusal(d: StackDetailState): String? = redeployRefusal(d) ?: versionRefusal(d)
+
     /** Opens the review: the form's reference and env with the stored paths and credentials. */
     fun requestRedeploy() {
         val s = _state.value
@@ -415,7 +438,7 @@ class GitSettingsViewModel(
         val o = s.original ?: return
         if (!s.available || s.busy || s.redeployReview != null) return
         val d = detail.state.value
-        val refusal = redeployRefusal(d)
+        val refusal = gitRedeployRefusal(d)
             // Only the reference and env go with a redeploy; anything else edited must be saved (or undone) first.
             ?: SAVE_SETTINGS_FIRST_MESSAGE.takeIf { s.copy(form = f.copy(referenceName = o.referenceName)).settingsChanged }
             ?: f.envErrors.firstOrNull()
@@ -434,6 +457,7 @@ class GitSettingsViewModel(
             envChanges = envDiff(o.effectiveEnv, f.effectiveEnv),
             pullImage = false,
             startsStack = stack.status == StackStatus.Inactive,
+            baseline = o,
         )
         _state.update { it.copy(redeployReview = review) }
     }
@@ -452,7 +476,7 @@ class GitSettingsViewModel(
                 val stack = d.stack
                 val git = stack?.git
                 val id = stack?.id
-                val refusal = redeployRefusal(d)
+                val refusal = gitRedeployRefusal(d) ?: STACK_CHANGED_MESSAGE.takeIf { changedSince(review.baseline, d) }
                 when {
                     refusal != null -> _state.update { it.copy(error = refusal) }
                     stack == null || id == null || git == null -> _state.update { it.copy(error = "The stack couldn't be loaded — try again.") }

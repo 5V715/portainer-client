@@ -35,8 +35,18 @@ const val PROTECTION_UNKNOWN_MESSAGE = "Couldn't check whether this stack runs P
 /** A web-editor stack's file is what a duplicate copies. */
 const val DUPLICATE_FILE_UNREADABLE_MESSAGE = "The stack's compose file couldn't be read, so it can't be copied."
 
+/** The stack read right before an operation is not the one its confirmation or review showed. */
+const val STACK_CHANGED_MESSAGE = "The stack changed — check it and try again."
+
+/** `GET /api/status` failed: version-gated requests (git settings, redeploy, repository creates) would be guesses. */
+const val VERSION_UNKNOWN_MESSAGE = "Couldn't read the Portainer version — try again."
+
 /** Portainer CE can't act on stacks it didn't create (its own UI offers nothing for them). */
 const val EXTERNAL_STACK_MESSAGE = "Portainer did not create this stack, so it can only be viewed here."
+
+/** The stack screen holds edits that leaving it (or a delete or migrate) would throw away. */
+fun stackScreenHasUnsavedEdits(editor: StackEditorState, git: GitSettingsState): Boolean =
+    editor.hasUnsavedChanges || git.hasUnsavedChanges
 
 /** Operations the detail screen offers for the stack as loaded; external stacks get none. */
 fun availableStackOps(state: StackDetailState): List<StackOp> {
@@ -75,7 +85,12 @@ fun transferRefusal(state: StackDetailState, mode: TransferMode): String? {
     if (stack.status == StackStatus.Deploying) return STACK_DEPLOYING_MESSAGE
     return when (mode) {
         TransferMode.Migrate -> stackOpRefusal(state, StackOp.Migrate(targetEndpointId = 0, newName = null))
-        TransferMode.Duplicate -> if (stack.git == null && state.file == null) DUPLICATE_FILE_UNREADABLE_MESSAGE else null
+        TransferMode.Duplicate -> when {
+            stack.git == null && state.file == null -> DUPLICATE_FILE_UNREADABLE_MESSAGE
+            // A git copy is a repository create: its credentials and Source depend on the version.
+            stack.git != null && state.versionUnknown -> VERSION_UNKNOWN_MESSAGE
+            else -> null
+        }
     }
 }
 
@@ -84,7 +99,7 @@ data class StackConfirm(
     val op: StackOp,
     val stackName: String,
     val typedName: String = "",
-    /** The editor has unsaved edits; deleting the stack throws them away. */
+    /** The editor or the git settings have unsaved edits; deleting the stack throws them away. */
     val unsavedEdits: Boolean = false,
 ) {
     init {
@@ -101,7 +116,7 @@ data class StackConfirm(
     val body: String
         get() = if (op == StackOp.Delete) {
             "The stack and its containers are removed from Portainer and Docker. Its volumes are kept. This can't be undone." +
-                if (unsavedEdits) " Your unsaved changes in the editor are discarded too." else ""
+                if (unsavedEdits) " Your unsaved changes on this screen are discarded too." else ""
         } else {
             "All of the stack's containers are stopped."
         }

@@ -15,12 +15,12 @@ import dev.silas.portainer.core.api.stacks
 import dev.silas.portainer.core.api.status
 import dev.silas.portainer.core.model.AutoUpdate
 import dev.silas.portainer.core.model.EnvVar
-import dev.silas.portainer.core.recreate.isProtectedImage
 import dev.silas.portainer.core.stacks.ComposeAnalysis
 import dev.silas.portainer.core.stacks.ComposeWarning
 import dev.silas.portainer.core.stacks.StackFeatures
 import dev.silas.portainer.core.stacks.YamlError
 import dev.silas.portainer.core.stacks.analyzeCompose
+import dev.silas.portainer.core.stacks.composeImagesProtected
 import dev.silas.portainer.core.stacks.stackFeatures
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -63,9 +63,11 @@ fun stackNameError(name: String, existing: Collection<String>): String? =
 private val TEMPLATE_TAG = Regex("""\{\{\{\s*([^{}]+?)\s*\}\}\}|\{\{\s*&?\s*([^{}]+?)\s*\}\}""")
 
 /**
- * Fills a custom template's [variables] into [file] as CE's UI does (Mustache without HTML escaping): the entered
- * value, else the variable's default, else the tag stays as `{{ NAME }}`. Tags that aren't template variables are
- * left exactly as written (CE's Mustache would blank them, which would break Go-template strings in a compose file).
+ * Fills a custom template's [variables] into [file] as CE's UI does (Mustache without HTML escaping): a value from
+ * [values], else the variable's default, else the tag stays as `{{ NAME }}`. The app has no variable inputs (CE's are
+ * Business Edition only), so it passes no [values]: the defaults are what is filled in. Tags that aren't template
+ * variables are left exactly as written (CE's Mustache would blank them, which would break Go-template strings in a
+ * compose file).
  */
 fun renderCustomTemplate(file: String, variables: List<TemplateVariable>, values: Map<String, String>): String {
     val byName = variables.associateBy { it.name }
@@ -108,6 +110,8 @@ data class CreateStackState(
     val existingNames: Set<String> = emptySet(),
     val loadingNames: Boolean = true,
     val features: StackFeatures = stackFeatures(""),
+    /** The server's version couldn't be read: [features] are all off, and a repository create is refused. */
+    val versionUnknown: Boolean = false,
     /** The server's base URL, for the webhook URL. */
     val baseUrl: String = "",
     // Web editor (also filled by an upload or a template).
@@ -164,7 +168,7 @@ data class CreateStackState(
 
     /** A protected image in the new file is allowed (nothing running is touched) but said. */
     val protectedWarning: String?
-        get() = PROTECTED_IMAGE_CREATE_WARNING.takeIf { isText && analysis?.images.orEmpty().any(::isProtectedImage) }
+        get() = PROTECTED_IMAGE_CREATE_WARNING.takeIf { isText && composeImagesProtected(analysis?.images.orEmpty(), effectiveEnv) }
 
     /** On 2.44+ polling is set on the GitOps Source, which a new stack doesn't have yet: only the webhook. */
     val pollingAvailable: Boolean get() = !features.pollingOnSource
@@ -232,15 +236,7 @@ class CreateStackViewModel(
         }
         viewModelScope.launch {
             try {
-                val client = container.client(serverId)
-                val features = try {
-                    stackFeatures(client.status().version)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    stackFeatures("") // unknown version: every optional feature off
-                }
-                _state.update { it.copy(features = features) }
+                readFeatures()
                 loadNames()
             } catch (e: Exception) {
                 val message = failureMessage(e)
@@ -301,7 +297,8 @@ class CreateStackViewModel(
             p.error != null -> {
                 val id = p.stackId.takeIf { it != STACK_NOT_CREATED }
                 _state.update { it.copy(running = false, failure = p.error, failedStackId = id) }
-                if (id == null) findCreatedAnyway(key.stackName)
+                // A 409 (the name is taken) was refused before anything was created: the stack found would be another one.
+                if (id == null && p.httpStatus != 409) findCreatedAnyway(key.stackName)
             }
             else -> _state.update { it.copy(running = false, created = CreatedStack(p.stackId, key.stackName)) }
         }
@@ -478,10 +475,28 @@ class CreateStackViewModel(
         validate()
     }
 
+    /** The server's version gates; an unreadable one turns every optional feature off and marks the version unknown. */
+    private suspend fun readFeatures() {
+        val version = try {
+            container.client(serverId).status().version
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        _state.update { it.copy(features = stackFeatures(version.orEmpty()), versionUnknown = version == null) }
+    }
+
     /** Checks the name against the endpoint's stacks again, then starts the create in the app's stack sessions. */
     fun create() {
         val s = _state.value
         if (!s.canCreate) return
+        if (s.method == CreateMethod.Repository && s.versionUnknown) {
+            // What a repository create sends depends on the version: read it again for the next try.
+            _state.update { it.copy(error = VERSION_UNKNOWN_MESSAGE) }
+            viewModelScope.launch { readFeatures() }
+            return
+        }
         val name = s.name
         val op = if (s.method == CreateMethod.Repository) StackOp.Create.Repository(s.git.url.trim(), gitRequest(s)) else StackOp.Create.Text(s.text, s.effectiveEnv, fromTemplate = s.fromTemplate)
         _state.update { it.copy(checking = true, failure = null, failedStackId = null) }

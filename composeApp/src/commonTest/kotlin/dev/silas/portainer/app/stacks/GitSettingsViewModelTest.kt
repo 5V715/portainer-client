@@ -59,6 +59,11 @@ class GitSettingsViewModelTest {
     @Volatile private var fileFails = false
     /** POST /git answers 500 with a message that echoes what was sent as the password. */
     @Volatile private var settingsFailEcho = false
+    @Volatile private var storedRef = "refs/heads/main"
+    @Volatile private var prune = true
+    @Volatile private var statusFails = false
+    /** PUT /git/redeploy loses the connection. */
+    @Volatile private var redeployDrops = false
     private val apiKey = "secret-api-key"
     private var testEnv: TestEnv? = null
 
@@ -75,13 +80,13 @@ class GitSettingsViewModelTest {
     private fun stackJson(id: Int = 5, sourceId: Int = 7): String {
         val authJson = if (auth) ""","Authentication":{"Username":"deploy","Password":""}""" else ""
         val gitJson = if (git) {
-            ""","GitConfig":{"URL":"https://git.example/app.git","ReferenceName":"refs/heads/main","ConfigFilePath":"compose.yml"$authJson,"TLSSkipVerify":true},
+            ""","GitConfig":{"URL":"https://git.example/app.git","ReferenceName":"$storedRef","ConfigFilePath":"compose.yml"$authJson,"TLSSkipVerify":true},
             "AdditionalFiles":["override.yml"],"AutoUpdate":$autoUpdate""" + (if (sourced) ""","GitSourceId":$sourceId""" else "")
         } else {
             ""
         }
         return """{"Id":$id,"Name":"${if (id == 5) "shop" else "s$id"}","Type":2,"EndpointId":1,"Status":$status,
-            "Env":${if (id == 5) env else "[]"},"Option":{"Prune":true}$gitJson}"""
+            "Env":${if (id == 5) env else "[]"},"Option":{"Prune":$prune}$gitJson}"""
     }
 
     private suspend fun env(): TestEnv {
@@ -93,7 +98,9 @@ class GitSettingsViewModelTest {
                 bodies.update { it + ("${req.method.value} $path" to (text?.let { t -> Json.parseToJsonElement(t).jsonObject } ?: JsonObject(emptyMap()))) }
             }
             when {
-                path == "/api/status" -> respond("""{"Version":"$version"}""", HttpStatusCode.OK, json)
+                path == "/api/status" ->
+                    if (statusFails) respond("""{"message":"boom"}""", HttpStatusCode.BadGateway, json)
+                    else respond("""{"Version":"$version"}""", HttpStatusCode.OK, json)
                 path == "/api/stacks" -> respond("[${stackJson(5)},${stackJson(6)},${stackJson(8)},${stackJson(9, sourceId = 3)}]", HttpStatusCode.OK, json)
                 path == "/api/stacks/6" || path == "/api/stacks/8" -> respond(stackJson(path.substringAfterLast('/').toInt()), HttpStatusCode.OK, json)
                 path == "/api/stacks/9" -> respond(stackJson(9, sourceId = 3), HttpStatusCode.OK, json)
@@ -107,6 +114,7 @@ class GitSettingsViewModelTest {
                     }
                 }
                 path == "/api/stacks/5/git/redeploy" -> {
+                    if (redeployDrops) throw RuntimeException("connection reset $apiKey")
                     env = bodies.value.last().second["Env"].toString()
                     status = 1
                     respond(stackJson(), HttpStatusCode.OK, json)
@@ -677,4 +685,153 @@ class GitSettingsViewModelTest {
         val (detail, _) = loaded()
         assertEquals(listOf(StackDetailTab.Overview, StackDetailTab.File, StackDetailTab.Git), stackDetailTabs(detail.state.value))
     }
+
+    // ---- protected stacks: a save that would make Portainer redeploy by itself ----
+
+    private suspend fun TestScope.protectedLoaded(): GitSettingsViewModel {
+        image = "portainer/portainer-ce:2.42.0"
+        val (_, vm) = loaded()
+        assertTrue(vm.state.value.form!!.autoUpdateEnabled)
+        return vm
+    }
+
+    private fun GitSettingsViewModel.saveIsRefusedAsProtected() {
+        requestSave()
+        assertNull(state.value.saveConfirm)
+        assertEquals(PROTECTED_IMAGE_MESSAGE, state.value.error)
+        assertTrue(requests.none { it.startsWith("POST") })
+    }
+
+    @Test
+    fun protectedStackWithUpdatesOnMayNotChangeTheReference() = gitTest {
+        autoUpdate = """{"Interval":"5m","Webhook":"","ForceUpdate":false,"ForcePullImage":false}"""
+        val vm = protectedLoaded()
+        vm.edit { copy(referenceName = "refs/heads/dev") } // the next poll would deploy it
+        vm.saveIsRefusedAsProtected()
+    }
+
+    @Test
+    fun protectedStackWithUpdatesOnMayNotChangeTheComposePaths() = gitTest {
+        autoUpdate = """{"Interval":"","Webhook":"05de31a2-79fa-4644-9c12-faa67e5c49f0","ForceUpdate":false,"ForcePullImage":false}"""
+        val vm = protectedLoaded()
+        vm.edit { copy(configFilePath = "other.yml") }
+        vm.saveIsRefusedAsProtected()
+        vm.clearError()
+        vm.edit { copy(configFilePath = "compose.yml", additionalFiles = "") }
+        vm.saveIsRefusedAsProtected()
+    }
+
+    @Test
+    fun protectedStackWithForcedUpdatesMayNotChangeTheEnv() = gitTest {
+        val vm = protectedLoaded() // polling with Force redeployment on
+        assertTrue(vm.state.value.form!!.forceUpdate)
+        vm.setEnvRow(0, EnvVar("A", "2"))
+        vm.saveIsRefusedAsProtected()
+        vm.clearError()
+        // Without Force redeployment a changed env is only deployed with a repository change: it may be saved.
+        vm.edit { copy(forceUpdate = false) }
+        vm.requestSave()
+        assertNotNull(vm.state.value.saveConfirm)
+    }
+
+    @Test
+    fun protectedStackWithUpdatesOffMayChangeTheReference() = gitTest {
+        autoUpdate = "null"
+        image = "portainer/portainer-ce:2.42.0"
+        val (_, vm) = loaded()
+        vm.edit { copy(referenceName = "refs/heads/dev") }
+        vm.requestSave()
+        assertNotNull(vm.state.value.saveConfirm, vm.state.value.error)
+    }
+
+    // ---- stale confirmations ----
+
+    @Test
+    fun aSaveIsRefusedWhenTheStoredSettingsChangedSinceTheConfirmation() = gitTest {
+        val (_, vm) = loaded()
+        vm.edit { copy(tlsSkipVerify = false) }
+        vm.requestSave()
+        assertNotNull(vm.state.value.saveConfirm)
+        storedRef = "refs/heads/other" // changed elsewhere: the save would send the old reference back
+        vm.confirmSave()
+        settle { !vm.state.value.checking }
+        assertEquals(STACK_CHANGED_MESSAGE, vm.state.value.error)
+        assertTrue(requests.none { it.startsWith("POST") })
+        assertFalse(vm.state.value.form!!.tlsSkipVerify, "the edits are kept")
+    }
+
+    @Test
+    fun aSaveBuildsItsRequestFromTheStackReadRightBeforeIt() = gitTest {
+        val (_, vm) = loaded()
+        vm.edit { copy(tlsSkipVerify = false) }
+        vm.requestSave()
+        prune = false // not a git setting (no change to refuse): what is sent is what the stack has now
+        vm.confirmSave()
+        finished(vm)
+        assertEquals("Git settings saved", vm.state.value.notice)
+        assertEquals("false", sent("POST /api/stacks/5/git")["Prune"].toString())
+    }
+
+    @Test
+    fun aRedeployIsRefusedWhenTheStoredSettingsChangedSinceTheReview() = gitTest {
+        val (_, vm) = loaded()
+        vm.requestRedeploy()
+        assertNotNull(vm.state.value.redeployReview)
+        env = """[{"name":"A","value":"other"}]""" // the review's env changes no longer describe what is replaced
+        vm.confirmRedeploy()
+        settle { !vm.state.value.checking }
+        assertEquals(STACK_CHANGED_MESSAGE, vm.state.value.error)
+        assertTrue(requests.none { it.startsWith("PUT") })
+    }
+
+    // ---- unknown server version ----
+
+    @Test
+    fun anUnreadableVersionRefusesSaveAndRedeploy() = gitTest {
+        statusFails = true
+        val (detail, vm) = loaded()
+        assertTrue(detail.state.value.versionUnknown)
+        vm.edit { copy(tlsSkipVerify = false) }
+        vm.requestSave()
+        assertNull(vm.state.value.saveConfirm)
+        assertEquals(VERSION_UNKNOWN_MESSAGE, vm.state.value.error)
+        vm.clearError()
+        vm.edit { copy(tlsSkipVerify = true) }
+        vm.requestRedeploy()
+        assertNull(vm.state.value.redeployReview)
+        assertEquals(VERSION_UNKNOWN_MESSAGE, vm.state.value.error)
+        assertTrue(requests.none { it.startsWith("POST") || it.startsWith("PUT") })
+    }
+
+    @Test
+    fun aVersionLostBeforeTheConfirmRefusesTheSave() = gitTest {
+        val (_, vm) = loaded()
+        vm.edit { copy(tlsSkipVerify = false) }
+        vm.requestSave()
+        assertNotNull(vm.state.value.saveConfirm)
+        statusFails = true
+        vm.confirmSave()
+        settle { !vm.state.value.checking }
+        assertEquals(VERSION_UNKNOWN_MESSAGE, vm.state.value.error)
+        assertTrue(requests.none { it.startsWith("POST") })
+    }
+
+    // ---- network loss ----
+
+    @Test
+    fun aRedeployCutOffByTheNetworkFailsAndClaimsNothing() = gitTest {
+        redeployDrops = true
+        val (_, vm) = loaded()
+        vm.setEnvRow(0, EnvVar("A", "2"))
+        vm.requestRedeploy()
+        vm.confirmRedeploy()
+        finished(vm)
+        val (op, message) = assertNotNull(vm.state.value.failure)
+        assertIs<StackOp.GitRedeploy>(op)
+        assertFalse(message.contains(apiKey), message)
+        assertNull(vm.state.value.notice)
+        assertEquals(EnvVar("A", "2"), vm.state.value.form!!.env[0], "the edits are kept")
+        vm.clearFailure()
+    }
 }
+
